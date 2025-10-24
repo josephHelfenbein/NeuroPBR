@@ -1,0 +1,3 @@
+[submodule "dataset/external/MatSynth"]
+	path = dataset/external/MatSynth
+	url = https://huggingface.co/datasets/gvecchio/MatSynth
