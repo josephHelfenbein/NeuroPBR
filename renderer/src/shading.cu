@@ -1,39 +1,28 @@
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <math.h>
+#include "utils.cuh"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
 
-__device__ inline void dirToLatLong(float dx, float dy, float dz, float *u, float *v) {
-    float theta = atan2f(dz, dx);
-    float clamp_y = fmaxf(-1.0f, fminf(1.0f, dy));
-    float phi = asinf(clamp_y);
-
-    *u = 0.5f + theta * (1.0f / (2.0f * M_PI));
-    *v = 0.5f - phi * (1.0f / M_PI);
-
-    *u = *u - floorf(*u);
-    if (*v < 0.0f) *v = 0.0f;
-    if (*v > 1.0f) *v = 1.0f;
-}
 
 extern "C" __global__
-void shadeKernel(cudaTextureObject_t env_tex,
-                  cudaTextureObject_t irradiance_tex,
-                  cudaTextureObject_t brdf_lut_tex,
-                  const float* albedo, const float* normal_map,
+void shadeKernel(cudaTextureObject_t envTex,
+                  cudaTextureObject_t irradianceTex,
+                  cudaTextureObject_t brdfLutTex,
+                  const float* albedo, const float* normal,
                   const float* roughness, const float* metallic,
-                  float* out_rgba, int W, int H,
-                  float cam_x, float cam_y, float cam_z) {
+                  float* outRGBA, int W, int H,
+                  float camX, float camY, float camZ) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= W || y >= H) return;
     int idx = y * W + x;
 
     float ax = albedo[3*idx+0], ay = albedo[3*idx+1], az = albedo[3*idx+2];
-    float nx = normal_map[3*idx+0], ny = normal_map[3*idx+1], nz = normal_map[3*idx+2];
+    float nx = normal[3*idx+0], ny = normal[3*idx+1], nz = normal[3*idx+2];
 
     float nlen = sqrtf(nx*nx + ny*ny + nz*nz) + 1e-8f;
     nx /= nlen;
@@ -46,7 +35,7 @@ void shadeKernel(cudaTextureObject_t env_tex,
     float px = ((x + 0.5f) / W - 0.5f) * 1.0f;
     float py = ((y + 0.5f) / H - 0.5f) * 1.0f;
     float pz = 0.0f;
-    float vx = cam_x - px, vy = cam_y - py, vz = cam_z - pz;
+    float vx = camX - px, vy = camY - py, vz = camZ - pz;
     float vlen = sqrtf(vx*vx+vy*vy+vz*vz)+1e-8f;
     vx/=vlen;
     vy/=vlen;
@@ -64,7 +53,7 @@ void shadeKernel(cudaTextureObject_t env_tex,
 
     float iu, iv;
     dirToLatLong(nx, ny, nz, &iu, &iv);
-    float4 irrSample = tex2D<float4>(irradiance_tex, iu, iv);
+    float4 irrSample = tex2D<float4>(irradianceTex, iu, iv);
     float irradiance_r = irrSample.x;
     float irradiance_g = irrSample.y;
     float irradiance_b = irrSample.z;
@@ -76,26 +65,26 @@ void shadeKernel(cudaTextureObject_t env_tex,
 
     float eu, ev;
     dirToLatLong(rx, ry, rz, &eu, &ev);
-    float4 envSample = tex2D<float4>(env_tex, eu, ev);
+    float4 envSample = tex2D<float4>(envTex, eu, ev);
     float envx = envSample.x;
     float envy = envSample.y;
     float envz = envSample.z;
 
-    float lut_u = NdotV;
-    float lut_v = r;
-    float lutx = tex2D<float2>(brdf_lut_tex, lut_u, lut_v).x;
-    float luty = tex2D<float2>(brdf_lut_tex, lut_u, lut_v).y;
+    float lutU = NdotV;
+    float lutV = r;
+    float lutx = tex2D<float2>(brdfLutTex, lutU, lutV).x;
+    float luty = tex2D<float2>(brdfLutTex, lutU, lutV).y;
 
     float spec_r = envx * (F0x * lutx + luty);
     float spec_g = envy * (F0y * lutx + luty);
     float spec_b = envz * (F0z * lutx + luty);
 
-    float out_r = diffuse.x + spec_r;
-    float out_g = diffuse.y + spec_g;
-    float out_b = diffuse.z + spec_b;
+    float outR = diffuse.x + spec_r;
+    float outG = diffuse.y + spec_g;
+    float outB = diffuse.z + spec_b;
 
-    out_rgba[4*idx + 0] = out_r;
-    out_rgba[4*idx + 1] = out_g;
-    out_rgba[4*idx + 2] = out_b;
-    out_rgba[4*idx + 3] = 1.0f;
+    outRGBA[4*idx + 0] = outR;
+    outRGBA[4*idx + 1] = outG;
+    outRGBA[4*idx + 2] = outB;
+    outRGBA[4*idx + 3] = 1.0f;
 }
