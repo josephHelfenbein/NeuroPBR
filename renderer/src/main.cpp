@@ -4,7 +4,11 @@
 #include <iostream>
 #include <stdexcept>
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 2) {
+        std::cerr << "Usage: " << argv[0] << " <textures directory>" << std::endl;
+        return 1;
+    }
     try {
         CUDA_CHECK(cudaSetDevice(0));
 
@@ -28,37 +32,40 @@ int main() {
         BRDFLookupTable brdfLut = createBRDFLUT(512);
         loadBRDFLUT(brdfLut);
 
-        std::cout << "Precomputation complete. Starting rendering." << std::endl;
+        std::cout << "Precomputation complete. Starting rendering. Press CTRL+C to stop." << std::endl;
 
-        std::vector<float4> frameRGBA;
-        FloatImage dAlbedo = loadPNGImage(std::filesystem::path("assets") / "textures" / "albedo.png", 3, true);
-        FloatImage dNormal = loadPNGImage(std::filesystem::path("assets") / "textures" / "normal.png", 3, true);
-        FloatImage dRoughness = loadPNGImage(std::filesystem::path("assets") / "textures" / "roughness.png", 1, true);
-        FloatImage dMetallic = loadPNGImage(std::filesystem::path("assets") / "textures" / "metallic.png", 1, true);
-        const int W = dAlbedo.width;
-        const int H = dAlbedo.height;
-
-        if (dNormal.width != W || dNormal.height != H ||
-            dRoughness.width != W || dRoughness.height != H ||
-            dMetallic.width != W || dMetallic.height != H) {
-            throw std::runtime_error("All texture maps must share the same dimensions.");
+        std::vector<std::string> textureNames;
+        const std::filesystem::path texturesDir = argv[1];
+        for (const auto& entry : std::filesystem::directory_iterator(texturesDir)) {
+            if (entry.is_directory()) {
+                textureNames.push_back(entry.path().filename().string());
+            }
         }
+        int W = 0, H = 0, frameIndex = 0;
+        while (true) {
+            int randomTexIndex = rand() % static_cast<int>(textureNames.size());
+            int randomEnvIndex = rand() % static_cast<int>(environments.size());
+            std::vector<float4> frameRGBA;
+            FloatImage dAlbedo = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "albedo.png", 3, true);
+            FloatImage dNormal = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "normal.png", 3, true);
+            FloatImage dRoughness = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "roughness.png", 1, true);
+            FloatImage dMetallic = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "metallic.png", 1, true);
+            W = dAlbedo.width;
+            H = dAlbedo.height;
 
-        if (dAlbedo.channels != 3 || dNormal.channels != 3 ||
-            dRoughness.channels != 1 || dMetallic.channels != 1) {
-            throw std::runtime_error("Unexpected channel count in texture maps. Expected RGB for albedo/normal and single channel for roughness/metallic.");
+            renderPlane(environments[randomEnvIndex], brdfLut,
+                        dAlbedo.data.data(), dNormal.data.data(),
+                        dRoughness.data.data(), dMetallic.data.data(),
+                        W, H, frameRGBA);
+
+            std::filesystem::path outputPath = std::filesystem::path("output") / "render" + std::to_string(frameIndex++) + ".png";
+            std::filesystem::create_directories(outputPath.parent_path());
+            writePNGImage(outputPath, frameRGBA.data(), W, H, true);
+
+            appendRenderMetadata(std::filesystem::path("output") / "render_metadata.json",
+                                 outputPath.filename().string(),
+                                 textureNames[randomTexIndex]);
         }
-
-        renderPlane(environments[0], brdfLut,
-                    dAlbedo.data.data(), dNormal.data.data(),
-                    dRoughness.data.data(), dMetallic.data.data(),
-                    W, H, frameRGBA);
-
-        std::filesystem::path outputPath = std::filesystem::path("output") / "renderedPlane.png";
-        std::filesystem::create_directories(outputPath.parent_path());
-        writePNGImage(outputPath, frameRGBA.data(), W, H, true);
-
-        std::cout << "Rendering complete. Output saved to " << outputPath << std::endl;
         
         return 0;
     } catch (const CudaError& e) {

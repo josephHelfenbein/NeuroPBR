@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -22,6 +24,30 @@ constexpr float kFloatToByte = 255.0f;
 inline uint8_t toByte(float value) {
     float clamped = std::clamp(value, 0.0f, 1.0f);
     return static_cast<uint8_t>(std::lround(clamped * kFloatToByte));
+}
+
+inline std::string escapeJsonString(const std::string& input) {
+    std::string escaped;
+    escaped.reserve(input.size() + 8);
+    for (char c : input) {
+        switch (c) {
+            case '\\': escaped += "\\\\"; break;
+            case '"': escaped += "\\\""; break;
+            case '\n': escaped += "\\n"; break;
+            case '\r': escaped += "\\r"; break;
+            case '\t': escaped += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buffer[7];
+                    std::snprintf(buffer, sizeof(buffer), "\\u%04x", static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                    escaped += buffer;
+                } else {
+                    escaped += c;
+                }
+                break;
+        }
+    }
+    return escaped;
 }
 
 FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChannels, bool flipY) {
@@ -120,4 +146,24 @@ void writePNGImage(const std::filesystem::path& filePath, const float4* frameDat
         throw std::runtime_error("Failed to write PNG image");
     }
     stbi_flip_vertically_on_write(0);
+}
+
+void appendRenderMetadata(const std::filesystem::path& metadataPath,
+                          const std::string& renderFilename,
+                          const std::string& materialName) {
+    if (metadataPath.has_parent_path()) {
+        std::error_code ec;
+        std::filesystem::create_directories(metadataPath.parent_path(), ec);
+        if (ec) {
+            throw std::runtime_error("Failed to create metadata directory: " + ec.message());
+        }
+    }
+
+    std::ofstream out(metadataPath, std::ios::app);
+    if (!out) {
+        throw std::runtime_error("Failed to open metadata file for append: " + metadataPath.string());
+    }
+
+    out << "{\"render\":\"" << escapeJsonString(renderFilename)
+        << "\",\"material\":\"" << escapeJsonString(materialName) << "\"}\n";
 }
