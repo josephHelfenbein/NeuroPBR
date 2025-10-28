@@ -57,10 +57,15 @@ FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChanne
 
     const size_t texelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     const size_t srcStride = static_cast<size_t>(actualChannels);
+    const std::int64_t texelCount64 = static_cast<std::int64_t>(texelCount);
 
-    for (size_t i = 0; i < texelCount; ++i) {
-        const unsigned char* src = rawData + i * srcStride;
-        float* dst = image.data.data() + i * desiredChannels;
+#ifdef USE_OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (std::int64_t i = 0; i < texelCount64; ++i) {
+        size_t idx = static_cast<size_t>(i);
+        const unsigned char* src = rawData + idx * srcStride;
+        float* dst = image.data.data() + idx * desiredChannels;
 
         if (desiredChannels == 1) {
             // Roughness/metallic read the red channel from RGB(A) textures
@@ -93,16 +98,21 @@ void writePNGImage(const std::filesystem::path& filePath, const float4* frameDat
 
     stbi_flip_vertically_on_write(flipY ? 1 : 0);
 
-    std::vector<uint8_t> rawPixels(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const float4& pixel = frameData[static_cast<size_t>(y) * width + x];
-            size_t dstIndex = (static_cast<size_t>(y) * width + x) * 4;
-            rawPixels[dstIndex + 0] = toByte(pixel.x);
-            rawPixels[dstIndex + 1] = toByte(pixel.y);
-            rawPixels[dstIndex + 2] = toByte(pixel.z);
-            rawPixels[dstIndex + 3] = toByte(pixel.w);
-        }
+    const size_t texelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    std::vector<uint8_t> rawPixels(texelCount * 4u);
+    const std::int64_t texelCount64 = static_cast<std::int64_t>(texelCount);
+
+#ifdef USE_OPENMP
+    #pragma omp parallel for schedule(static)
+#endif
+    for (std::int64_t i = 0; i < texelCount64; ++i) {
+        size_t idx = static_cast<size_t>(i);
+        const float4& pixel = frameData[idx];
+        size_t dstIndex = idx * 4u;
+        rawPixels[dstIndex + 0] = toByte(pixel.x);
+        rawPixels[dstIndex + 1] = toByte(pixel.y);
+        rawPixels[dstIndex + 2] = toByte(pixel.z);
+        rawPixels[dstIndex + 3] = toByte(pixel.w);
     }
 
     std::string utf8Path = filePath.string();

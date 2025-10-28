@@ -53,6 +53,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   ${CMAKE_SOURCE_DIR}/include/stb
   ${CUDAToolkit_INCLUDE_DIRS}
 )
+
+if (OpenMP_CXX_FOUND)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OPENMP=1)
+endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   RUNTIME_OUTPUT_DIRECTORY      ${CMAKE_SOURCE_DIR}/bin

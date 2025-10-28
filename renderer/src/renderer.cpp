@@ -284,6 +284,9 @@ HDRImage loadHDRImage(const std::filesystem::path& path) {
             }
         }
 
+#ifdef USE_OPENMP
+        #pragma omp parallel for schedule(static)
+#endif
         for (int x = 0; x < width; ++x) {
             unsigned char r = scanline[x + 0 * width];
             unsigned char g = scanline[x + 1 * width];
