@@ -146,7 +146,7 @@ backbone:
 'resnet101'
 'resnet152'
 """
-class UNetResNet(nn.Module):
+class UNetResNetEncoder(nn.Module):
     def __init__(
             self,
             in_channels,
@@ -162,24 +162,17 @@ class UNetResNet(nn.Module):
 
         self.encoder_stack = list(resnet.children())[:-2]
 
+        # Expand pretrained conv1 from 3 to in_channels
         if in_channels != 3:
-            # Save the pretrained weights
             original_weight = self.encoder_stack[0].weight.data.clone()  # [64, 3, 7, 7]
-
-            # Create new conv with expanded channels
             new_conv = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
 
-            # Initialize with pretrained weights (repeat and average)
-            new_weight = original_weight.repeat(1, in_channels // 3, 1, 1)
-            if in_channels % 3 != 0:
-                # Handle non-multiples of 3
-                extra = original_weight[:, :in_channels % 3, :, :]
-                new_weight = torch.cat([new_weight, extra], dim=1)
-
+            new_weight = original_weight.repeat(1, in_channels // 3, 1, 1) # [64, in_channels, 7, 7]
             new_weight = new_weight / (in_channels / 3.0)  # Average (normalize weight for each image)
             new_conv.weight.data = new_weight
 
             self.encoder_stack[0] = new_conv
+
         self.encoder_stack = nn.Sequential(*self.encoder_stack)
 
         self.skip = skip
