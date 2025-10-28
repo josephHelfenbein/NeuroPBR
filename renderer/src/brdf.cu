@@ -1,4 +1,4 @@
-#include "brdf.cuh"
+#include <brdf.cuh>
 
 __device__ float geometrySchlickGGX(float NdotV, float roughness) {
     float r = roughness + 1.0f;

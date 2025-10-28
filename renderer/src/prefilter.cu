@@ -1,4 +1,4 @@
-#include "prefilter.cuh"
+#include <prefilter.cuh>
 
 extern "C" __global__
 void equirectangularToCubemap(cudaTextureObject_t hdr_tex,

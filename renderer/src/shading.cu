@@ -1,9 +1,9 @@
-#include "shading.cuh"
+#include <shading.cuh>
 
 #include <device_launch_parameters.h>
 #include <math.h>
 
-#include "utils.cuh"
+#include <utils.cuh>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
