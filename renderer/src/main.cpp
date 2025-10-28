@@ -3,9 +3,11 @@
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <array>
+#include <string>
 
 int main(int argc, char** argv) {
-    if (argc != 2) {
+    if (argc != 3) {
         std::cerr << "Usage: " << argv[0] << " <textures directory>" << std::endl;
         return 1;
     }
@@ -42,10 +44,10 @@ int main(int argc, char** argv) {
             }
         }
         int W = 0, H = 0, frameIndex = 0;
-        while (true) {
+        const int maxRenders = std::stoi(argv[2]);
+        while (frameIndex < maxRenders) {
             int randomTexIndex = rand() % static_cast<int>(textureNames.size());
             int randomEnvIndex = rand() % static_cast<int>(environments.size());
-            std::vector<float4> frameRGBA;
             FloatImage dAlbedo = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "albedo.png", 3, true);
             FloatImage dNormal = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "normal.png", 3, true);
             FloatImage dRoughness = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "roughness.png", 1, true);
@@ -53,20 +55,26 @@ int main(int argc, char** argv) {
             W = dAlbedo.width;
             H = dAlbedo.height;
 
-            renderPlane(environments[randomEnvIndex], brdfLut,
-                        dAlbedo.data.data(), dNormal.data.data(),
-                        dRoughness.data.data(), dMetallic.data.data(),
-                        W, H, frameRGBA);
+            std::array<std::vector<float4>, 3> frameRGBAs;
+            std::filesystem::path sampleDir = std::filesystem::path("output") /
+                                              ("sample_" + std::to_string(frameIndex));
+            std::filesystem::create_directories(sampleDir);
+            for (int i = 0; i < 3; ++i) {
+                renderPlane(environments[randomEnvIndex], brdfLut,
+                            dAlbedo.data.data(), dNormal.data.data(),
+                            dRoughness.data.data(), dMetallic.data.data(),
+                            W, H, frameRGBAs[i]);
 
-            std::filesystem::path outputPath = std::filesystem::path("output") / "render" + std::to_string(frameIndex++) + ".png";
-            std::filesystem::create_directories(outputPath.parent_path());
-            writePNGImage(outputPath, frameRGBA.data(), W, H, true);
+                std::filesystem::path outputPath = sampleDir /
+                    (std::to_string(i) + ".png");
+                writePNGImage(outputPath, frameRGBAs[i].data(), W, H, true);
 
-            appendRenderMetadata(std::filesystem::path("output") / "render_metadata.json",
-                                 outputPath.filename().string(),
-                                 textureNames[randomTexIndex]);
+            }
+            appendRenderMetadata(std::filesystem::path("output") / "render_metadata.json", 
+                                sampleDir.stem().string(), textureNames[randomTexIndex]);
+            frameIndex++;
         }
-        
+        std::cout << "Rendering complete!" << std::endl;
         return 0;
     } catch (const CudaError& e) {
         std::cerr << "CUDA Failure: " << e.what() << std::endl;

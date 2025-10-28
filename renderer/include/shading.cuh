@@ -8,7 +8,9 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  cudaTextureObject_t brdfLutTex, const float* albedo,
                  const float* normal, const float* roughness,
                  const float* metallic, float* outRGBA,
-                 int width, int height, float camX, float camY, float camZ);
+                 int width, int height, float3 cameraPos,
+                 float3 cameraForward, float3 cameraRight,
+                 float3 cameraUp, float tanHalfFovY, float aspect);
 
 void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
@@ -16,4 +18,6 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t brdfLutTex, const float* albedo,
                        const float* normal, const float* roughness,
                        const float* metallic, float* outRGBA,
-                       int width, int height, float camX, float camY, float camZ);
+                       int width, int height, float3 cameraPos,
+                       float3 cameraForward, float3 cameraRight,
+                       float3 cameraUp, float tanHalfFovY, float aspect);

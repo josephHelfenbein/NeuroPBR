@@ -165,5 +165,5 @@ void appendRenderMetadata(const std::filesystem::path& metadataPath,
     }
 
     out << "{\"render\":\"" << escapeJsonString(renderFilename)
-        << "\",\"material\":\"" << escapeJsonString(materialName) << "\"}\n";
+        << "\",\"material\":\"" << escapeJsonString(materialName) << "\"},\n";
 }

@@ -135,16 +135,57 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
         return std::mt19937(rd());
     }());
     std::uniform_real_distribution<float> polarDist(0.0f, 360.0f);
-    std::uniform_real_distribution<float> azimuthDist(0.0f, 75.0f);
+    std::uniform_real_distribution<float> azimuthDist(0.0f, 40.0f);
 
     const float degToRad = static_cast<float>(M_PI) / 180.0f;
     float theta = polarDist(rng) * degToRad;
     float phi = azimuthDist(rng) * degToRad;
-    constexpr float radius = 5.0f;
+    constexpr float radius = 0.3f;
 
     float camX = radius * sinf(phi) * cosf(theta);
     float camY = radius * cosf(phi);
     float camZ = radius * sinf(phi) * sinf(theta);
+
+    auto normalizeVec = [](const float3& v) {
+        float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+        if (len < 1e-6f) {
+            return make_float3(0.0f, 0.0f, 0.0f);
+        }
+        float inv = 1.0f / len;
+        return make_float3(v.x * inv, v.y * inv, v.z * inv);
+    };
+
+    auto crossVec = [](const float3& a, const float3& b) {
+        return make_float3(a.y * b.z - a.z * b.y,
+                           a.z * b.x - a.x * b.z,
+                           a.x * b.y - a.y * b.x);
+    };
+
+    auto dotVec = [](const float3& a, const float3& b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    };
+
+    float3 cameraPos = make_float3(camX, camY, camZ);
+    float3 forward = normalizeVec(make_float3(-camX, -camY, -camZ));
+    if (forward.x == 0.0f && forward.y == 0.0f && forward.z == 0.0f) {
+        forward = make_float3(0.0f, -1.0f, 0.0f);
+    }
+
+    float3 worldUp = make_float3(0.0f, 1.0f, 0.0f);
+    if (std::fabs(dotVec(forward, worldUp)) > 0.99f) {
+        worldUp = make_float3(0.0f, 0.0f, 1.0f);
+    }
+
+    float3 right = normalizeVec(crossVec(worldUp, forward));
+    if (right.x == 0.0f && right.y == 0.0f && right.z == 0.0f) {
+        worldUp = make_float3(0.0f, 0.0f, 1.0f);
+        right = normalizeVec(crossVec(worldUp, forward));
+    }
+    float3 up = normalizeVec(crossVec(forward, right));
+
+    constexpr float verticalFovDeg = 55.0f;
+    float tanHalfFovY = static_cast<float>(std::tan(verticalFovDeg * 0.5f * degToRad));
+    float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
 
     launchShadeKernel(grid, block,
                       env.envTexture, env.specularTexture,
@@ -152,7 +193,8 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                       env.irradianceTexture, brdf.texture,
                       dAlbedo, dNormal, dRoughness, dMetallic,
                       reinterpret_cast<float*>(dFrame),
-                      width, height, camX, camY, camZ);
+                      width, height, cameraPos, forward,
+                      right, up, tanHalfFovY, aspectRatio);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
