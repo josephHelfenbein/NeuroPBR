@@ -8,3 +8,6 @@
 
 extern "C" __global__
 void precomputeBRDF(cudaSurfaceObject_t brdfLutSurf, int W, int H);
+
+void launchPrecomputeBRDF(dim3 gridDim, dim3 blockDim,
+						  cudaSurfaceObject_t brdfLutSurf, int width, int height);

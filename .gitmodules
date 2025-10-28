@@ -4,3 +4,6 @@
 [submodule "renderer/include/tinyexr"]
 	path = renderer/include/tinyexr
 	url = https://github.com/syoyo/tinyexr.git
+[submodule "renderer/include/stb"]
+	path = renderer/include/stb
+	url = https://github.com/nothings/stb.git

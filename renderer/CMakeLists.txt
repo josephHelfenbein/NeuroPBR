@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-set(CMAKE_CUDA_ARCHITECTURES "60;70;75;80;86")
+set(CMAKE_CUDA_ARCHITECTURES "75;80;86")
 project(neuropbr_renderer LANGUAGES C CXX CUDA)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -41,6 +41,7 @@ set(SOURCES
 )
 file(GLOB_RECURSE CUDA_SOURCES "src/*.cu")
 file(GLOB_RECURSE CPP_SOURCES "src/*.cpp")
+list(REMOVE_ITEM CPP_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 list(APPEND SOURCES ${CPP_SOURCES})
 
 add_executable(${PROJECT_NAME}
@@ -49,6 +50,7 @@ add_executable(${PROJECT_NAME}
 )
 target_include_directories(${PROJECT_NAME} PRIVATE
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/include/stb
   ${CUDAToolkit_INCLUDE_DIRS}
 )
 set_target_properties(${PROJECT_NAME} PROPERTIES

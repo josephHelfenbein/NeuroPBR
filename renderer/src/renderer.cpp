@@ -1,4 +1,5 @@
-#include <cuda_runtime.h>
+#include "renderer.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -6,12 +7,20 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <stdexcept>
+#include <random>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <cuda_runtime.h>
+
 #include "prefilter.cuh"
 #include "brdf.cuh"
+#include "shading.cuh"
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 struct HDRImage {
     int width = 0;
@@ -83,12 +92,7 @@ struct ScopedSurface {
     }
 };
 
-class CudaError : public std::runtime_error {
-public:
-    explicit CudaError(const std::string& what) : std::runtime_error(what) {}
-};
-
-inline void cudaCheck(cudaError_t err, const char* expr, const char* file, int line) {
+void cudaCheck(cudaError_t err, const char* expr, const char* file, int line) {
     if (err != cudaSuccess) {
         std::string message = std::string("CUDA error at ") + file + ":" + std::to_string(line) +
                               " for `" + expr + "`: " + cudaGetErrorString(err);
@@ -96,8 +100,71 @@ inline void cudaCheck(cudaError_t err, const char* expr, const char* file, int l
     }
 }
 
-#define CUDA_CHECK(expr) cudaCheck((expr), #expr, __FILE__, __LINE__)
+void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
+                 const float* albedo, const float* normal,
+                 const float* roughness, const float* metallic,
+                 int width, int height, std::vector<float4>& frameRGBA) {
+    size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    size_t vec3Bytes = pixelCount * 3 * sizeof(float);
+    size_t scalarBytes = pixelCount * sizeof(float);
+    size_t frameBytes = pixelCount * sizeof(float4);
 
+    float *dAlbedo = nullptr;
+    float *dNormal = nullptr;
+    float *dRoughness = nullptr;
+    float *dMetallic = nullptr;
+    float4* dFrame = nullptr;
+
+    CUDA_CHECK(cudaMalloc(&dAlbedo, vec3Bytes));
+    CUDA_CHECK(cudaMalloc(&dNormal, vec3Bytes));
+    CUDA_CHECK(cudaMalloc(&dRoughness, scalarBytes));
+    CUDA_CHECK(cudaMalloc(&dMetallic, scalarBytes));
+    CUDA_CHECK(cudaMalloc(&dFrame, frameBytes));
+
+    CUDA_CHECK(cudaMemcpy(dAlbedo, albedo, vec3Bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dNormal, normal, vec3Bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dRoughness, roughness, scalarBytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dMetallic, metallic, scalarBytes, cudaMemcpyHostToDevice));
+
+    dim3 block(16, 16);
+    dim3 grid((width + block.x - 1) / block.x,
+              (height + block.y - 1) / block.y);
+
+    static thread_local std::mt19937 rng([] {
+        std::random_device rd;
+        return std::mt19937(rd());
+    }());
+    std::uniform_real_distribution<float> polarDist(0.0f, 360.0f);
+    std::uniform_real_distribution<float> azimuthDist(0.0f, 75.0f);
+
+    const float degToRad = static_cast<float>(M_PI) / 180.0f;
+    float theta = polarDist(rng) * degToRad;
+    float phi = azimuthDist(rng) * degToRad;
+    constexpr float radius = 5.0f;
+
+    float camX = radius * sinf(phi) * cosf(theta);
+    float camY = radius * cosf(phi);
+    float camZ = radius * sinf(phi) * sinf(theta);
+
+    launchShadeKernel(grid, block,
+                      env.envTexture, env.specularTexture,
+                      static_cast<int>(env.mipLevels),
+                      env.irradianceTexture, brdf.texture,
+                      dAlbedo, dNormal, dRoughness, dMetallic,
+                      reinterpret_cast<float*>(dFrame),
+                      width, height, camX, camY, camZ);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    frameRGBA.resize(pixelCount);
+    CUDA_CHECK(cudaMemcpy(frameRGBA.data(), dFrame, frameBytes, cudaMemcpyDeviceToHost));
+
+    cudaFree(dFrame);
+    cudaFree(dMetallic);
+    cudaFree(dRoughness);
+    cudaFree(dNormal);
+    cudaFree(dAlbedo);
+}
 HDRImage loadHDRImage(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -240,120 +307,6 @@ HDRImage loadHDRImage(const std::filesystem::path& path) {
     return image;
 }
 
-struct EnvironmentCubemap {
-    std::string name;
-    unsigned faceSize = 0;
-    unsigned irradianceSize = 0;
-    unsigned mipLevels = 0;
-
-    cudaArray_t envArray = nullptr;
-    cudaMipmappedArray_t specularArray = nullptr;
-    cudaArray_t irradianceArray = nullptr;
-
-    cudaTextureObject_t envTexture = 0;
-    cudaTextureObject_t specularTexture = 0;
-    cudaTextureObject_t irradianceTexture = 0;
-
-    EnvironmentCubemap() = default;
-    ~EnvironmentCubemap() { release(); }
-
-    EnvironmentCubemap(const EnvironmentCubemap&) = delete;
-    EnvironmentCubemap& operator=(const EnvironmentCubemap&) = delete;
-
-    EnvironmentCubemap(EnvironmentCubemap&& other) noexcept { moveFrom(std::move(other)); }
-    EnvironmentCubemap& operator=(EnvironmentCubemap&& other) noexcept {
-        if (this != &other) {
-            release();
-            moveFrom(std::move(other));
-        }
-        return *this;
-    }
-
-private:
-    void release() noexcept {
-        if (envTexture) cudaDestroyTextureObject(envTexture);
-        if (specularTexture) cudaDestroyTextureObject(specularTexture);
-        if (irradianceTexture) cudaDestroyTextureObject(irradianceTexture);
-        if (envArray) cudaFreeArray(envArray);
-        if (specularArray) cudaFreeMipmappedArray(specularArray);
-        if (irradianceArray) cudaFreeArray(irradianceArray);
-        envTexture = specularTexture = irradianceTexture = 0;
-        envArray = nullptr;
-        specularArray = nullptr;
-        irradianceArray = nullptr;
-    }
-
-    void moveFrom(EnvironmentCubemap&& other) noexcept {
-        name = std::move(other.name);
-        faceSize = other.faceSize;
-        irradianceSize = other.irradianceSize;
-        mipLevels = other.mipLevels;
-
-        envArray = other.envArray;
-        specularArray = other.specularArray;
-        irradianceArray = other.irradianceArray;
-
-        envTexture = other.envTexture;
-        specularTexture = other.specularTexture;
-        irradianceTexture = other.irradianceTexture;
-
-        other.envArray = nullptr;
-        other.specularArray = nullptr;
-        other.irradianceArray = nullptr;
-        other.envTexture = 0;
-        other.specularTexture = 0;
-        other.irradianceTexture = 0;
-        other.faceSize = 0;
-        other.irradianceSize = 0;
-        other.mipLevels = 0;
-    }
-};
-
-struct BRDFLookupTable {
-    unsigned size = 0;
-    cudaArray_t array = nullptr;
-    cudaSurfaceObject_t surface = 0;
-    cudaTextureObject_t texture = 0;
-
-    BRDFLookupTable() = default;
-    ~BRDFLookupTable() { release(); }
-
-    BRDFLookupTable(const BRDFLookupTable&) = delete;
-    BRDFLookupTable& operator=(const BRDFLookupTable&) = delete;
-
-    BRDFLookupTable(BRDFLookupTable&& other) noexcept { moveFrom(std::move(other)); }
-    BRDFLookupTable& operator=(BRDFLookupTable&& other) noexcept {
-        if (this != &other) {
-            release();
-            moveFrom(std::move(other));
-        }
-        return *this;
-    }
-
-private:
-    void release() noexcept {
-        if (texture) cudaDestroyTextureObject(texture);
-        if (surface) cudaDestroySurfaceObject(surface);
-        if (array) cudaFreeArray(array);
-        texture = 0;
-        surface = 0;
-        array = nullptr;
-        size = 0;
-    }
-
-    void moveFrom(BRDFLookupTable&& other) noexcept {
-        size = other.size;
-        array = other.array;
-        surface = other.surface;
-        texture = other.texture;
-
-        other.size = 0;
-        other.array = nullptr;
-        other.surface = 0;
-        other.texture = 0;
-    }
-};
-
 cudaTextureObject_t createCubemapTexture(cudaArray_t array) {
     cudaResourceDesc res{};
     res.resType = cudaResourceTypeArray;
@@ -401,10 +354,8 @@ void copyHDRToCudaArray(const HDRImage& image, cudaArray_t array) {
 }
 
 EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& filePath,
-                                                 unsigned faceSize,
-                                                 unsigned irradianceSize,
-                                                 unsigned specularSamples,
-                                                 unsigned diffuseSamples) {
+                                                 unsigned faceSize, unsigned irradianceSize,
+                                                 unsigned specularSamples, unsigned diffuseSamples) {
     HDRImage hdr = loadHDRImage(filePath);
 
     cudaChannelFormatDesc float4Desc = cudaCreateChannelDesc<float4>();
@@ -450,7 +401,7 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
                     (faceSize + block.y - 1) / block.y,
                     6);
 
-    equirectangularToCubemap<<<grid, block>>>(hdrTexture.value, envSurface.value, static_cast<int>(faceSize));
+    launchEquirectangularToCubemap(grid, block, hdrTexture.value, envSurface.value, static_cast<int>(faceSize));
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -462,10 +413,8 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
     result.envTexture = createCubemapTexture(result.envArray);
 
     ScopedMipmappedArray specularArray;
-    CUDA_CHECK(cudaMallocMipmappedArray(&specularArray.value,
-                                        &float4Desc,
-                                        cubeExtent,
-                                        result.mipLevels,
+    CUDA_CHECK(cudaMallocMipmappedArray(&specularArray.value, &float4Desc,
+                                        cubeExtent, result.mipLevels,
                                         cudaArrayCubemap | cudaArraySurfaceLoadStore));
 
     ScopedTexture envTextureForSampling;
@@ -490,11 +439,12 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
                           static_cast<float>(level) / static_cast<float>(result.mipLevels - 1) :
                           0.0f;
 
-        prefilterSpecularCubemap<<<mipGrid, block>>>(envTextureForSampling.value,
-                                                       levelSurface.value,
-                                                       static_cast<int>(mipFaceSize),
-                                                       roughness,
-                                                       specularSamples);
+    launchPrefilterSpecularCubemap(mipGrid, block,
+                       envTextureForSampling.value,
+                       levelSurface.value,
+                       static_cast<int>(mipFaceSize),
+                       roughness,
+                       specularSamples);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -524,10 +474,11 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
                         (irradianceSize + block.y - 1) / block.y,
                         6);
 
-    convolveDiffuseIrradiance<<<irradianceGrid, block>>>(result.envTexture,
-                                                           irradianceSurface.value,
-                                                           static_cast<int>(irradianceSize),
-                                                           diffuseSamples);
+    launchConvolveDiffuseIrradiance(irradianceGrid, block,
+                                    result.envTexture,
+                                    irradianceSurface.value,
+                                    static_cast<int>(irradianceSize),
+                                    diffuseSamples);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -562,21 +513,15 @@ std::vector<std::filesystem::path> collectHDRIFiles(const std::filesystem::path&
 }
 
 std::vector<EnvironmentCubemap> loadEnvironmentCubemaps(const std::filesystem::path& directory,
-                                                         unsigned faceSize,
-                                                         unsigned irradianceSize,
-                                                         unsigned specularSamples,
-                                                         unsigned diffuseSamples) {
+                                                         unsigned faceSize, unsigned irradianceSize,
+                                                         unsigned specularSamples, unsigned diffuseSamples) {
     std::vector<std::filesystem::path> paths = collectHDRIFiles(directory);
     std::vector<EnvironmentCubemap> environments;
     environments.reserve(paths.size());
 
     for (const auto& path : paths) {
         std::cout << "Precomputing cubemap for " << path << "..." << std::endl;
-        environments.push_back(precomputeEnvironmentCubemap(path,
-                                                             faceSize,
-                                                             irradianceSize,
-                                                             specularSamples,
-                                                             diffuseSamples));
+        environments.push_back(precomputeEnvironmentCubemap(path, faceSize, irradianceSize, specularSamples, diffuseSamples));
     }
     return environments;
 }
@@ -621,7 +566,7 @@ void loadBRDFLUT(BRDFLookupTable& lut) {
                     (lut.size + block.y - 1) / block.y,
                     1);
 
-    precomputeBRDF<<<grid, block>>>(lut.surface, static_cast<int>(lut.size), static_cast<int>(lut.size));
+    launchPrecomputeBRDF(grid, block, lut.surface, static_cast<int>(lut.size), static_cast<int>(lut.size));
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 }

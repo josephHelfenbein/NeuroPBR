@@ -54,6 +54,10 @@ __device__ inline void dirToLatLong(float dx, float dy, float dz, float *u, floa
     if (*v > 1.0f) *v = 1.0f;
 }
 
+__device__ inline void dirToLatLong(const float3 dir, float *u, float *v) {
+	dirToLatLong(dir.x, dir.y, dir.z, u, v);
+}
+
 __device__ inline float2 hammersley(unsigned int i, unsigned int N) {
 	return make_float2(float(i) / float(N), radicalInverseVdC(i));
 }

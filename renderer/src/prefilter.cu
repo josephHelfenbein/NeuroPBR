@@ -107,3 +107,21 @@ void convolveDiffuseIrradiance(cudaTextureObject_t envCubemap,
 					   outSurface, x * (int) sizeof(float4), y, face);
 }
 
+void launchEquirectangularToCubemap(dim3 gridDim, dim3 blockDim,
+							 cudaTextureObject_t hdrTex, cudaSurfaceObject_t cubemapSurface,
+							 int faceSize) {
+	equirectangularToCubemap<<<gridDim, blockDim>>>(hdrTex, cubemapSurface, faceSize);
+}
+
+void launchPrefilterSpecularCubemap(dim3 gridDim, dim3 blockDim,
+							   cudaTextureObject_t envCubemap, cudaSurfaceObject_t outSurface,
+							   int faceSize, float roughness, unsigned int sampleCount) {
+	prefilterSpecularCubemap<<<gridDim, blockDim>>>(envCubemap, outSurface, faceSize, roughness, sampleCount);
+}
+
+void launchConvolveDiffuseIrradiance(dim3 gridDim, dim3 blockDim,
+								 cudaTextureObject_t envCubemap, cudaSurfaceObject_t outSurface,
+								 int faceSize, unsigned int sampleCount) {
+	convolveDiffuseIrradiance<<<gridDim, blockDim>>>(envCubemap, outSurface, faceSize, sampleCount);
+}
+

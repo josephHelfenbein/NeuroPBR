@@ -59,3 +59,8 @@ void precomputeBRDF(cudaSurfaceObject_t brdfLutSurf, int W, int H) {
 
     surf2Dwrite(integratedBRDF, brdfLutSurf, x * (int)sizeof(float2), y);
 }
+
+void launchPrecomputeBRDF(dim3 gridDim, dim3 blockDim,
+                          cudaSurfaceObject_t brdfLutSurf, int width, int height) {
+    precomputeBRDF<<<gridDim, blockDim>>>(brdfLutSurf, width, height);
+}
