@@ -8,7 +8,7 @@ __pycache__/
 *.env
 .env
 venv/
-.env/11111
+.env/
 
 #build
 build
