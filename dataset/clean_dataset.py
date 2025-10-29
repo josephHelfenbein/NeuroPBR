@@ -3,7 +3,12 @@ Clean and normalize PBR texture sets.
 
 Recursively finds albedo, metallic, roughness, and normal maps, then writes a
 consistently named dataset (copy or symlink). Supports per-material folders or
-flattened outputs. No map conversions are performed.
+flattened outputs.
+
+Update: by default, outputs fixed filenames per material folder using PNG
+extension — "albedo.png", "metallic.png", "roughness.png", "normal.png" — to
+match common renderer expectations. You can keep original extensions with
+"--keep-ext".
 """
 
 from __future__ import annotations
@@ -18,6 +23,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
 
 TARGET_MAPS: Tuple[str, ...] = ("albedo", "metallic", "roughness", "normal")
 ALLOWED_EXTENSIONS: Set[str] = {".png", ".jpg",
@@ -27,6 +37,7 @@ ALLOWED_EXTENSIONS: Set[str] = {".png", ".jpg",
 def debug(msg: str, verbose: bool) -> None:
     if verbose:
         print(msg)
+
 
 def slugify(text: str) -> str:
     """Create a filesystem-friendly slug for a material name."""
@@ -85,11 +96,13 @@ def guess_map_type(filename: str) -> Optional[str]:
                 return map_type
     return None
 
+
 @dataclass
 class MaterialEntry:
     material_root: Path
     material_slug: str
     files_by_map: Dict[str, Path] = field(default_factory=dict)
+
 
 def find_materials(
     src_dir: Path,
@@ -128,8 +141,10 @@ def find_materials(
 
     return list(materials.values())
 
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
 
 def copy_or_link(src: Path, dst: Path, link: bool, overwrite: bool) -> None:
     if dst.exists():
@@ -142,6 +157,38 @@ def copy_or_link(src: Path, dst: Path, link: bool, overwrite: bool) -> None:
         os.symlink(src, dst)
     else:
         shutil.copy2(src, dst)
+
+
+def convert_to_png(src: Path, dst: Path, map_type: str, verbose: bool) -> bool:
+    """Convert an image file to PNG at the destination path.
+
+    Returns True on success, False if conversion could not be performed.
+    """
+    if Image is None:
+        debug("Pillow not available; cannot convert to PNG.", verbose)
+        return False
+    try:
+        with Image.open(src) as im:
+            # Normalize mode by map type: albedo/normal as RGB, roughness/metallic as L
+            if map_type in ("albedo", "normal"):
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGB")
+                else:
+                    # If RGBA, drop alpha to keep a stable 3-channel layout
+                    if im.mode == "RGBA":
+                        im = im.convert("RGB")
+            else:  # roughness / metallic
+                # Preserve single-channel if possible; otherwise convert to L
+                if im.mode not in ("L", "I;16"):
+                    im = im.convert("L")
+            # Ensure parent exists
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            im.save(dst, format="PNG", optimize=True)
+        return True
+    except Exception as e:  # pragma: no cover - best-effort conversion
+        debug(f"PNG conversion failed for {src}: {e}", verbose)
+        return False
+
 
 def build_cli() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
@@ -162,6 +209,11 @@ def build_cli() -> argparse.ArgumentParser:
                    help="Show planned operations without writing files")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
     p.add_argument(
+        "--keep-ext",
+        action="store_true",
+        help="Keep original file extensions instead of converting outputs to .png",
+    )
+    p.add_argument(
         "--ext",
         nargs="*",
         default=sorted(ALLOWED_EXTENSIONS),
@@ -175,6 +227,7 @@ def build_cli() -> argparse.ArgumentParser:
     )
     return p
 
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = build_cli()
     args = parser.parse_args(argv)
@@ -187,6 +240,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     overwrite: bool = bool(args.overwrite)
     dry_run: bool = bool(args.dry_run)
     verbose: bool = bool(args.verbose)
+    keep_ext: bool = bool(args.keep_ext)
     allowed_exts: Set[str] = {e.lower() if e.startswith(
         ".") else f".{e.lower()}" for e in args.ext}
     manifest_path: Optional[Path] = args.manifest
@@ -230,17 +284,36 @@ def main(argv: Optional[List[str]] = None) -> int:
         for map_type in maps_to_use:
             src_path = entry.files_by_map[map_type]
             ext = src_path.suffix
+            # Destination naming: default to fixed .png filenames for consistency
             if flatten:
-                dst_path = dest_dir / f"{entry.material_slug}_{map_type}{ext}"
+                dst_path = dest_dir / (
+                    f"{entry.material_slug}_{map_type}.png" if not keep_ext else
+                    f"{entry.material_slug}_{map_type}{ext}"
+                )
             else:
-                dst_path = dest_dir / f"{map_type}{ext}"
+                dst_path = dest_dir / (
+                    f"{map_type}.png" if not keep_ext else f"{map_type}{ext}"
+                )
 
             if dry_run:
-                print(
-                    f"Would {'link' if link else 'copy'} {src_path} -> {dst_path}")
+                action = "convert" if not keep_ext else (
+                    "link" if link else "copy")
+                print(f"Would {action} {src_path} -> {dst_path}")
             else:
-                copy_or_link(src_path, dst_path, link=link,
-                             overwrite=overwrite)
+                if keep_ext:
+                    copy_or_link(src_path, dst_path, link=link,
+                                 overwrite=overwrite)
+                else:
+                    # Try to convert; if conversion fails, fall back to copy with original ext
+                    success = convert_to_png(
+                        src_path, dst_path, map_type, verbose)
+                    if not success:
+                        # Fallback path retains original extension to avoid mismatch
+                        fallback_dst = dst_path.with_suffix(ext)
+                        copy_or_link(src_path, fallback_dst, link=link,
+                                     overwrite=overwrite)
+                        # Update record to actual file written
+                        dst_path = fallback_dst
 
             record[map_type] = str(dst_path)
 

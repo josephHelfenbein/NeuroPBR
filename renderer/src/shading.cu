@@ -9,13 +9,79 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
+__device__ inline float clamp01(float v) {
+    return fminf(fmaxf(v, 0.0f), 1.0f);
+}
+
+__device__ float sampleScalar(const float* data, int width, int height, float u, float v) {
+    u = clamp01(u);
+    v = clamp01(v);
+
+    float x = u * static_cast<float>(width - 1);
+    float y = v * static_cast<float>(height - 1);
+
+    int x0 = static_cast<int>(floorf(x));
+    int y0 = static_cast<int>(floorf(y));
+    int x1 = min(x0 + 1, width - 1);
+    int y1 = min(y0 + 1, height - 1);
+    float tx = x - static_cast<float>(x0);
+    float ty = y - static_cast<float>(y0);
+
+    float c00 = data[y0 * width + x0];
+    float c10 = data[y0 * width + x1];
+    float c01 = data[y1 * width + x0];
+    float c11 = data[y1 * width + x1];
+
+    float c0 = c00 * (1.0f - tx) + c10 * tx;
+    float c1 = c01 * (1.0f - tx) + c11 * tx;
+    return c0 * (1.0f - ty) + c1 * ty;
+}
+
+__device__ float3 sampleRGB(const float* data, int width, int height, float u, float v) {
+    u = clamp01(u);
+    v = clamp01(v);
+
+    float x = u * static_cast<float>(width - 1);
+    float y = v * static_cast<float>(height - 1);
+
+    int x0 = static_cast<int>(floorf(x));
+    int y0 = static_cast<int>(floorf(y));
+    int x1 = min(x0 + 1, width - 1);
+    int y1 = min(y0 + 1, height - 1);
+    float tx = x - static_cast<float>(x0);
+    float ty = y - static_cast<float>(y0);
+
+    int idx00 = (y0 * width + x0) * 3;
+    int idx10 = (y0 * width + x1) * 3;
+    int idx01 = (y1 * width + x0) * 3;
+    int idx11 = (y1 * width + x1) * 3;
+
+    float3 c00 = make_float3(data[idx00 + 0], data[idx00 + 1], data[idx00 + 2]);
+    float3 c10 = make_float3(data[idx10 + 0], data[idx10 + 1], data[idx10 + 2]);
+    float3 c01 = make_float3(data[idx01 + 0], data[idx01 + 1], data[idx01 + 2]);
+    float3 c11 = make_float3(data[idx11 + 0], data[idx11 + 1], data[idx11 + 2]);
+
+    float3 c0 = make_float3(c00.x * (1.0f - tx) + c10.x * tx,
+                            c00.y * (1.0f - tx) + c10.y * tx,
+                            c00.z * (1.0f - tx) + c10.z * tx);
+    float3 c1 = make_float3(c01.x * (1.0f - tx) + c11.x * tx,
+                            c01.y * (1.0f - tx) + c11.y * tx,
+                            c01.z * (1.0f - tx) + c11.z * tx);
+
+    return make_float3(c0.x * (1.0f - ty) + c1.x * ty,
+                       c0.y * (1.0f - ty) + c1.y * ty,
+                       c0.z * (1.0f - ty) + c1.z * ty);
+}
+
 extern "C" __global__
 void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  int specularMipLevels, cudaTextureObject_t irradianceTex,
                  cudaTextureObject_t brdfLutTex, const float* albedo,
                  const float* normal, const float* roughness,
                  const float* metallic, float* outRGBA,
-                 int width, int height, float camX, float camY, float camZ) {
+                 int width, int height, float3 cameraPos,
+                 float3 cameraForward, float3 cameraRight,
+                 float3 cameraUp, float tanHalfFovY, float aspect) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) {
@@ -23,26 +89,77 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
     }
     int idx = y * width + x;
 
-    float3 albedoColor = make_float3(albedo[3 * idx + 0], albedo[3 * idx + 1], albedo[3 * idx + 2]);
-    float3 N = make_float3(normal[3 * idx + 0], normal[3 * idx + 1], normal[3 * idx + 2]);
+    float ndcX = ((static_cast<float>(x) + 0.5f) / static_cast<float>(width)) * 2.0f - 1.0f;
+    float ndcY = ((static_cast<float>(y) + 0.5f) / static_cast<float>(height)) * 2.0f - 1.0f;
+
+    float sensorX = ndcX * aspect * tanHalfFovY;
+    float sensorY = -ndcY * tanHalfFovY;
+
+    float3 rayDir = make_float3(cameraForward.x + sensorX * cameraRight.x + sensorY * cameraUp.x,
+                                cameraForward.y + sensorX * cameraRight.y + sensorY * cameraUp.y,
+                                cameraForward.z + sensorX * cameraRight.z + sensorY * cameraUp.z);
+    rayDir = makeNormalized(rayDir);
+
+    const float3 planeNormal = make_float3(0.0f, 1.0f, 0.0f);
+    float denom = dot3(planeNormal, rayDir);
+    if (fabsf(denom) < 1e-6f) {
+        outRGBA[4 * idx + 0] = 0.0f;
+        outRGBA[4 * idx + 1] = 0.0f;
+        outRGBA[4 * idx + 2] = 0.0f;
+        outRGBA[4 * idx + 3] = 1.0f;
+        return;
+    }
+
+    float t = -dot3(planeNormal, cameraPos) / denom;
+    if (t <= 0.0f) {
+        outRGBA[4 * idx + 0] = 0.0f;
+        outRGBA[4 * idx + 1] = 0.0f;
+        outRGBA[4 * idx + 2] = 0.0f;
+        outRGBA[4 * idx + 3] = 1.0f;
+        return;
+    }
+
+    float3 hit = make_float3(cameraPos.x + rayDir.x * t,
+                             cameraPos.y + rayDir.y * t,
+                             cameraPos.z + rayDir.z * t);
+
+    if (fabsf(hit.x) > 0.5f || fabsf(hit.z) > 0.5f) {
+        outRGBA[4 * idx + 0] = 0.0f;
+        outRGBA[4 * idx + 1] = 0.0f;
+        outRGBA[4 * idx + 2] = 0.0f;
+        outRGBA[4 * idx + 3] = 1.0f;
+        return;
+    }
+
+    float u = hit.x + 0.5f;
+    float v = -hit.z + 0.5f;
+    float tiledU = u * 2.0f;
+    float tiledV = v * 2.0f;
+    tiledU = tiledU - floorf(tiledU);
+    tiledV = tiledV - floorf(tiledV);
+    tiledU = clamp01(tiledU);
+    tiledV = clamp01(tiledV);
+
+    float3 albedoColor = sampleRGB(albedo, width, height, tiledU, tiledV);
+    float3 normalSample = sampleRGB(normal, width, height, tiledU, tiledV);
+    float rough = sampleScalar(roughness, width, height, tiledU, tiledV);
+    float metal = sampleScalar(metallic, width, height, tiledU, tiledV);
+
+    float3 normalTS = make_float3(normalSample.x * 2.0f - 1.0f,
+                                  normalSample.y * 2.0f - 1.0f,
+                                  normalSample.z * 2.0f - 1.0f);
+
+    const float3 tangent = make_float3(1.0f, 0.0f, 0.0f);
+    const float3 bitangent = make_float3(0.0f, 0.0f, 1.0f);
+
+    float3 N = make_float3(normalTS.x * tangent.x + normalTS.y * bitangent.x + normalTS.z * planeNormal.x,
+                           normalTS.x * tangent.y + normalTS.y * bitangent.y + normalTS.z * planeNormal.y,
+                           normalTS.x * tangent.z + normalTS.y * bitangent.z + normalTS.z * planeNormal.z);
     N = makeNormalized(N);
 
-    float rough = roughness[idx];
-    float metal = metallic[idx];
-
-    float px = (static_cast<float>(x) + 0.5f) / static_cast<float>(width) - 0.5f;
-    float py = (static_cast<float>(y) + 0.5f) / static_cast<float>(height) - 0.5f;
-    float pz = 0.0f;
-
-    float vx = camX - px;
-    float vy = camY - py;
-    float vz = camZ - pz;
-    float vlen = sqrtf(vx * vx + vy * vy + vz * vz) + 1e-8f;
-    vx /= vlen;
-    vy /= vlen;
-    vz /= vlen;
-
-    float3 V = make_float3(vx, vy, vz);
+    float3 V = makeNormalized(make_float3(cameraPos.x - hit.x,
+                                          cameraPos.y - hit.y,
+                                          cameraPos.z - hit.z));
 
     float NdotV = fmaxf(dot3(N, V), 0.0f);
 
@@ -109,10 +226,10 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
     color.y = fmaxf(color.y, 0.0f);
     color.z = fmaxf(color.z, 0.0f);
 
-    outRGBA[4*idx + 0] = color.x;
-    outRGBA[4*idx + 1] = color.y;
-    outRGBA[4*idx + 2] = color.z;
-    outRGBA[4*idx + 3] = 1.0f;
+    outRGBA[4 * idx + 0] = color.x;
+    outRGBA[4 * idx + 1] = color.y;
+    outRGBA[4 * idx + 2] = color.z;
+    outRGBA[4 * idx + 3] = 1.0f;
 }
 
 void launchShadeKernel(dim3 gridDim, dim3 blockDim,
@@ -121,9 +238,13 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t brdfLutTex, const float* albedo,
                        const float* normal, const float* roughness,
                        const float* metallic, float* outRGBA,
-                       int width, int height, float camX, float camY, float camZ) {
+                       int width, int height, float3 cameraPos,
+                       float3 cameraForward, float3 cameraRight, 
+                       float3 cameraUp, float tanHalfFovY, float aspect) {
     shadeKernel<<<gridDim, blockDim>>>(envTex, specularTex, specularMipLevels,
                                        irradianceTex, brdfLutTex, albedo, normal,
                                        roughness, metallic, outRGBA,
-                                       width, height, camX, camY, camZ);
+                                       width, height, cameraPos,
+                                       cameraForward, cameraRight,
+                                       cameraUp, tanHalfFovY, aspect);
 }
