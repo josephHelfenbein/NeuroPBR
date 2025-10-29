@@ -15,6 +15,8 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaSetDevice(0));
 
         const std::filesystem::path hdrDir = std::filesystem::path("assets") / "hdris";
+        const std::filesystem::path lensflaresDir = std::filesystem::path("assets") / "lensflares";
+        const std::filesystem::path smudgesDir = std::filesystem::path("assets") / "camerasmudges";
 
         constexpr unsigned kEnvFaceSize = 512;
         constexpr unsigned kIrradianceFaceSize = 32;
@@ -30,9 +32,24 @@ int main(int argc, char** argv) {
         }
 
         std::cout << "Generated cubemaps: " << environments.size() << std::endl;
+        std::cout << "Precomputing BRDF lookup table..." << std::endl;
 
         BRDFLookupTable brdfLut = createBRDFLUT(512);
         loadBRDFLUT(brdfLut);
+
+        std::cout << "Loading camera smudge and lens flare textures..." << std::endl;
+        std::vector<FloatImage> cameraSmudges;
+        for (const auto& entry : std::filesystem::directory_iterator(smudgesDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".png") {
+                cameraSmudges.push_back(loadPNGImage(entry.path(), 4, true));
+            }
+        }
+        std::vector<FloatImage> lensFlares;
+        for (const auto& entry : std::filesystem::directory_iterator(lensflaresDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".png") {
+                lensFlares.push_back(loadPNGImage(entry.path(), 4, true));
+            }
+        }
 
         std::cout << "Precomputation complete. Starting rendering. Press CTRL+C to stop." << std::endl;
 
@@ -59,19 +76,40 @@ int main(int argc, char** argv) {
             std::filesystem::path sampleDir = std::filesystem::path("output") /
                                               ("sample_" + std::to_string(frameIndex));
             std::filesystem::create_directories(sampleDir);
-            for (int i = 0; i < 3; ++i) {
-                renderPlane(environments[randomEnvIndex], brdfLut,
-                            dAlbedo.data.data(), dNormal.data.data(),
-                            dRoughness.data.data(), dMetallic.data.data(),
-                            W, H, frameRGBAs[i]);
 
-                std::filesystem::path outputPath = sampleDir /
-                    (std::to_string(i) + ".png");
-                writePNGImage(outputPath, frameRGBAs[i].data(), W, H, true);
+            bool dirtySet = rand() % 2 == 0;
+            if (dirtySet) {
+                for (int i = 0; i < 3; ++i) {
+                    renderPlane(environments[randomEnvIndex], brdfLut,
+                                dAlbedo.data.data(), dNormal.data.data(),
+                                dRoughness.data.data(), dMetallic.data.data(),
+                                W, H, frameRGBAs[i],
+                                false, false, false,
+                                cameraSmudges, lensFlares);
 
+                    std::filesystem::path outputPath = sampleDir / "clean" /
+                        (std::to_string(i) + ".png");
+                    writePNGImage(outputPath, frameRGBAs[i].data(), W, H, true);
+                }
+            } else {
+                bool enableCameraSmudge = rand() % 2 == 0;
+                bool enableLensFlare = rand() % 2 == 0;
+                bool enableShadows = rand() % 2 == 0;
+                for (int i = 0; i < 3; ++i) {
+                    renderPlane(environments[randomEnvIndex], brdfLut,
+                                dAlbedo.data.data(), dNormal.data.data(),
+                                dRoughness.data.data(), dMetallic.data.data(),
+                                W, H, frameRGBAs[i], 
+                                enableShadows, enableCameraSmudge, enableLensFlare,
+                                cameraSmudges, lensFlares);
+
+                    std::filesystem::path outputPath = sampleDir / "dirty" /
+                        (std::to_string(i) + ".png");
+                    writePNGImage(outputPath, frameRGBAs[i].data(), W, H, true);
+                }
             }
-            appendRenderMetadata(std::filesystem::path("output") / "render_metadata.json", 
-                                sampleDir.stem().string(), textureNames[randomTexIndex]);
+            appendRenderMetadata(std::filesystem::path("output") / "render_metadata.json",
+                                sampleDir.string(), textureNames[randomTexIndex]);
             frameIndex++;
         }
         std::cout << "Rendering complete!" << std::endl;
