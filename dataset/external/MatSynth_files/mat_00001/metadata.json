@@ -1,0 +1,32 @@
+{
+  "authors": [],
+  "category": "Leather",
+  "description": "",
+  "height_factor": 0.03009999915957451,
+  "height_mean": 0.8061000108718872,
+  "license": "CC0",
+  "link": "https://www.ambientcg.com/view?id=Leather013",
+  "maps": [
+    "basecolor",
+    "diffuse",
+    "displacement",
+    "height",
+    "metallic",
+    "normal",
+    "roughness",
+    "specular"
+  ],
+  "method": "procedural",
+  "name": "Leather 013",
+  "physical_size": NaN,
+  "source": "ambientcg",
+  "stationary": true,
+  "tags": [
+    "couch",
+    "dark",
+    "leather",
+    "red",
+    "sofa"
+  ],
+  "version_date": "2023-10-31"
+}

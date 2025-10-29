@@ -1,2 +1,4 @@
 torch==2.9.0
 torchvision==0.24.0
+pillow
+datasets[vision]>=2.19.0

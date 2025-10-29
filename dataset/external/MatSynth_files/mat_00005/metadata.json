@@ -1,0 +1,31 @@
+{
+  "authors": [],
+  "category": "Misc",
+  "description": "",
+  "height_factor": 0.002099999925121665,
+  "height_mean": 0.31940001249313354,
+  "license": "CC0",
+  "link": "https://www.ambientcg.com/view?id=Foam003",
+  "maps": [
+    "basecolor",
+    "diffuse",
+    "displacement",
+    "height",
+    "metallic",
+    "normal",
+    "roughness",
+    "specular"
+  ],
+  "method": "procedural",
+  "name": "Foam 003",
+  "physical_size": NaN,
+  "source": "ambientcg",
+  "stationary": false,
+  "tags": [
+    "foam",
+    "ocean",
+    "sea",
+    "soap"
+  ],
+  "version_date": "2023-10-31"
+}

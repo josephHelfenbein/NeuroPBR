@@ -1,0 +1,37 @@
+{
+  "authors": [],
+  "category": "Stone",
+  "description": "",
+  "height_factor": 0.011099999770522118,
+  "height_mean": 0.3709000051021576,
+  "license": "CC BY-NC-ND 2.0",
+  "link": "",
+  "maps": [
+    "basecolor",
+    "diffuse",
+    "displacement",
+    "height",
+    "metallic",
+    "normal",
+    "roughness",
+    "specular"
+  ],
+  "method": "procedural",
+  "name": "309 Concrete 010",
+  "physical_size": NaN,
+  "source": "deschaintre_2020",
+  "stationary": true,
+  "tags": [
+    "aggregate",
+    "bumpy",
+    "composite",
+    "construction",
+    "irregular",
+    "material",
+    "pattern",
+    "purple",
+    "rough",
+    "speckled"
+  ],
+  "version_date": "2023-10-31"
+}

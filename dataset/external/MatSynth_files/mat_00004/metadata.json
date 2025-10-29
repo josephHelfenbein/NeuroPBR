@@ -1,0 +1,34 @@
+{
+  "authors": [],
+  "category": "Marble",
+  "description": "",
+  "height_factor": 0.0010999999940395355,
+  "height_mean": 0.7930999994277954,
+  "license": "CC0",
+  "link": "https://www.ambientcg.com/view?id=Terrazzo006",
+  "maps": [
+    "basecolor",
+    "diffuse",
+    "displacement",
+    "height",
+    "metallic",
+    "normal",
+    "roughness",
+    "specular"
+  ],
+  "method": "procedural",
+  "name": "Terrazzo 006",
+  "physical_size": NaN,
+  "source": "ambientcg",
+  "stationary": true,
+  "tags": [
+    "antique",
+    "brown",
+    "clean",
+    "floor",
+    "stone",
+    "terrazzo",
+    "white"
+  ],
+  "version_date": "2023-10-31"
+}
