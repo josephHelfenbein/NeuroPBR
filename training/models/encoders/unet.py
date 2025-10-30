@@ -2,6 +2,10 @@ import torch.nn as nn
 import torchvision.models as models
 from typing import Literal, List
 
+'''
+encoders are based off inputs of 1024x1024 imgs
+'''
+
 class ConvBlock(nn.Module):
     """double conv"""
     def __init__(self, in_channel: int, out_channel: int):
