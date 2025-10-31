@@ -2,6 +2,10 @@ import torch.nn as nn
 import torchvision.models as models
 from typing import Literal, List
 
+'''
+encoders are based off inputs of 1024x1024 imgs
+'''
+
 class ConvBlock(nn.Module):
     """double conv"""
     def __init__(self, in_channel: int, out_channel: int):
@@ -78,7 +82,7 @@ class StrideEncoderBlock(nn.Module):
         return x, skip
 
 class UNetEncoder(nn.Module):
-    def __init__(self, in_channels: int, channel_list: list | None = None, skip: bool =False):
+    def __init__(self, in_channels: int, channel_list: list | None = None, skip: bool = True):
         super().__init__()
 
         if channel_list is None:
@@ -115,7 +119,7 @@ class UNetEncoder(nn.Module):
         return x, skips
 
 class UNetStrideEncoder(nn.Module):
-    def __init__(self, in_channels: int, channel_list: list | None = None, skip: bool =False):
+    def __init__(self, in_channels: int, channel_list: list | None = None, skip: bool = True):
         super().__init__()
 
         if channel_list is None:
@@ -146,23 +150,23 @@ class UNetStrideEncoder(nn.Module):
         return x, skips
 
 # --> Unet encoder with resnet backbone
-"""
+'''
 backbone: 
 'resnet18'
 'resnet34'
 'resnet50'
 'resnet101'
 'resnet152'
-"""
+'''
 class UNetResNetEncoder(nn.Module):
     def __init__(
             self,
             in_channels: int,
             backbone: Literal['resnet18', 'resnet34', 'resnet50', 'resnet101', 'resnet152'] ='resnet101',
-            freeze_backbone: bool =False,
-            freeze_bn:bool =False,
+            freeze_backbone: bool = False,
+            freeze_bn:bool = False,
             stride: Literal[1, 2] = 2,
-            skip:bool =True # true because decoder for resnet would be expecting skips
+            skip:bool = True # true because decoder for resnet would be expecting skips
     ):
         super().__init__()
 
