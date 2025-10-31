@@ -12,11 +12,9 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  float3 cameraForward, float3 cameraRight,
                  float3 cameraUp, float tanHalfFovY, float aspect,
                  bool enableShadows, bool enableCameraSmudge,
-                 bool enableLensFlare, const float* cameraSmudgeImage,
+                 const float* cameraSmudgeImage,
                  int cameraSmudgeWidth, int cameraSmudgeHeight,
-                 int cameraSmudgeChannels, const float* lensFlareImage,
-                 int lensFlareWidth, int lensFlareHeight,
-                 int lensFlareChannels);
+                 int cameraSmudgeChannels);
 
 void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
@@ -28,8 +26,6 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        float3 cameraForward, float3 cameraRight,
                        float3 cameraUp, float tanHalfFovY, float aspect,
                        bool enableShadows, bool enableCameraSmudge,
-                       bool enableLensFlare, const float* cameraSmudgeImage,
+                       const float* cameraSmudgeImage,
                        int cameraSmudgeWidth, int cameraSmudgeHeight,
-                       int cameraSmudgeChannels, const float* lensFlareImage,
-                       int lensFlareWidth, int lensFlareHeight,
-                       int lensFlareChannels);
+                       int cameraSmudgeChannels);

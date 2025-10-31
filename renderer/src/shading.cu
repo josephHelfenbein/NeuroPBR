@@ -121,11 +121,9 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  float3 cameraForward, float3 cameraRight,
                  float3 cameraUp, float tanHalfFovY, float aspect,
                  bool enableShadows, bool enableCameraSmudge,
-                 bool enableLensFlare, const float* cameraSmudgeImage,
+                 const float* cameraSmudgeImage,
                  int cameraSmudgeWidth, int cameraSmudgeHeight,
-                 int cameraSmudgeChannels, const float* lensFlareImage,
-                 int lensFlareWidth, int lensFlareHeight,
-                 int lensFlareChannels) {
+                 int cameraSmudgeChannels) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) {
@@ -278,14 +276,6 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
         color.y = color.y * (1.0f - alpha) + smudgeSample.y * alpha;
         color.z = color.z * (1.0f - alpha) + smudgeSample.z * alpha;
     }
-    if (enableLensFlare && lensFlareImage &&
-        lensFlareWidth == width && lensFlareHeight == height) {
-        float4 flareSample = fetchOverlayPixel(lensFlareImage, lensFlareChannels, idx);
-        float alpha = clamp01(flareSample.w);
-        color.x += flareSample.x * alpha;
-        color.y += flareSample.y * alpha;
-        color.z += flareSample.z * alpha;
-    }
     color.x = fmaxf(color.x, 0.0f);
     color.y = fmaxf(color.y, 0.0f);
     color.z = fmaxf(color.z, 0.0f);
@@ -306,21 +296,16 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        float3 cameraForward, float3 cameraRight, 
                        float3 cameraUp, float tanHalfFovY, float aspect,
                        bool enableShadows, bool enableCameraSmudge,
-                       bool enableLensFlare, const float* cameraSmudgeImage,
+                       const float* cameraSmudgeImage,
                        int cameraSmudgeWidth, int cameraSmudgeHeight,
-                       int cameraSmudgeChannels, const float* lensFlareImage,
-                       int lensFlareWidth, int lensFlareHeight,
-                       int lensFlareChannels) {
+                       int cameraSmudgeChannels) {
     shadeKernel<<<gridDim, blockDim>>>(envTex, specularTex, specularMipLevels,
                                        irradianceTex, brdfLutTex, albedo, normal,
                                        roughness, metallic, outRGBA,
                                        width, height, cameraPos,
                                        cameraForward, cameraRight,
                                        cameraUp, tanHalfFovY, aspect,
-                                       enableShadows, enableCameraSmudge,
-                                       enableLensFlare, cameraSmudgeImage,
+                                       enableShadows, enableCameraSmudge, cameraSmudgeImage,
                                        cameraSmudgeWidth, cameraSmudgeHeight,
-                                       cameraSmudgeChannels, lensFlareImage,
-                                       lensFlareWidth, lensFlareHeight,
-                                       lensFlareChannels);
+                                       cameraSmudgeChannels);
 }

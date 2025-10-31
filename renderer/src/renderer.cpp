@@ -11,6 +11,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <chrono>
 
 #include <cuda_runtime.h>
 
@@ -100,20 +101,13 @@ void cudaCheck(cudaError_t err, const char* expr, const char* file, int line) {
     }
 }
 
-const std::vector<FloatImage>& emptyFloatImageVector() {
-    static const std::vector<FloatImage> kEmpty;
-    return kEmpty;
-}
-
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float* albedo, const float* normal,
                  const float* roughness, const float* metallic,
                  int width, int height, std::vector<float4>& frameRGBA,
                  bool enableShadows,
                  bool enableCameraSmudge,
-                 bool enableLensFlare,
-                 const std::vector<FloatImage>& cameraSmudges,
-                 const std::vector<FloatImage>& lensFlares) {
+                 FloatImage* cameraSmudge) {
     size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     size_t vec3Bytes = pixelCount * 3 * sizeof(float);
     size_t scalarBytes = pixelCount * sizeof(float);
@@ -140,10 +134,7 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
 
-    static thread_local std::mt19937 rng([] {
-        std::random_device rd;
-        return std::mt19937(rd());
-    }());
+    std::mt19937_64 rng(std::chrono::high_resolution_clock::now().time_since_epoch().count());
     std::uniform_real_distribution<float> polarDist(0.0f, 360.0f);
     std::uniform_real_distribution<float> azimuthDist(0.0f, 40.0f);
 
@@ -207,60 +198,23 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
     int lensFlareHeight = 0;
     int lensFlareChannels = 0;
 
-    auto selectOverlay = [&rng](const std::vector<FloatImage>& images) -> const FloatImage* {
-        if (images.empty()) {
-            return nullptr;
-        }
-        std::uniform_int_distribution<size_t> indexDist(0, images.size() - 1);
-        return &images[indexDist(rng)];
-    };
+    bool smudgeActive = enableCameraSmudge && cameraSmudge;
 
-    const FloatImage* selectedSmudge = nullptr;
-    if (enableCameraSmudge) {
-        selectedSmudge = selectOverlay(cameraSmudges);
-        if (selectedSmudge) {
-            size_t expectedSize = static_cast<size_t>(selectedSmudge->width) *
-                                  static_cast<size_t>(selectedSmudge->height) *
-                                  static_cast<size_t>(selectedSmudge->channels);
-            if (selectedSmudge->width == width && selectedSmudge->height == height &&
-                selectedSmudge->channels > 0 &&
-                selectedSmudge->data.size() == expectedSize) {
-                size_t smudgeBytes = selectedSmudge->data.size() * sizeof(float);
-                CUDA_CHECK(cudaMalloc(&dCameraSmudge, smudgeBytes));
-                CUDA_CHECK(cudaMemcpy(dCameraSmudge, selectedSmudge->data.data(), smudgeBytes, cudaMemcpyHostToDevice));
-                cameraSmudgeWidth = selectedSmudge->width;
-                cameraSmudgeHeight = selectedSmudge->height;
-                cameraSmudgeChannels = selectedSmudge->channels;
-            } else {
-                selectedSmudge = nullptr;
-            }
+    if (smudgeActive){
+        size_t expectedSize = static_cast<size_t>(cameraSmudge->width) *
+                                static_cast<size_t>(cameraSmudge->height) *
+                                static_cast<size_t>(cameraSmudge->channels);
+        if (cameraSmudge->width == width && cameraSmudge->height == height &&
+            cameraSmudge->channels > 0 &&
+            cameraSmudge->data.size() == expectedSize) {
+            size_t smudgeBytes = cameraSmudge->data.size() * sizeof(float);
+            CUDA_CHECK(cudaMalloc(&dCameraSmudge, smudgeBytes));
+            CUDA_CHECK(cudaMemcpy(dCameraSmudge, cameraSmudge->data.data(), smudgeBytes, cudaMemcpyHostToDevice));
+            cameraSmudgeWidth = cameraSmudge->width;
+            cameraSmudgeHeight = cameraSmudge->height;
+            cameraSmudgeChannels = cameraSmudge->channels;
         }
     }
-
-    const FloatImage* selectedLens = nullptr;
-    if (enableLensFlare) {
-        selectedLens = selectOverlay(lensFlares);
-        if (selectedLens) {
-            size_t expectedSize = static_cast<size_t>(selectedLens->width) *
-                                  static_cast<size_t>(selectedLens->height) *
-                                  static_cast<size_t>(selectedLens->channels);
-            if (selectedLens->width == width && selectedLens->height == height &&
-                selectedLens->channels > 0 &&
-                selectedLens->data.size() == expectedSize) {
-                size_t lensBytes = selectedLens->data.size() * sizeof(float);
-                CUDA_CHECK(cudaMalloc(&dLensFlare, lensBytes));
-                CUDA_CHECK(cudaMemcpy(dLensFlare, selectedLens->data.data(), lensBytes, cudaMemcpyHostToDevice));
-                lensFlareWidth = selectedLens->width;
-                lensFlareHeight = selectedLens->height;
-                lensFlareChannels = selectedLens->channels;
-            } else {
-                selectedLens = nullptr;
-            }
-        }
-    }
-
-    bool smudgeActive = enableCameraSmudge && (selectedSmudge != nullptr);
-    bool lensActive = enableLensFlare && (selectedLens != nullptr);
 
     launchShadeKernel(grid, block,
                       env.envTexture, env.specularTexture,
@@ -270,12 +224,9 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                       reinterpret_cast<float*>(dFrame),
                       width, height, cameraPos, forward,
                       right, up, tanHalfFovY, aspectRatio,
-                      enableShadows, smudgeActive,
-                      lensActive, dCameraSmudge,
+                      enableShadows, smudgeActive, dCameraSmudge,
                       cameraSmudgeWidth, cameraSmudgeHeight,
-                      cameraSmudgeChannels, dLensFlare,
-                      lensFlareWidth, lensFlareHeight,
-                      lensFlareChannels);
+                      cameraSmudgeChannels);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -567,7 +518,7 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
                           static_cast<float>(level) / static_cast<float>(result.mipLevels - 1) :
                           0.0f;
 
-    launchPrefilterSpecularCubemap(mipGrid, block,
+        launchPrefilterSpecularCubemap(mipGrid, block,
                        envTextureForSampling.value,
                        levelSurface.value,
                        static_cast<int>(mipFaceSize),

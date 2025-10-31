@@ -150,17 +150,13 @@ BRDFLookupTable createBRDFLUT(unsigned size);
 
 void loadBRDFLUT(BRDFLookupTable& lut);
 
-const std::vector<FloatImage>& emptyFloatImageVector();
-
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float* albedo, const float* normal,
                  const float* roughness, const float* metallic,
                  int width, int height, std::vector<float4>& frameRGBA,
                  bool enableShadows = false,
                  bool enableCameraSmudge = false,
-                 bool enableLensFlare = false,
-                 const std::vector<FloatImage>& cameraSmudges = emptyFloatImageVector(),
-                 const std::vector<FloatImage>& lensFlares = emptyFloatImageVector());
+                 FloatImage* cameraSmudge = nullptr);
 
 EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& filePath, 
                                                  unsigned faceSize, unsigned irradianceSize,

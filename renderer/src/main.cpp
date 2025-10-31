@@ -5,6 +5,8 @@
 #include <stdexcept>
 #include <array>
 #include <string>
+#include <random>
+#include <chrono>
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -37,7 +39,7 @@ int main(int argc, char** argv) {
         BRDFLookupTable brdfLut = createBRDFLUT(512);
         loadBRDFLUT(brdfLut);
 
-        std::cout << "Loading camera smudge and lens flare textures..." << std::endl;
+        std::cout << "Loading camera smudge textures..." << std::endl;
         std::vector<FloatImage> cameraSmudges;
         for (const auto& entry : std::filesystem::directory_iterator(smudgesDir)) {
             if (entry.is_regular_file() && entry.path().extension() == ".png") {
@@ -60,11 +62,24 @@ int main(int argc, char** argv) {
                 textureNames.push_back(entry.path().filename().string());
             }
         }
+        if (textureNames.empty()) {
+            throw std::runtime_error("No material subdirectories found in textures directory.");
+        }
         int W = 0, H = 0, frameIndex = 0;
         const int maxRenders = std::stoi(argv[2]);
+        std::mt19937_64 rng(std::chrono::high_resolution_clock::now().time_since_epoch().count());
+        constexpr float P_CLEAN = 0.75f;
+
+        constexpr float P_SHADOW = 0.50f;
+        constexpr float P_SMUDGE = 0.75f;
+
+        std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+        std::uniform_int_distribution<size_t> textureIndexDist(0, textureNames.size() - 1);
+        std::uniform_int_distribution<size_t> environmentIndexDist(0, environments.size() - 1);
+
         while (frameIndex < maxRenders) {
-            int randomTexIndex = rand() % static_cast<int>(textureNames.size());
-            int randomEnvIndex = rand() % static_cast<int>(environments.size());
+            size_t randomTexIndex = textureIndexDist(rng);
+            size_t randomEnvIndex = environmentIndexDist(rng);
             FloatImage dAlbedo = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "albedo.png", 3, true);
             FloatImage dNormal = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "normal.png", 3, true);
             FloatImage dRoughness = loadPNGImage(texturesDir / textureNames[randomTexIndex] / "roughness.png", 1, true);
@@ -73,43 +88,50 @@ int main(int argc, char** argv) {
             H = dAlbedo.height;
 
             std::array<std::vector<float4>, 3> frameRGBAs;
-            std::filesystem::path sampleDir = std::filesystem::path("output") /
-                                              ("sample_" + std::to_string(frameIndex));
-            std::filesystem::create_directories(sampleDir);
+            std::string sampleName = "sample_" + std::to_string(frameIndex);
 
-            bool dirtySet = rand() % 2 == 0;
+            bool dirtySet = (uni(rng) >= P_CLEAN);
+            std::filesystem::path targetDir;
             if (dirtySet) {
-                for (int i = 0; i < 3; ++i) {
-                    renderPlane(environments[randomEnvIndex], brdfLut,
-                                dAlbedo.data.data(), dNormal.data.data(),
-                                dRoughness.data.data(), dMetallic.data.data(),
-                                W, H, frameRGBAs[i],
-                                false, false, false,
-                                cameraSmudges, lensFlares);
-
-                    std::filesystem::path outputPath = sampleDir / "clean" /
-                        (std::to_string(i) + ".png");
-                    writePNGImage(outputPath, frameRGBAs[i].data(), W, H, true);
+                bool enableShadows = (uni(rng) < P_SHADOW);
+                bool enableCameraSmudge = (uni(rng) < P_SMUDGE);
+                targetDir = std::filesystem::path("output") / "dirty" / sampleName;
+                std::filesystem::create_directories(targetDir);
+                
+                FloatImage* cameraSmudge = nullptr;
+                if (!cameraSmudges.empty()) {
+                    std::uniform_int_distribution<size_t> smudgeIndexDist(0, cameraSmudges.size() - 1);
+                    cameraSmudge = &cameraSmudges[smudgeIndexDist(rng)];
                 }
-            } else {
-                bool enableCameraSmudge = rand() % 2 == 0;
-                bool enableLensFlare = rand() % 2 == 0;
-                bool enableShadows = rand() % 2 == 0;
+
                 for (int i = 0; i < 3; ++i) {
                     renderPlane(environments[randomEnvIndex], brdfLut,
                                 dAlbedo.data.data(), dNormal.data.data(),
                                 dRoughness.data.data(), dMetallic.data.data(),
                                 W, H, frameRGBAs[i], 
-                                enableShadows, enableCameraSmudge, enableLensFlare,
-                                cameraSmudges, lensFlares);
+                                enableShadows, enableCameraSmudge, cameraSmudge);
 
-                    std::filesystem::path outputPath = sampleDir / "dirty" /
+                    std::filesystem::path outputPath = targetDir /
+                        (std::to_string(i) + ".png");
+                    writePNGImage(outputPath, frameRGBAs[i].data(), W, H, true);
+                }
+            } else {
+                targetDir = std::filesystem::path("output") / "clean" / sampleName;
+                std::filesystem::create_directories(targetDir);
+                for (int i = 0; i < 3; ++i) {
+                    renderPlane(environments[randomEnvIndex], brdfLut,
+                                dAlbedo.data.data(), dNormal.data.data(),
+                                dRoughness.data.data(), dMetallic.data.data(),
+                                W, H, frameRGBAs[i],
+                                false, false, nullptr);
+
+                    std::filesystem::path outputPath = targetDir /
                         (std::to_string(i) + ".png");
                     writePNGImage(outputPath, frameRGBAs[i].data(), W, H, true);
                 }
             }
             appendRenderMetadata(std::filesystem::path("output") / "render_metadata.json",
-                                sampleDir.string(), textureNames[randomTexIndex]);
+                                 targetDir.string(), textureNames[randomTexIndex]);
             frameIndex++;
         }
         std::cout << "Rendering complete!" << std::endl;
