@@ -6,9 +6,9 @@ from training.models.encoders.unet import UNetStrideEncoder
 from training.models.encoders.unet import UNetResNetEncoder
 
 def test_no_skips():
-    encoder1 = UNetEncoder(in_channels=3)
+    encoder1 = UNetEncoder(in_channels=3, skip=False)
     encoder2 = UNetResNetEncoder(in_channels=3, skip=False)
-    encoder3 = UNetStrideEncoder(in_channels=3)
+    encoder3 = UNetStrideEncoder(in_channels=3, skip=False)
 
     x = torch.randn(1, 3, 1024, 1024)
 
@@ -21,7 +21,7 @@ def test_no_skips():
 
 def test_encoder_shapes_1():
     """Test encoder output shapes"""
-    encoder = UNetEncoder(in_channels=3, channel_list=[64, 128, 256, 512, 1024, 2048], skip=True)
+    encoder = UNetEncoder(in_channels=3, channel_list=[64, 128, 256, 512, 1024, 2048])
 
     x = torch.randn(1, 3, 1024, 1024) # (batch, channels, height, width)
 
@@ -38,7 +38,7 @@ def test_encoder_shapes_1():
 
 def test_encoder_shapes_2():
     """Test encoder output shapes"""
-    encoder = UNetStrideEncoder(in_channels=3, channel_list=[64, 128, 256, 512, 1024, 2048], skip=True)
+    encoder = UNetStrideEncoder(in_channels=3, channel_list=[64, 128, 256, 512, 1024, 2048])
 
     x = torch.randn(1, 3, 1024, 1024)  # (batch, channels, height, width)
 
@@ -114,7 +114,7 @@ def test_encoder_shapes_6():
     assert feature.shape == torch.Size([1, 2048, 32, 32])
 
 def test_unet_encoder_gradient_flow_1():
-    encoder = UNetEncoder(in_channels=9, skip=True)
+    encoder = UNetEncoder(in_channels=9)
     encoder.train()
 
     x = torch.randn(1, 9, 1024, 1024, requires_grad=True)
@@ -128,7 +128,7 @@ def test_unet_encoder_gradient_flow_1():
         assert param.grad is not None, f"{name} missing gradients"
 
 def test_unet_encoder_gradient_flow_2():
-    encoder = UNetStrideEncoder(in_channels=3, skip=True)
+    encoder = UNetStrideEncoder(in_channels=3)
     encoder.train()
 
     x = torch.randn(1, 3, 1024, 1024, requires_grad=True)
