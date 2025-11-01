@@ -17,9 +17,7 @@ class SwinIRWrapper(nn.Module):
             self,
             pretrained_path: Literal[
                 '001_classicalSR_DF2K_s64w8_SwinIR‑M_x2.pth',
-                '001_classicalSR_DF2K_s64w8_SwinIR‑M_x3.pth',
                 '001_classicalSR_DF2K_s64w8_SwinIR‑M_x4.pth',
-                '003_realSR_BSRGAN_DFOWMFC_s64w8_SwinIR‑M_x4_GAN.pth'
             ],
             upscale: Literal[2, 4] = 2,
             in_chans: int = 3,
