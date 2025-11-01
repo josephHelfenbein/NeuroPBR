@@ -19,6 +19,91 @@ __device__ inline float3 cross3(const float3 a, const float3 b) {
     return make_float3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x);
 }
 
+__device__ inline float areaElement(float x, float y) {
+	return atan2f(x * y, sqrtf(x * x + y * y + 1.0f));
+}
+
+__device__ inline float clamp01(float v) {
+    return fminf(fmaxf(v, 0.0f), 1.0f);
+}
+
+__device__ inline float fractf(float v) {
+    return v - floorf(v);
+}
+
+__device__ inline float lerp(float a, float b, float t) {
+    return a + t * (b - a);
+}
+
+__device__ inline float smoothstepf(float edge0, float edge1, float x) {
+    float t = clamp01((x - edge0) / fmaxf(edge1 - edge0, 1e-5f));
+    return t * t * (3.0f - 2.0f * t);
+}
+
+__device__ inline float dot2(const float2& a, const float2& b) {
+    return a.x * b.x + a.y * b.y;
+}
+
+__device__ inline float texelSolidAngle(int x, int y, int size) {
+	float u0 = (2.0f * float(x) / float(size)) - 1.0f;
+	float u1 = (2.0f * float(x + 1) / float(size)) - 1.0f;
+	float v0 = (2.0f * float(y) / float(size)) - 1.0f;
+	float v1 = (2.0f * float(y + 1) / float(size)) - 1.0f;
+
+	float solidAngle = areaElement(u0, v0) - areaElement(u0, v1)
+					 - areaElement(u1, v0) + areaElement(u1, v1);
+	return solidAngle;
+}
+
+__device__ inline float warpReduceSum(float value) {
+	for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+		value += __shfl_down_sync(0xffffffff, value, offset);
+	}
+	return value;
+}
+
+__device__ inline void blockReduce(float input[4]) {
+	int linearThread = threadIdx.z * blockDim.y * blockDim.x + threadIdx.y * blockDim.x + threadIdx.x;
+	int lane = linearThread & 31;
+	int warp = linearThread >> 5;
+	int totalThreads = blockDim.x * blockDim.y * blockDim.z;
+	int numWarps = (totalThreads + warpSize - 1) / warpSize;
+
+	float reduced[4];
+	for (int i = 0; i < 4; ++i) {
+		reduced[i] = warpReduceSum(input[i]);
+	}
+
+	__shared__ float shared[4][32];
+	if (lane == 0) {
+		shared[0][warp] = reduced[0];
+		shared[1][warp] = reduced[1];
+		shared[2][warp] = reduced[2];
+		shared[3][warp] = reduced[3];
+	}
+	__syncthreads();
+
+	if (warp == 0) {
+		float finalValues[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+		for (int i = lane; i < numWarps; i += warpSize) {
+			finalValues[0] += shared[0][i];
+			finalValues[1] += shared[1][i];
+			finalValues[2] += shared[2][i];
+			finalValues[3] += shared[3][i];
+		}
+		for (int i = 0; i < 4; ++i) {
+			finalValues[i] = warpReduceSum(finalValues[i]);
+		}
+		if (lane == 0) {
+			input[0] = finalValues[0];
+			input[1] = finalValues[1];
+			input[2] = finalValues[2];
+			input[3] = finalValues[3];
+		}
+	}
+	__syncthreads();
+}
+
 __device__ inline float3 faceUvToDir(int face, float u, float v) {
 	float3 dir;
 	switch (face) {

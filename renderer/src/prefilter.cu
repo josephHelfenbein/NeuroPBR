@@ -107,21 +107,93 @@ void convolveDiffuseIrradiance(cudaTextureObject_t envCubemap,
 					   outSurface, x * (int) sizeof(float4), y, face);
 }
 
+extern "C" __global__
+void computeEnvironmentBrightness(cudaTextureObject_t envCubemap,
+									int faceSize,
+									float horizonMinY,
+									float horizonMaxY,
+									float zenithMinY,
+									float* blockAccum) {
+	float partial[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+
+	int face = blockIdx.z;
+	int x = blockIdx.x * blockDim.x + threadIdx.x;
+	int y = blockIdx.y * blockDim.y + threadIdx.y;
+	if (face < 6 && x < faceSize && y < faceSize) {
+		float u = (float(x) + 0.5f) / float(faceSize);
+		float v = (float(y) + 0.5f) / float(faceSize);
+		float2 uv = make_float2(u * 2.0f - 1.0f, v * 2.0f - 1.0f);
+		float3 dir = faceUvToDir(face, uv.x, uv.y);
+
+		float4 sample = texCubemap<float4>(envCubemap, dir.x, dir.y, dir.z);
+		float luminance = sample.x * 0.2126f + sample.y * 0.7152f + sample.z * 0.0722f;
+		float weight = texelSolidAngle(x, y, faceSize);
+
+		if (dir.y >= horizonMinY && dir.y <= horizonMaxY) {
+			partial[0] += luminance * weight;
+			partial[1] += weight;
+		}
+		if (dir.y >= zenithMinY) {
+			partial[2] += luminance * weight;
+			partial[3] += weight;
+		}
+	}
+
+	blockReduce(partial);
+
+	if (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0) {
+		int blockIndex = (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
+		blockAccum[4 * blockIndex + 0] = partial[0];
+		blockAccum[4 * blockIndex + 1] = partial[1];
+		blockAccum[4 * blockIndex + 2] = partial[2];
+		blockAccum[4 * blockIndex + 3] = partial[3];
+	}
+}
+
+extern "C" __global__
+void reduceEnvironmentBrightness(const float* blockAccum,
+									int blockCount,
+									float* outAccum) {
+	int idx = threadIdx.x;
+	if (idx >= 4) return;
+
+	float sum = 0.0f;
+	for (int i = 0; i < blockCount; ++i) {
+	sum += blockAccum[4 * i + idx];
+	}
+	outAccum[idx] = sum;
+}
+
 void launchEquirectangularToCubemap(dim3 gridDim, dim3 blockDim,
-							 cudaTextureObject_t hdrTex, cudaSurfaceObject_t cubemapSurface,
-							 int faceSize) {
+									cudaTextureObject_t hdrTex, cudaSurfaceObject_t cubemapSurface,
+									int faceSize) {
 	equirectangularToCubemap<<<gridDim, blockDim>>>(hdrTex, cubemapSurface, faceSize);
 }
 
 void launchPrefilterSpecularCubemap(dim3 gridDim, dim3 blockDim,
-							   cudaTextureObject_t envCubemap, cudaSurfaceObject_t outSurface,
-							   int faceSize, float roughness, unsigned int sampleCount) {
+									cudaTextureObject_t envCubemap, cudaSurfaceObject_t outSurface,
+									int faceSize, float roughness, unsigned int sampleCount) {
 	prefilterSpecularCubemap<<<gridDim, blockDim>>>(envCubemap, outSurface, faceSize, roughness, sampleCount);
 }
 
 void launchConvolveDiffuseIrradiance(dim3 gridDim, dim3 blockDim,
-								 cudaTextureObject_t envCubemap, cudaSurfaceObject_t outSurface,
-								 int faceSize, unsigned int sampleCount) {
+									cudaTextureObject_t envCubemap, cudaSurfaceObject_t outSurface,
+									int faceSize, unsigned int sampleCount) {
 	convolveDiffuseIrradiance<<<gridDim, blockDim>>>(envCubemap, outSurface, faceSize, sampleCount);
+}
+
+void launchComputeEnvironmentBrightness(dim3 gridDim, dim3 blockDim,
+										 cudaTextureObject_t envCubemap,
+										 int faceSize, float horizonMinY,
+										 float horizonMaxY, float zenithMinY,
+										 float* blockAccum) {
+	computeEnvironmentBrightness<<<gridDim, blockDim>>>(envCubemap, faceSize,
+														horizonMinY, horizonMaxY,
+														zenithMinY, blockAccum);
+}
+
+void launchReduceEnvironmentBrightness(const float* blockAccum,
+										int blockCount, float* outAccum) {
+ 	reduceEnvironmentBrightness<<<1, 4>>>(blockAccum, blockCount, outAccum);
 }
 

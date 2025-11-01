@@ -9,9 +9,152 @@
 #define M_PI 3.14159265358979323846f
 #endif
 
-__device__ inline float clamp01(float v) {
-    return fminf(fmaxf(v, 0.0f), 1.0f);
+__device__ inline float hash21(const float2& p) {
+    float n = dot2(p, make_float2(127.1f, 311.7f));
+    return fractf(sinf(n) * 43758.5453f);
 }
+
+__device__ inline float valueNoise(const float2& p) {
+    float2 i = make_float2(floorf(p.x), floorf(p.y));
+    float2 f = make_float2(fractf(p.x), fractf(p.y));
+
+    float a = hash21(i);
+    float b = hash21(make_float2(i.x + 1.0f, i.y));
+    float c = hash21(make_float2(i.x, i.y + 1.0f));
+    float d = hash21(make_float2(i.x + 1.0f, i.y + 1.0f));
+
+    float2 u = make_float2(f.x * f.x * (3.0f - 2.0f * f.x),
+                           f.y * f.y * (3.0f - 2.0f * f.y));
+
+    float lerpX1 = lerp(a, b, u.x);
+    float lerpX2 = lerp(c, d, u.x);
+    return lerp(lerpX1, lerpX2, u.y);
+}
+
+__device__ inline float fbm(const float2& p) {
+    float sum = 0.0f;
+    float amplitude = 0.5f;
+    float frequency = 1.0f;
+    for (int i = 0; i < 4; ++i) {
+        float2 sample = make_float2(p.x * frequency, p.y * frequency);
+        sum += amplitude * valueNoise(sample);
+        frequency *= 2.0f;
+        amplitude *= 0.5f;
+    }
+    return clamp01(sum);
+}
+
+__device__ inline float2 gradientNoise2D(const float2& p) {
+    float angle = valueNoise(p) * 6.28318530718f;
+    return make_float2(cosf(angle), sinf(angle));
+}
+
+__device__ inline float worley(const float2& p, float jitter) {
+    float2 cell = make_float2(floorf(p.x), floorf(p.y));
+    float minDist = 1e6f;
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            float2 neighbor = make_float2(cell.x + static_cast<float>(i),
+                                          cell.y + static_cast<float>(j));
+            float2 offset = make_float2(hash21(neighbor), hash21(make_float2(neighbor.x + 19.19f, neighbor.y + 73.17f)));
+            float2 jittered = make_float2((offset.x - 0.5f) * jitter,
+                                          (offset.y - 0.5f) * jitter);
+            float2 feature = make_float2(neighbor.x + 0.5f + jittered.x,
+                                         neighbor.y + 0.5f + jittered.y);
+            float2 diff = make_float2(p.x - feature.x, p.y - feature.y);
+            float dist = sqrtf(diff.x * diff.x + diff.y * diff.y);
+            minDist = fminf(minDist, dist);
+        }
+    }
+    return minDist;
+}
+
+__device__ inline float computeVoronoiShadowMask(float2 uv, const float3& seed) {
+    float warpFrequency = 0.75f + seed.x * 1.35f;
+    float warpStrength = 0.08f + seed.y * 0.18f;
+    float macroScale = 1.4f + seed.z * 1.6f;
+    float mesoScale = 3.0f + seed.x * 2.7f;
+    float microScale = 8.5f + seed.y * 5.2f;
+    float jitter = 0.6f + seed.z * 0.5f;
+    const float mesoWeight = 0.55f;
+    const float microWeight = 0.45f;
+
+    float2 warpSample = make_float2((uv.x + seed.y * 7.13f) * warpFrequency,
+                                    (uv.y + seed.x * 5.61f) * warpFrequency);
+    float2 warpVec = gradientNoise2D(warpSample);
+    float2 warpVec2 = gradientNoise2D(make_float2(warpSample.x + 23.47f + seed.z * 11.37f,
+                                                 warpSample.y + 91.13f + seed.x * 6.28f));
+    float2 warp = make_float2((warpVec.x + warpVec2.x) * 0.5f * warpStrength,
+                              (warpVec.y + warpVec2.y) * 0.5f * warpStrength);
+    float2 warpedUV = make_float2(uv.x + warp.x + seed.z * 0.19f,
+                                  uv.y + warp.y + seed.y * 0.17f);
+
+    float macroDist = worley(make_float2(warpedUV.x * macroScale + seed.x * 13.73f,
+                                         warpedUV.y * macroScale + seed.y * 19.41f), jitter);
+    float mesoDist = worley(make_float2(warpedUV.x * mesoScale + 17.0f + seed.z * 23.0f,
+                                        warpedUV.y * mesoScale + 17.0f + seed.x * 29.0f), jitter);
+    float microNoise = fbm(make_float2(warpedUV.x * microScale + seed.y * 37.0f,
+                                       warpedUV.y * microScale + seed.z * 41.0f));
+
+    float macro = clamp01(1.0f - macroDist * (1.25f + seed.y * 0.4f));
+    float meso = clamp01(1.0f - mesoDist * (1.55f + seed.x * 0.5f));
+
+    float macroTerm = smoothstepf(0.2f + seed.z * 0.15f, 0.8f - seed.y * 0.2f, macro);
+    float mesoSmooth = smoothstepf(0.15f + seed.x * 0.15f, 0.85f - seed.z * 0.2f, meso);
+    float mesoTerm = lerp(1.0f, mesoSmooth, mesoWeight);
+    float microTerm = lerp(1.0f, microWeight, microNoise);
+
+    float mask = macroTerm * mesoTerm * microTerm;
+    return clamp01(mask);
+}
+
+    __device__ inline float computeProceduralShadow(float2 uv,
+                                                    float hardness,
+                                                    float horizonBrightness,
+                                                    const float3& irradiance,
+                                                    const float3& seed) {
+        float shadowMask = computeVoronoiShadowMask(uv, seed);
+
+        const float blurThreshold = 0.03f;
+        if (hardness > blurThreshold) {
+            float radius = hardness;
+            const float weights[3] = {0.5f, 0.3f, 0.2f};
+            float weightTotal = weights[0] + 2.0f * (weights[1] + weights[2]);
+
+            float horizontal = weights[0] * shadowMask;
+            float vertical = weights[0] * shadowMask;
+            for (int i = 1; i < 3; ++i) {
+                float offset = radius * static_cast<float>(i);
+
+                float2 uvPosX = make_float2(fractf(uv.x + offset), fractf(uv.y));
+                float2 uvNegX = make_float2(fractf(uv.x - offset), fractf(uv.y));
+                horizontal += weights[i] * (computeVoronoiShadowMask(uvPosX, seed) +
+                                            computeVoronoiShadowMask(uvNegX, seed));
+
+                float2 uvPosY = make_float2(fractf(uv.x), fractf(uv.y + offset));
+                float2 uvNegY = make_float2(fractf(uv.x), fractf(uv.y - offset));
+                vertical += weights[i] * (computeVoronoiShadowMask(uvPosY, seed) +
+                                          computeVoronoiShadowMask(uvNegY, seed));
+            }
+
+            horizontal /= weightTotal;
+            vertical /= weightTotal;
+            shadowMask = clamp01(0.5f * (horizontal + vertical));
+        }
+
+        float luminance = dot3(irradiance, make_float3(0.2126f, 0.7152f, 0.0722f));
+        float horizonFloor = fmaxf(horizonBrightness, 1e-4f);
+        float horizonBoost = clamp01(luminance / horizonFloor);
+        shadowMask = lerp(shadowMask, 1.0f, horizonBoost);
+
+        const float minLightScale = 1.25f;
+        const float minLightFloor = 0.08f;
+        float hardnessNorm = clamp01((hardness - 0.02f) / (0.12f - 0.02f));
+        float shadowStrength = lerp(0.6f, 0.95f, 1.0f - hardnessNorm);
+        float minLight = clamp01(fmaxf(minLightFloor, minLightScale * luminance));
+
+        return fmaxf(minLight, shadowMask * shadowStrength);
+    }
 
 __device__ inline float4 fetchOverlayPixel(const float* data, int channels, int pixelIndex) {
     if (!data || channels <= 0) {
@@ -123,7 +266,8 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  bool enableShadows, bool enableCameraSmudge,
                  const float* cameraSmudgeImage,
                  int cameraSmudgeWidth, int cameraSmudgeHeight,
-                 int cameraSmudgeChannels) {
+                 int cameraSmudgeChannels, float horizonBrightness,
+                 float zenithBrightness, float hardness) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) {
@@ -205,6 +349,23 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
 
     float NdotV = fmaxf(dot3(N, V), 0.0f);
 
+    float3 irradiance = make_float3(texCubemap<float4>(irradianceTex, N.x, N.y, N.z));
+    float shadowMultiplier = 1.0f;
+    if (enableShadows) {
+        float seedFwd = fractf(dot3(cameraForward, make_float3(0.1031f, 0.11369f, 0.13787f)));
+        float seedRight = fractf(dot3(cameraRight, make_float3(0.2971f, 0.4377f, 0.1985f)));
+        float seedUp = fractf(dot3(cameraUp, make_float3(0.7071f, 0.3719f, 0.6235f)));
+        float3 shadowSeed = make_float3(seedFwd, seedRight, seedUp);
+        shadowMultiplier = computeProceduralShadow(make_float2(tiledU, tiledV),
+                                                   hardness,
+                                                   horizonBrightness,
+                                                   irradiance,
+                                                   shadowSeed);
+        albedoColor.x *= shadowMultiplier;
+        albedoColor.y *= shadowMultiplier;
+        albedoColor.z *= shadowMultiplier;
+    }
+
     float3 R = make_float3(2.0f * NdotV * N.x - V.x,
                            2.0f * NdotV * N.y - V.y,
                            2.0f * NdotV * N.z - V.z);
@@ -224,9 +385,6 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
     float3 kD = make_float3((1.0f - kS.x) * invMetal,
                             (1.0f - kS.y) * invMetal,
                             (1.0f - kS.z) * invMetal);
-
-    float4 irrSample = texCubemap<float4>(irradianceTex, N.x, N.y, N.z);
-    float3 irradiance = make_float3(irrSample.x, irrSample.y, irrSample.z);
 
     float3 diffuse = make_float3(kD.x * irradiance.x * albedoColor.x / M_PI,
                                  kD.y * irradiance.y * albedoColor.y / M_PI,
@@ -253,6 +411,14 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
         prefilteredColor = make_float3(envSample.x, envSample.y, envSample.z);
     }
 
+    if (enableShadows) {
+        const float specularShadowStrength = 0.7f;
+        float specFactor = lerp(1.0f, shadowMultiplier, specularShadowStrength);
+        prefilteredColor.x *= specFactor;
+        prefilteredColor.y *= specFactor;
+        prefilteredColor.z *= specFactor;
+    }
+
     float lutU = fminf(fmaxf(NdotV, 0.0f), 1.0f);
     float lutV = fminf(fmaxf(rough, 0.0f), 1.0f);
     float2 brdfSample = tex2D<float2>(brdfLutTex, lutU, lutV);
@@ -265,9 +431,6 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                                diffuse.y + specular.y,
                                diffuse.z + specular.z);
 
-    if (enableShadows) {
-        // Placeholder for procedural shadowing; to be implemented.
-    }
     if (enableCameraSmudge && cameraSmudgeImage &&
         cameraSmudgeWidth == width && cameraSmudgeHeight == height) {
         float4 smudgeSample = fetchOverlayPixel(cameraSmudgeImage, cameraSmudgeChannels, idx);
@@ -298,7 +461,8 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        bool enableShadows, bool enableCameraSmudge,
                        const float* cameraSmudgeImage,
                        int cameraSmudgeWidth, int cameraSmudgeHeight,
-                       int cameraSmudgeChannels) {
+                       int cameraSmudgeChannels, float horizonBrightness,
+                       float zenithBrightness, float hardness) {
     shadeKernel<<<gridDim, blockDim>>>(envTex, specularTex, specularMipLevels,
                                        irradianceTex, brdfLutTex, albedo, normal,
                                        roughness, metallic, outRGBA,
@@ -307,5 +471,6 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                                        cameraUp, tanHalfFovY, aspect,
                                        enableShadows, enableCameraSmudge, cameraSmudgeImage,
                                        cameraSmudgeWidth, cameraSmudgeHeight,
-                                       cameraSmudgeChannels);
+                                       cameraSmudgeChannels, horizonBrightness,
+                                       zenithBrightness, hardness);
 }

@@ -34,6 +34,11 @@ struct EnvironmentCubemap {
     cudaTextureObject_t specularTexture = 0;
     cudaTextureObject_t irradianceTexture = 0;
 
+    float horizonBrightness = 0.0f;
+    float zenithBrightness = 0.0f;
+
+    float hardness = 0.0f;
+
     EnvironmentCubemap() = default;
     ~EnvironmentCubemap() { release(); }
 
@@ -64,6 +69,9 @@ private:
         envArray = nullptr;
         specularArray = nullptr;
         irradianceArray = nullptr;
+        horizonBrightness = 0.0f;
+        zenithBrightness = 0.0f;
+        hardness = 0.0f;
     }
 
     void moveFrom(EnvironmentCubemap&& other) noexcept {
@@ -80,12 +88,19 @@ private:
         specularTexture = other.specularTexture;
         irradianceTexture = other.irradianceTexture;
 
+        horizonBrightness = other.horizonBrightness;
+        zenithBrightness = other.zenithBrightness;
+        hardness = other.hardness;
+
         other.envArray = nullptr;
         other.specularArray = nullptr;
         other.irradianceArray = nullptr;
         other.envTexture = 0;
         other.specularTexture = 0;
         other.irradianceTexture = 0;
+        other.horizonBrightness = 0.0f;
+        other.zenithBrightness = 0.0f;
+        other.hardness = 0.0f;
         other.faceSize = 0;
         other.irradianceSize = 0;
         other.mipLevels = 0;

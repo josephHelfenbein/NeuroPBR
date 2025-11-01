@@ -14,7 +14,8 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  bool enableShadows, bool enableCameraSmudge,
                  const float* cameraSmudgeImage,
                  int cameraSmudgeWidth, int cameraSmudgeHeight,
-                 int cameraSmudgeChannels);
+                 int cameraSmudgeChannels, float horizonBrightness,
+                 float zenithBrightness, float hardness);
 
 void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
@@ -28,4 +29,5 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        bool enableShadows, bool enableCameraSmudge,
                        const float* cameraSmudgeImage,
                        int cameraSmudgeWidth, int cameraSmudgeHeight,
-                       int cameraSmudgeChannels);
+                       int cameraSmudgeChannels, float horizonBrightness,
+                       float zenithBrightness, float hardness);

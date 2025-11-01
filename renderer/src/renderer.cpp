@@ -226,7 +226,8 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                       right, up, tanHalfFovY, aspectRatio,
                       enableShadows, smudgeActive, dCameraSmudge,
                       cameraSmudgeWidth, cameraSmudgeHeight,
-                      cameraSmudgeChannels);
+                      cameraSmudgeChannels, env.horizonBrightness,
+                      env.zenithBrightness, env.hardness);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -490,6 +491,50 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
 
     result.envArray = envArray.release();
     result.envTexture = createCubemapTexture(result.envArray);
+
+    const float horizonMinY = 0.0f;
+    const float horizonMaxY = 0.35f;
+    const float zenithMinY = 0.85f;
+
+    int blockCount = static_cast<int>(grid.x) * static_cast<int>(grid.y) * static_cast<int>(grid.z);
+
+    float* dBlockAccum = nullptr;
+    float* dFinalAccum = nullptr;
+    CUDA_CHECK(cudaMalloc(&dBlockAccum, static_cast<size_t>(blockCount) * 4u * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dFinalAccum, 4 * sizeof(float)));
+
+    launchComputeEnvironmentBrightness(grid, block,
+                                        result.envTexture,
+                                        static_cast<int>(faceSize),
+                                        horizonMinY, horizonMaxY,
+                                        zenithMinY, dBlockAccum);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    launchReduceEnvironmentBrightness(dBlockAccum, blockCount, dFinalAccum);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    float hostBrightness[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    CUDA_CHECK(cudaMemcpy(hostBrightness, dFinalAccum, sizeof(hostBrightness), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(dBlockAccum));
+    CUDA_CHECK(cudaFree(dFinalAccum));
+
+    float horizonSum = hostBrightness[0];
+    float horizonWeight = hostBrightness[1];
+    float zenithSum = hostBrightness[2];
+    float zenithWeight = hostBrightness[3];
+
+    result.horizonBrightness = (horizonWeight > 1e-6f) ? horizonSum / horizonWeight : 0.0f;
+    result.zenithBrightness = (zenithWeight > 1e-6f) ? zenithSum / zenithWeight : 0.0f;
+    const float hardnessScale = 0.5f;
+    const float minBlur = 0.02f;
+    const float maxBlur = 0.12f;
+    auto saturate = [](float value) { return std::max(0.0f, std::min(1.0f, value)); };
+
+    float normalizedHardness = saturate((result.zenithBrightness - result.horizonBrightness) * hardnessScale);
+    float blurRange = maxBlur - minBlur;
+    result.hardness = minBlur + (1.0f - normalizedHardness) * blurRange;
 
     ScopedMipmappedArray specularArray;
     CUDA_CHECK(cudaMallocMipmappedArray(&specularArray.value, &float4Desc,
