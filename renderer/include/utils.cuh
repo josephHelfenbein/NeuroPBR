@@ -55,6 +55,12 @@ __device__ inline float texelSolidAngle(int x, int y, int size) {
 	return solidAngle;
 }
 
+#if defined(__CUDACC__)
+__device__ inline float warpReduceSum(float value);
+__device__ inline void blockReduce(float input[4]);
+#endif
+
+#if defined(__CUDA_ARCH__)
 __device__ inline float warpReduceSum(float value) {
 	for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
 		value += __shfl_down_sync(0xffffffff, value, offset);
@@ -103,6 +109,7 @@ __device__ inline void blockReduce(float input[4]) {
 	}
 	__syncthreads();
 }
+#endif
 
 __device__ inline float3 faceUvToDir(int face, float u, float v) {
 	float3 dir;

@@ -349,7 +349,8 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
 
     float NdotV = fmaxf(dot3(N, V), 0.0f);
 
-    float3 irradiance = make_float3(texCubemap<float4>(irradianceTex, N.x, N.y, N.z));
+    float4 irradianceSample = texCubemap<float4>(irradianceTex, N.x, N.y, N.z);
+    float3 irradiance = make_float3(irradianceSample.x, irradianceSample.y, irradianceSample.z);
     float shadowMultiplier = 1.0f;
     if (enableShadows) {
         float seedFwd = fractf(dot3(cameraForward, make_float3(0.1031f, 0.11369f, 0.13787f)));
