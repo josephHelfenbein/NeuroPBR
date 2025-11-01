@@ -19,4 +19,7 @@ bin/
 #logs
 *.log
 
+#models
+*.pth
+
 output
