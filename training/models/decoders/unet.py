@@ -112,7 +112,7 @@ class UNetDecoder(nn.Module):
     sr_scale: 2 for stride=1 encoders (1024→2048)
               4 for stride=2 encoders (512→2048)
     """
-    def __init__(self, in_channel: int, skip_channels: List[int], out_channel: int, sr_scale: Literal[2, 4] = 2):
+    def __init__(self, in_channel: int, skip_channels: List[int], out_channel: int, sr_scale: Literal[0, 2, 4] = 2):
         super().__init__()
 
         self.decoders = nn.ModuleList()
@@ -157,7 +157,7 @@ class UNetDecoder(nn.Module):
 
 
 class UNetDecoderHeads(nn.Module):
-    def __init__(self, in_channel: int, skip_channels: List[int], out_channels: List[int], sr_scale: Literal[2, 4] = 2):
+    def __init__(self, in_channel: int, skip_channels: List[int], out_channels: List[int], sr_scale: Literal[0, 2, 4] = 2):
         """shared decoder implementation"""
         super().__init__()
         self.decoders = nn.ModuleList()

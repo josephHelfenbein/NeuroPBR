@@ -4,3 +4,6 @@
 [submodule "renderer/include/stb"]
 	path = renderer/include/stb
 	url = https://github.com/nothings/stb.git
+[submodule "training/models/swinir"]
+	path = training/models/swinir
+	url = https://github.com/JingyunLiang/SwinIR.git
