@@ -70,8 +70,8 @@ int main(int argc, char** argv) {
         std::mt19937_64 rng(std::chrono::high_resolution_clock::now().time_since_epoch().count());
         constexpr float P_CLEAN = 0.75f;
 
-        constexpr float P_SHADOW = 0.50f;
-        constexpr float P_SMUDGE = 0.75f;
+        constexpr float P_SHADOW = 0.75f;
+        constexpr float P_SMUDGE = 0.60f;
 
         std::uniform_real_distribution<float> uni(0.0f, 1.0f);
         std::uniform_int_distribution<size_t> textureIndexDist(0, textureNames.size() - 1);
