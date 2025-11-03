@@ -139,6 +139,9 @@ class UNetDecoder(nn.Module):
             # SR head (512→2048)
             self.sr_head = _build_sr_4x()
 
+        else:
+            self.sr_head = nn.Identity()
+
         self.final_conv = nn.Conv2d(64, out_channel, kernel_size=1)
 
     def forward(self, x, skips):
@@ -181,6 +184,9 @@ class UNetDecoderHeads(nn.Module):
         elif sr_scale == 4:
             # SR head (512→2048)
             self.sr_head = _build_sr_4x()
+
+        else:
+            self.sr_head = nn.Identity()
 
         self.heads = nn.ModuleList()
 

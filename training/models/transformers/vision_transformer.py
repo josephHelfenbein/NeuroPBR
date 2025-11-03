@@ -54,7 +54,7 @@ class ViTCrossViewFusion(nn.Module):
 
         return rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
 
-class ViT(nn.modules):
+class ViT(nn.Module):
     def __init__(
             self,
             dim=2048,
