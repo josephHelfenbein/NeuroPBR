@@ -15,7 +15,7 @@ class CaptureScreen extends StatelessWidget {
             const SizedBox(height: 30),
             ElevatedButton(
               onPressed: () {},
-              child: const Text('Start Surface Scan'),
+              child: const Text('Start Scan'),
             ),
           ],
         ),

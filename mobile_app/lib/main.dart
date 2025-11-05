@@ -1,5 +1,7 @@
+// lib/main.dart
+
 import 'package:flutter/material.dart';
-import 'ui/capture_screen.dart';
+import 'screens/start_screen.dart';
 
 void main() {
   runApp(const NeuroPBRApp());
@@ -12,10 +14,13 @@ class NeuroPBRApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'NeuroPBR',
-      theme: ThemeData.dark(useMaterial3: true).copyWith(
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        scaffoldBackgroundColor: Colors.white,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueAccent),
+        useMaterial3: true,
       ),
-      home: const CaptureScreen(),
+      home: const StartScreen(),
     );
   }
 }
