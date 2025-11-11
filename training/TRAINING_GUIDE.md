@@ -32,13 +32,13 @@ NeuroPBR trains a deep learning model that:
 ### Architecture
 
 ```
-Input: 3 Rendered Views (dirty) → (B, 3, 3, 1024, 1024)
+Input: 3 Rendered Views (dirty) → (B, 3, 3, 2048, 2048)
   ↓
-Shared Encoder (ResNet/UNet) → 3 Latent Representations @ 32×32
+Shared Encoder (ResNet/UNet) → 3 Latent Representations @ 64×64
   ↓
-ViT Cross-View Fusion (attention) → Fused Latent (B, 2048, 32, 32)
+ViT Cross-View Fusion (attention) → Fused Latent (B, 2048, 64, 64)
   ↓
-Multi-Head Decoder + Super-Resolution (4×) → 2048×2048
+Multi-Head Decoder + Super-Resolution (2×) → 2048×2048
   ↓
 Output: 4 PBR Maps
   ├── albedo (3ch, sigmoid)
@@ -46,7 +46,9 @@ Output: 4 PBR Maps
   ├── metallic (1ch, sigmoid)
   └── normal (3ch, normalized)
 
-Discriminator: PatchGAN (70×70 receptive field)
+Discriminator: 
+  - Simple: 4-layer PatchGAN (~142×142 receptive field)
+  - Configurable: 6-layer PatchGAN (~574×574 receptive field, recommended)
 ```
 
 ### Key Features
@@ -67,6 +69,11 @@ Discriminator: PatchGAN (70×70 receptive field)
 cd training
 pip install -r requirements.txt
 ```
+
+**Optional dependencies** (uncomment in requirements.txt if needed):
+- `wandb` - For Weights & Biases logging
+- `opencv-python` - For advanced visualization
+- `matplotlib` - For plotting
 
 ### 2. Verify Dataset Structure
 
@@ -210,9 +217,12 @@ The dataset **automatically splits** into train and validation:
 
 ```python
 config.data.val_ratio = 0.1  # 10% validation (default)
+config.training.seed = 42     # Seed for reproducible shuffling
 ```
 
-- **Deterministic:** Same split every run (based on sorted sample order)
+- **Shuffled:** Samples are randomly shuffled before splitting (not alphabetical)
+- **Reproducible:** Same seed = same split every run
+- **Representative:** Validation set covers diverse samples, not just first N%
 - **No overlap:** Train samples don't appear in validation
 - **Configurable:** Change `val_ratio` to adjust split (0.15 = 15% val, etc.)
 
@@ -388,7 +398,7 @@ config.loss.w_gan = 0.0
 # ResNet encoder (pretrained, best quality)
 config.model.encoder_type = "resnet"
 config.model.encoder_backbone = "resnet50"  # 18, 34, 50, 101, 152
-config.model.encoder_stride = 2  # 1 or 2
+config.model.encoder_stride = 1  # 1 for 2048→2048, 2 for 1024→2048
 
 # Custom UNet encoder (from scratch)
 config.model.encoder_type = "unet"
@@ -415,6 +425,25 @@ config.model.transformer_num_heads = 32
 config.model.transformer_depth = 6
 config.model.transformer_mlp_ratio = 4
 ```
+
+### Discriminator Options
+
+```python
+# Configurable discriminator (recommended for 2048×2048)
+config.model.discriminator_type = "configurable"
+config.model.discriminator_n_layers = 6  # 4-6 layers (more = larger receptive field)
+config.model.discriminator_ndf = 64      # Base filters
+config.model.discriminator_use_sigmoid = False  # False for hinge, True for BCE
+
+# Simple discriminator (original 4-layer)
+config.model.discriminator_type = "simple"
+config.model.discriminator_ndf = 64
+```
+
+**Receptive field by layer count (2048×2048 input):**
+- 4 layers: ~142×142 pixels (6.9% coverage)
+- 5 layers: ~286×286 pixels (14% coverage)
+- 6 layers: ~574×574 pixels (28% coverage) ← Recommended for 2048×2048
 
 ### Freeze Pretrained Weights
 
@@ -450,9 +479,10 @@ config.training.d_steps_per_g_step = 1  # D updates per G update
 ### Learning Rate Scheduling
 
 ```python
-# Cosine annealing (smooth decay)
+# Cosine annealing (smooth decay) - Recommended
 config.optimizer.scheduler = "cosine"
 config.optimizer.scheduler_min_lr = 1e-6
+config.optimizer.scheduler_warmup_epochs = 5  # Linear warmup from 10% to 100% of lr
 
 # Step decay (periodic drops)
 config.optimizer.scheduler = "step"
@@ -468,18 +498,20 @@ config.optimizer.factor = 0.5
 config.optimizer.scheduler = "none"
 ```
 
+**Warmup:** If `scheduler_warmup_epochs > 0`, learning rate starts at 10% of target and linearly increases over N epochs before the main scheduler takes over.
+
 ### Checkpointing
 
 ```python
 config.training.checkpoint_dir = "./checkpoints"
 config.training.save_every_n_epochs = 5  # Save every 5 epochs
-config.training.save_best_only = False   # Also save regular checkpoints
+config.training.save_best_only = False   # If True, only saves best + latest (saves disk space)
 ```
 
 Checkpoints saved:
-- `checkpoint_epoch_XXXX.pth` - Regular checkpoints
+- `checkpoint_epoch_XXXX.pth` - Regular checkpoints (if save_best_only=False)
 - `best_model.pth` - Best validation loss
-- `latest.pth` - Most recent checkpoint
+- `latest.pth` - Most recent checkpoint (always saved)
 
 ### Logging
 
@@ -487,10 +519,21 @@ Checkpoints saved:
 # TensorBoard (default)
 config.training.use_tensorboard = True
 config.training.log_every_n_steps = 10
+config.training.log_images_every_n_epochs = 5  # Log visualizations every 5 epochs
+
+# WandB (optional - requires: pip install wandb)
+config.training.use_wandb = True
+config.training.wandb_project = "neuropbr"
+config.training.wandb_run_name = "experiment_01"
 
 # View logs
 tensorboard --logdir checkpoints/logs
 ```
+
+**What Gets Logged:**
+- Training: losses, learning rates, per-map metrics
+- Validation: loss, PSNR, SSIM, angular error, per-map metrics
+- Images: input views, pred/target comparisons, error heatmaps (every N epochs)
 
 ## Multi-GPU Training (Coming Soon)
 
@@ -601,8 +644,11 @@ Saved best model: checkpoints/best_model.pth
 ```
 
 ### TensorBoard Metrics
+
+**Training:**
 - `train/g_loss` - Generator total loss
 - `train/d_loss` - Discriminator loss
+- `train/g_lr` - Current learning rate
 - `train/loss_l1_total` - L1 reconstruction loss
 - `train/loss_ssim` - SSIM loss
 - `train/loss_normal` - Normal consistency loss
@@ -610,7 +656,14 @@ Saved best model: checkpoints/best_model.pth
 - `train/l1_albedo`, `l1_roughness`, etc. - Per-map L1 losses
 - `train/mae_albedo`, `train/rmse_albedo` - Metrics
 - `train/normal_angle_deg` - Average normal angle error
+
+**Validation:**
 - `val/loss` - Validation loss
+- `val/overall_psnr`, `val/overall_ssim` - Overall quality metrics
+- `val/albedo_psnr`, `val/albedo_ssim`, `val/albedo_mae`, etc. - Per-map metrics
+- `val/normal_angle_mean`, `val/normal_angle_median` - Normal error statistics
+- `val/comparison` - Pred vs target comparison grid (images)
+- `val/input_views` - Input render views (images)
 
 ## Troubleshooting
 
@@ -743,8 +796,8 @@ training/
 │   └── losses.py        # Loss functions & discriminator
 ├── utils/
 │   ├── dataset.py       # Dataset & dataloader
-│   ├── metrics.py       # Evaluation metrics (TODO)
-│   └── visualization.py # Visualization tools (TODO)
+│   ├── metrics.py       # Evaluation metrics
+│   └── visualization.py # Visualization tools
 └── Test/                # Unit tests
 ```
 
@@ -820,19 +873,28 @@ This file should be placed at: `{data_root}/input/render_metadata.json`
 
 ✅ **Dataset utilities**
 - PBRDataset with metadata mapping
-- Automatic train/val split
+- Automatic shuffled train/val split (reproducible with seed)
 - Clean/dirty render selection
 - Data normalization
 
+✅ **Metrics & Visualization**
+- Comprehensive validation metrics (PSNR, SSIM, angular error, MAE, RMSE)
+- TensorBoard image logging with comparison grids
+- Error heatmaps and normal map visualizations
+- Per-map and overall metrics
+
+✅ **Logging & Monitoring**
+- TensorBoard integration (losses, metrics, images)
+- WandB support (optional, with graceful fallback)
+- Learning rate scheduling with warmup
+- Image logging every N epochs
+
 ### What's NOT Implemented (Future Work)
 
-⚠️ **Multi-GPU training** - Structure ready, needs testing  
-⚠️ **Metrics module** - `utils/metrics.py` is empty (add PSNR, LPIPS, FID)  
-⚠️ **Visualization** - `utils/visualization.py` is empty (add rendering comparisons)  
+⚠️ **Multi-GPU training** - Structure ready, needs DDP implementation  
 ⚠️ **Data augmentation** - Only basic transforms (add random crops, color jitter)  
 ⚠️ **Inference script** - No standalone inference utility  
 ⚠️ **Export utilities** - No ONNX/TorchScript export  
-⚠️ **WandB integration** - Config exists but not implemented  
 
 ### Files Created
 
@@ -903,19 +965,19 @@ config.training.epochs = 200  # More training
 ## FAQ
 
 **Q: How much GPU memory do I need?**  
-A: Minimum 8GB for batch_size=2 with ResNet18. Recommended 16GB+ for batch_size=4 with ResNet50.
+A: For 2048×2048 images: Minimum 16GB (batch_size=2 with ResNet50). Recommended 24GB+ for larger batches. For 1024×1024: 8GB works with batch_size=2.
 
 **Q: How long does training take?**  
-A: ~12 hours for 100 epochs with ResNet50 on a single V100 (depends on dataset size).
+A: ~18-24 hours for 100 epochs with ResNet50 + 6-layer discriminator on 2048×2048 images (single V100/A100, depends on dataset size).
 
 **Q: Can I train on CPU?**  
-A: Technically yes, but very slow (not recommended). Use at least 1 GPU.
+A: Technically yes, but very slow (not recommended). Use at least 1 GPU with 16GB+ VRAM.
 
 **Q: Do I need clean renders?**  
 A: No, `input/clean/` is optional. Only `input/dirty/` is required for training.
 
 **Q: What resolution should my renders be?**  
-A: Input is resized to 1024×1024 (configurable). Output is 2048×2048. Higher input resolution = better quality but slower.
+A: Default is 2048×2048 (loaded and output at same resolution). Can be configured to 1024×1024 for faster training. Higher resolution = better quality but slower and more memory.
 
 **Q: How do I create the metadata JSON?**  
 A: Write a script to map your sample folders to material names, or create it manually if small dataset.
@@ -937,5 +999,3 @@ For issues, questions, or contributions:
 - GitHub Issues: https://github.com/josephHelfenbein/NeuroPBR/issues
 - Documentation: See this guide and inline code comments
 - Tests: Run `pytest` in the `Test/` directory
-
-**Last updated:** November 7, 2025

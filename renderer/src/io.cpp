@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <iterator>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -48,6 +51,158 @@ inline std::string escapeJsonString(const std::string& input) {
         }
     }
     return escaped;
+}
+
+inline int hexValue(char c) {
+    if (c >= '0' && c <= '9') {
+        return static_cast<int>(c - '0');
+    }
+    if (c >= 'a' && c <= 'f') {
+        return static_cast<int>(10 + (c - 'a'));
+    }
+    if (c >= 'A' && c <= 'F') {
+        return static_cast<int>(10 + (c - 'A'));
+    }
+    return -1;
+}
+
+inline std::string unescapeJsonString(const std::string& input) {
+    std::string result;
+    result.reserve(input.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+        char c = input[i];
+        if (c != '\\') {
+            result += c;
+            continue;
+        }
+
+        if (i + 1 >= input.size()) {
+            break;
+        }
+
+        char next = input[++i];
+        switch (next) {
+            case '"': result += '"'; break;
+            case '\\': result += '\\'; break;
+            case '/': result += '/'; break;
+            case 'b': result += '\b'; break;
+            case 'f': result += '\f'; break;
+            case 'n': result += '\n'; break;
+            case 'r': result += '\r'; break;
+            case 't': result += '\t'; break;
+            case 'u': {
+                if (i + 4 >= input.size()) {
+                    break;
+                }
+                unsigned int codepoint = 0;
+                bool valid = true;
+                for (int k = 0; k < 4; ++k) {
+                    int hv = hexValue(input[i + 1 + k]);
+                    if (hv < 0) {
+                        valid = false;
+                        break;
+                    }
+                    codepoint = (codepoint << 4) | static_cast<unsigned int>(hv);
+                }
+                if (valid) {
+                    if (codepoint <= 0x7F) {
+                        result += static_cast<char>(codepoint);
+                    } else if (codepoint <= 0x7FF) {
+                        result += static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F));
+                        result += static_cast<char>(0x80 | (codepoint & 0x3F));
+                    } else {
+                        result += static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F));
+                        result += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+                        result += static_cast<char>(0x80 | (codepoint & 0x3F));
+                    }
+                }
+                i += 4;
+                break;
+            }
+            default:
+                result += next;
+                break;
+        }
+    }
+    return result;
+}
+
+inline bool isEscapedQuote(const std::string& text, size_t quoteIndex, size_t start) {
+    if (quoteIndex == 0 || quoteIndex <= start) {
+        return false;
+    }
+    size_t backslashCount = 0;
+    size_t idx = quoteIndex;
+    while (idx > start && text[idx - 1] == '\\') {
+        ++backslashCount;
+        --idx;
+    }
+    return (backslashCount % 2) == 1;
+}
+
+void parseExistingMetadata(const std::string& content, std::map<std::string, std::string>& entries) {
+    std::string currentRender;
+    size_t pos = 0;
+
+    while (true) {
+        size_t keyStart = content.find('"', pos);
+        if (keyStart == std::string::npos) {
+            break;
+        }
+        size_t keyEnd = content.find('"', keyStart + 1);
+        if (keyEnd == std::string::npos) {
+            break;
+        }
+
+        std::string key = unescapeJsonString(content.substr(keyStart + 1, keyEnd - keyStart - 1));
+        pos = keyEnd + 1;
+
+        size_t colon = content.find(':', pos);
+        if (colon == std::string::npos) {
+            break;
+        }
+        pos = colon + 1;
+
+        while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos]))) {
+            ++pos;
+        }
+        if (pos >= content.size()) {
+            break;
+        }
+
+        std::string value;
+        if (content[pos] == '"') {
+            size_t valueStart = pos + 1;
+            size_t valueEnd = valueStart;
+            while (valueEnd < content.size()) {
+                if (content[valueEnd] == '"' && !isEscapedQuote(content, valueEnd, valueStart)) {
+                    break;
+                }
+                ++valueEnd;
+            }
+            if (valueEnd >= content.size()) {
+                break;
+            }
+            value = unescapeJsonString(content.substr(valueStart, valueEnd - valueStart));
+            pos = valueEnd + 1;
+        } else {
+            size_t valueEnd = pos;
+            while (valueEnd < content.size() && content[valueEnd] != ',' && content[valueEnd] != '}' && content[valueEnd] != ']') {
+                ++valueEnd;
+            }
+            value = content.substr(pos, valueEnd - pos);
+            pos = valueEnd;
+        }
+
+        if (key == "render") {
+            currentRender = std::filesystem::path(value).filename().string();
+        } else if (key == "material") {
+            if (!currentRender.empty()) {
+                entries[currentRender] = value;
+                currentRender.clear();
+            }
+        }
+    }
 }
 
 FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChannels, bool flipY) {
@@ -159,11 +314,35 @@ void appendRenderMetadata(const std::filesystem::path& metadataPath,
         }
     }
 
-    std::ofstream out(metadataPath, std::ios::app);
-    if (!out) {
-        throw std::runtime_error("Failed to open metadata file for append: " + metadataPath.string());
+    std::map<std::string, std::string> entries;
+
+    if (std::filesystem::exists(metadataPath)) {
+        std::ifstream in(metadataPath, std::ios::in);
+        if (!in) {
+            throw std::runtime_error("Failed to open metadata file for read: " + metadataPath.string());
+        }
+        std::string existingContent((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        parseExistingMetadata(existingContent, entries);
     }
 
-    out << "{\"render\":\"" << escapeJsonString(renderFilename)
-        << "\",\"material\":\"" << escapeJsonString(materialName) << "\"},\n";
+    std::string sampleKey = std::filesystem::path(renderFilename).filename().string();
+    entries[sampleKey] = materialName;
+
+    std::ofstream out(metadataPath, std::ios::trunc);
+    if (!out) {
+        throw std::runtime_error("Failed to open metadata file for write: " + metadataPath.string());
+    }
+
+    out << "{\n";
+    size_t idx = 0;
+    for (const auto& [render, material] : entries) {
+        out << "  \"" << escapeJsonString(render) << "\": \""
+            << escapeJsonString(material) << "\"";
+        if (idx + 1 < entries.size()) {
+            out << ",";
+        }
+        out << "\n";
+        ++idx;
+    }
+    out << "}\n";
 }
