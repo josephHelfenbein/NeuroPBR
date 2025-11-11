@@ -55,7 +55,9 @@ from train_config import TrainConfig, get_default_config, get_quick_test_config,
 from models.encoders.unet import UNetEncoder, UNetStrideEncoder, UNetResNetEncoder
 from models.decoders.unet import UNetDecoderHeads
 from models.transformers.vision_transformer import ViTCrossViewFusion
-from losses.losses import HybridLoss, PatchGANDiscriminator, discriminator_loss
+from losses.losses import HybridLoss, discriminator_loss
+from losses.losses import PatchGANDiscriminator as SimplePatchGANDiscriminator
+from models.gan.discriminator import PatchGANDiscriminator as ConfigurablePatchGANDiscriminator
 from utils.dataset import get_dataloader
 
 
@@ -196,10 +198,19 @@ class Trainer:
         self.generator = MultiViewPBRGenerator(config).to(self.device)
         
         if config.model.use_gan:
-            self.discriminator = PatchGANDiscriminator(
-                in_channels=config.model.discriminator_in_channels,
-                ndf=config.model.discriminator_ndf
-            ).to(self.device)
+            # Choose discriminator type based on config
+            if config.model.discriminator_type == "configurable":
+                self.discriminator = ConfigurablePatchGANDiscriminator(
+                    in_channels=config.model.discriminator_in_channels,
+                    n_filters=config.model.discriminator_ndf,
+                    n_layers=config.model.discriminator_n_layers,
+                    use_sigmoid=config.model.discriminator_use_sigmoid
+                ).to(self.device)
+            else:  # "simple"
+                self.discriminator = SimplePatchGANDiscriminator(
+                    in_channels=config.model.discriminator_in_channels,
+                    ndf=config.model.discriminator_ndf
+                ).to(self.device)
         else:
             self.discriminator = None
         
@@ -221,6 +232,21 @@ class Trainer:
             log_dir = Path(config.training.checkpoint_dir) / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             self.writer = SummaryWriter(log_dir)
+        
+        # WandB logging
+        self.use_wandb = config.training.use_wandb
+        if self.use_wandb and self.is_main_process:
+            try:
+                import wandb
+                wandb.init(
+                    project=config.training.wandb_project,
+                    name=config.training.wandb_run_name,
+                    config=config.to_dict()
+                )
+                print("  WandB logging enabled")
+            except ImportError:
+                print("  Warning: wandb not installed, disabling WandB logging")
+                self.use_wandb = False
         
         # State
         self.current_epoch = config.training.start_epoch
@@ -296,16 +322,18 @@ class Trainer:
     def _build_schedulers(self):
         """Build learning rate schedulers."""
         scheduler_type = self.config.optimizer.scheduler
+        warmup_epochs = self.config.optimizer.scheduler_warmup_epochs
         
+        # Base schedulers
         if scheduler_type == "cosine":
             g_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.g_optimizer,
-                T_max=self.config.training.epochs,
+                T_max=self.config.training.epochs - warmup_epochs,
                 eta_min=self.config.optimizer.scheduler_min_lr
             )
             d_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.d_optimizer,
-                T_max=self.config.training.epochs,
+                T_max=self.config.training.epochs - warmup_epochs,
                 eta_min=self.config.optimizer.scheduler_min_lr
             ) if self.d_optimizer else None
         
@@ -338,6 +366,14 @@ class Trainer:
         else:  # "none"
             g_sched = None
             d_sched = None
+        
+        # Apply warmup if needed
+        if warmup_epochs > 0 and g_sched is not None:
+            # Simple linear warmup wrapper
+            self.warmup_epochs = warmup_epochs
+            self.warmup_start_lr = self.config.optimizer.g_lr / 10.0  # Start at 10% of target
+        else:
+            self.warmup_epochs = 0
         
         return g_sched, d_sched
     
@@ -424,12 +460,14 @@ class Trainer:
                 # Generate PBR maps
                 pred_pbr = self.generator(input_renders)
                 
-                # Compute loss
+                # Compute loss (use albedo as RGB proxy for perceptual loss if enabled)
                 discriminator_for_loss = self.discriminator if use_gan else None
                 g_loss, loss_info = self.criterion(
                     pred_pbr,
                     target,
-                    discriminator=discriminator_for_loss
+                    discriminator=discriminator_for_loss,
+                    pred_rgb=pred_pbr["albedo"] if self.config.loss.use_perceptual else None,
+                    target_rgb=target["albedo"] if self.config.loss.use_perceptual else None
                 )
             
             # Backward
@@ -466,8 +504,22 @@ class Trainer:
                 if self.writer:
                     self.writer.add_scalar("train/g_loss", loss_info["loss_total"], self.global_step)
                     self.writer.add_scalar("train/d_loss", d_loss_val, self.global_step)
+                    self.writer.add_scalar("train/g_lr", self.g_optimizer.param_groups[0]['lr'], self.global_step)
                     for key, val in loss_info.items():
                         self.writer.add_scalar(f"train/{key}", val, self.global_step)
+                
+                if self.use_wandb:
+                    import wandb
+                    log_dict = {
+                        "train/g_loss": loss_info["loss_total"],
+                        "train/d_loss": d_loss_val,
+                        "train/g_lr": self.g_optimizer.param_groups[0]['lr'],
+                        "epoch": epoch,
+                        "step": self.global_step
+                    }
+                    for key, val in loss_info.items():
+                        log_dict[f"train/{key}"] = val
+                    wandb.log(log_dict, step=self.global_step)
             
             self.global_step += 1
         
@@ -479,14 +531,26 @@ class Trainer:
     @torch.no_grad()
     def validate(self, val_loader: DataLoader, epoch: int):
         """Validate the model."""
+        from utils.metrics import compute_pbr_metrics
+        from utils.visualization import log_images_to_tensorboard, log_input_renders
+        
         self.generator.eval()
         if self.discriminator:
             self.discriminator.eval()
         
         total_loss = 0.0
         num_batches = 0
+        all_metrics = {}
         
         max_batches = self.config.training.val_batches or len(val_loader)
+        
+        if max_batches == 0:
+            if self.is_main_process:
+                print("\n[Validation] Skipping validation because no validation data is available.")
+            return float("inf")
+        
+        # For image logging
+        first_batch_logged = False
         
         for batch_idx, (input_renders, pbr_maps) in enumerate(val_loader):
             if batch_idx >= max_batches:
@@ -509,14 +573,56 @@ class Trainer:
             _, loss_info = self.criterion(pred_pbr, target, discriminator=None)
             
             total_loss += loss_info["loss_total"]
+            
+            # Compute metrics
+            batch_metrics = compute_pbr_metrics(pred_pbr, target, include_angular=True)
+            for key, val in batch_metrics.items():
+                if key not in all_metrics:
+                    all_metrics[key] = []
+                all_metrics[key].append(val)
+            
+            # Log images from first batch
+            if not first_batch_logged and self.is_main_process:
+                log_images = (
+                    self.config.training.log_images_every_n_epochs > 0 and
+                    epoch % self.config.training.log_images_every_n_epochs == 0
+                )
+                if log_images:
+                    if self.writer:
+                        log_input_renders(self.writer, input_renders, epoch, prefix="val")
+                        log_images_to_tensorboard(self.writer, pred_pbr, target, epoch, prefix="val")
+                    first_batch_logged = True
+            
             num_batches += 1
+        
+        if num_batches == 0:
+            if self.is_main_process:
+                print("\n[Validation] No batches were processed; returning inf loss.")
+            return float("inf")
         
         avg_loss = total_loss / num_batches
         
+        # Average metrics
+        avg_metrics = {key: sum(vals) / len(vals) for key, vals in all_metrics.items()}
+        
         if self.is_main_process:
-            print(f"\n[Validation] Epoch {epoch} - Loss: {avg_loss:.4f}")
+            print(f"\n[Validation] Epoch {epoch}")
+            print(f"  Loss: {avg_loss:.4f}")
+            print(f"  PSNR: {avg_metrics.get('overall_psnr', 0):.2f} dB")
+            print(f"  SSIM: {avg_metrics.get('overall_ssim', 0):.4f}")
+            print(f"  Normal angle: {avg_metrics.get('normal_angle_mean', 0):.2f}°")
+            
             if self.writer:
                 self.writer.add_scalar("val/loss", avg_loss, epoch)
+                for key, val in avg_metrics.items():
+                    self.writer.add_scalar(f"val/{key}", val, epoch)
+            
+            if self.use_wandb:
+                import wandb
+                log_dict = {"val/loss": avg_loss, "epoch": epoch}
+                for key, val in avg_metrics.items():
+                    log_dict[f"val/{key}"] = val
+                wandb.log(log_dict, step=epoch)
         
         return avg_loss
     
@@ -545,10 +651,11 @@ class Trainer:
         if self.scaler:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
         
-        # Save regular checkpoint
-        checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch:04d}.pth"
-        torch.save(checkpoint, checkpoint_path)
-        print(f"Saved checkpoint: {checkpoint_path}")
+        # Save regular checkpoint (unless save_best_only is True)
+        if not self.config.training.save_best_only:
+            checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch:04d}.pth"
+            torch.save(checkpoint, checkpoint_path)
+            print(f"Saved checkpoint: {checkpoint_path}")
         
         # Save best checkpoint
         if is_best:
@@ -588,6 +695,15 @@ class Trainer:
         print("="*80)
         
         for epoch in range(self.current_epoch, self.config.training.epochs):
+            # Apply warmup scheduler
+            if epoch < self.warmup_epochs:
+                warmup_factor = (epoch + 1) / self.warmup_epochs
+                lr = self.warmup_start_lr + (self.config.optimizer.g_lr - self.warmup_start_lr) * warmup_factor
+                for param_group in self.g_optimizer.param_groups:
+                    param_group['lr'] = lr
+                if self.is_main_process:
+                    print(f"Warmup: Epoch {epoch}, LR: {lr:.6f}")
+            
             # Train
             avg_g_loss, avg_d_loss = self.train_epoch(train_loader, epoch)
             
@@ -611,20 +727,21 @@ class Trainer:
                 if epoch % self.config.training.save_every_n_epochs == 0:
                     self.save_checkpoint(epoch, val_loss, is_best)
             
-            # Step schedulers
-            if self.g_scheduler:
-                if isinstance(self.g_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    if val_loss is not None:
-                        self.g_scheduler.step(val_loss)
-                else:
-                    self.g_scheduler.step()
-            
-            if self.d_scheduler:
-                if isinstance(self.d_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    if val_loss is not None:
-                        self.d_scheduler.step(val_loss)
-                else:
-                    self.d_scheduler.step()
+            # Step schedulers (skip during warmup)
+            if epoch >= self.warmup_epochs:
+                if self.g_scheduler:
+                    if isinstance(self.g_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        if val_loss is not None:
+                            self.g_scheduler.step(val_loss)
+                    else:
+                        self.g_scheduler.step()
+                
+                if self.d_scheduler:
+                    if isinstance(self.d_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        if val_loss is not None:
+                            self.d_scheduler.step(val_loss)
+                    else:
+                        self.d_scheduler.step()
         
         print("\n" + "="*80)
         print("Training Complete!")
@@ -645,6 +762,22 @@ def set_seed(seed: int):
 
 def main(args):
     """Main training function."""
+    # Check for distributed training
+    if args.distributed:
+        print("="*80)
+        print("WARNING: Distributed training is not yet fully implemented!")
+        print("The --distributed flag is parsed but DDP setup is not complete.")
+        print("Multi-GPU training will fail. Please use single GPU for now.")
+        print("="*80)
+        print("\nTo implement distributed training, you need to:")
+        print("1. Initialize torch.distributed with torch.distributed.init_process_group()")
+        print("2. Wrap models with DistributedDataParallel")
+        print("3. Use DistributedSampler for dataloaders")
+        print("4. Properly handle rank/world_size for logging and checkpointing")
+        print("="*80)
+        import sys
+        sys.exit(1)
+    
     # Load config
     if args.config == "default":
         config = get_default_config()
@@ -696,7 +829,8 @@ def main(args):
         use_clean=config.data.use_clean_renders,
         split="train",
         val_ratio=config.data.val_ratio,
-        image_size=config.data.image_size
+        image_size=config.data.image_size,  # Use input size for now
+        seed=config.training.seed
     )
     
     val_loader = get_dataloader(
@@ -711,7 +845,8 @@ def main(args):
         use_clean=config.data.use_clean_renders,
         split="val",
         val_ratio=config.data.val_ratio,
-        image_size=config.data.image_size
+        image_size=config.data.image_size,  # Use input size for now
+        seed=config.training.seed
     )
     
     print(f"Train batches: {len(train_loader)}")

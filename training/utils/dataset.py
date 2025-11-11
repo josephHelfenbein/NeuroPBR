@@ -5,6 +5,7 @@ from pathlib import Path
 from torchvision import transforms
 from typing import Tuple, List, Optional, Literal
 import json
+import random
 
 class PBRDataset(Dataset):
     """
@@ -40,7 +41,8 @@ class PBRDataset(Dataset):
         image_size: Tuple[int, int] = (1024, 1024),
         use_clean: bool = False,  # If True, use clean renders; if False, use dirty
         split: Optional[Literal["train", "val"]] = None,
-        val_ratio: float = 0.1
+        val_ratio: float = 0.1,
+        seed: int = 42  # For reproducible splits
     ):
         self.root_dir = Path(root_dir)
         self.input_dir = self.root_dir / 'input'
@@ -59,13 +61,20 @@ class PBRDataset(Dataset):
             )
         ])
 
+        self.render_files = ['0.png', '1.png', '2.png']
+        self.pbr_files = ['albedo.png', 'roughness.png', 'metallic.png', 'normal.png']
+
         # Load metadata mapping
         metadata_path = self.input_dir / 'render_metadata.json'
         with open(metadata_path, 'r') as f:
             self.metadata = json.load(f)
         
-        # Get all samples
+        # Get all samples and shuffle for representative split
         all_samples = self._load_samples()
+        
+        # Shuffle samples for random train/val split (reproducible with seed)
+        random.seed(seed)
+        random.shuffle(all_samples)
         
         # Split train/val if specified
         if split is not None:
@@ -76,9 +85,6 @@ class PBRDataset(Dataset):
                 self.samples = all_samples[num_val:]
         else:
             self.samples = all_samples
-        
-        self.render_files = ['0.png', '1.png', '2.png']
-        self.pbr_files = ['albedo.png', 'roughness.png', 'metallic.png', 'normal.png']
 
     def _load_samples(self):
         """Load all valid samples that have both input renders and output PBR maps."""
@@ -154,7 +160,8 @@ def get_dataloader(
         use_clean=False,  # Use clean or dirty renders
         split=None,  # "train" or "val" or None
         val_ratio=0.1,  # Validation split ratio
-        image_size=(1024, 1024)  # Input image size
+        image_size=(1024, 1024),  # Input image size
+        seed=42  # Seed for reproducible splits
 ):
     ds = PBRDataset(
         root_dir=root_dir,
@@ -163,7 +170,8 @@ def get_dataloader(
         image_size=image_size,
         use_clean=use_clean,
         split=split,
-        val_ratio=val_ratio
+        val_ratio=val_ratio,
+        seed=seed
     )
 
     return DataLoader(

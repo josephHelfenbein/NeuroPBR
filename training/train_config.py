@@ -11,9 +11,9 @@ from pathlib import Path
 class DataConfig:
     """Dataset and dataloader configuration."""
     data_root: str = "./data"
-    image_size: tuple = (1024, 1024)  # Input size to encoder
-    output_size: tuple = (2048, 2048)  # Output size from decoder
-    batch_size: int = 4  # Per GPU
+    image_size: tuple = (2048, 2048)  # Input size to encoder (what dataset loads/resizes to)
+    output_size: tuple = (2048, 2048)  # Output size from decoder (achieved via SR scale in decoder)
+    batch_size: int = 2  # Per GPU (reduced for 2048x2048 images)
     num_workers: int = 8
     pin_memory: bool = True
     persistent_workers: bool = True
@@ -40,7 +40,7 @@ class ModelConfig:
     encoder_type: Literal["unet", "unet_stride", "resnet"] = "resnet"
     encoder_backbone: Literal["resnet18", "resnet34", "resnet50", "resnet101", "resnet152"] = "resnet50"
     encoder_in_channels: int = 3  # RGB input per view
-    encoder_stride: Literal[1, 2] = 2  # 1 for 1024→2048, 2 for 512→2048
+    encoder_stride: Literal[1, 2] = 1  # 1 for 2048→2048, 2 for 1024→2048
     encoder_channels: List[int] = field(default_factory=lambda: [64, 128, 256, 512, 1024, 2048])
     freeze_backbone: bool = False
     freeze_bn: bool = False
@@ -65,8 +65,11 @@ class ModelConfig:
     
     # GAN settings
     use_gan: bool = True
+    discriminator_type: Literal["simple", "configurable"] = "configurable"  # "simple" = losses.py, "configurable" = gan/discriminator.py
     discriminator_in_channels: int = 8  # 3 (albedo) + 1 (roughness) + 1 (metallic) + 3 (normal)
     discriminator_ndf: int = 64
+    discriminator_n_layers: int = 6  # Number of layers in discriminator (more layers = larger receptive field)
+    discriminator_use_sigmoid: bool = False  # False for hinge loss, True for BCE loss
 
 
 @dataclass

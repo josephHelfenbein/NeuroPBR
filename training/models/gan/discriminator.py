@@ -109,8 +109,17 @@ class PatchGANDiscriminator(nn.Module):
 
         return nn.Sequential(*sequence)
 
-    def forward(self, source, target):
-        x = torch.cat([source, target], dim=1)
+    def forward(self, x):
+        """
+        Forward pass.
+        
+        Args:
+            x: Concatenated input tensor (B, in_channels, H, W)
+               For PBR: should be concatenated [albedo, roughness, metallic, normal]
+               
+        Returns:
+            Patch predictions (B, 1, H', W')
+        """
         return self.model(x)
 
     def get_output_size(self, input_size=2048):

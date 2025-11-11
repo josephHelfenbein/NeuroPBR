@@ -1,5 +1,9 @@
 import torch.nn as nn
 import torchvision.models as models
+from torchvision.models import (
+    ResNet18_Weights, ResNet34_Weights, ResNet50_Weights,
+    ResNet101_Weights, ResNet152_Weights
+)
 from typing import Literal, List
 
 '''
@@ -170,8 +174,17 @@ class UNetResNetEncoder(nn.Module):
     ):
         super().__init__()
 
+        # Map backbone name to weights enum
+        weights_map = {
+            'resnet18': ResNet18_Weights.DEFAULT,
+            'resnet34': ResNet34_Weights.DEFAULT,
+            'resnet50': ResNet50_Weights.DEFAULT,
+            'resnet101': ResNet101_Weights.DEFAULT,
+            'resnet152': ResNet152_Weights.DEFAULT
+        }
+        
         backbone_fn = getattr(models, backbone)
-        resnet= backbone_fn(pretrained=True)
+        resnet = backbone_fn(weights=weights_map[backbone])
 
         self.encoder_stack = list(resnet.children())[:-2]
 
