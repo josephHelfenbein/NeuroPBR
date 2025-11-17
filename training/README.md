@@ -11,6 +11,12 @@ pip install -r requirements.txt
 # Train with default config
 python train.py --data-root /path/to/your/data
 
+# Train with dirty renders instead of clean
+python train.py --data-root /path/to/your/data --use-dirty
+
+# Train with explicit directories (bypass data-root layout)
+python train.py --input-dir /path/to/input --output-dir /path/to/output --metadata-path /path/to/render_metadata.json
+
 # Quick test (small model, 10 epochs)
 python train.py --config quick_test --data-root /path/to/your/data
 
@@ -72,7 +78,8 @@ training/
 ```
 your_data/
 ├── input/
-│   ├── dirty/sample_XXXX/{0,1,2}.png       (3 rendered views - training input)
+│   ├── clean/sample_XXXX/{0,1,2}.png        (default training input)
+│   ├── dirty/sample_XXXX/{0,1,2}.png        (optional, used with --use-dirty)
 │   └── render_metadata.json                 (sample → material mapping)
 └── output/
     └── material_name/
@@ -84,11 +91,19 @@ your_data/
 
 See [TRAINING_GUIDE.md](TRAINING_GUIDE.md#dataset-setup) for detailed setup instructions.
 
+Prefer separate folders? Pass them directly via `--input-dir`, `--output-dir`, and (optionally) `--metadata-path` to bypass the default `{data_root}/input|output` layout. Clean renders remain the default input unless you pass `--use-dirty` or set `config.data.use_dirty_renders = True`.
+
 ## Common Commands
 
 ```bash
 # Default training (ResNet50 + GAN)
 python train.py --data-root ./data
+
+# Train using dirty renders
+python train.py --data-root ./data --use-dirty
+
+# Explicit directories (input + GT)
+python train.py --input-dir ./data/input --output-dir ./data/output
 
 # No GAN (faster baseline)
 python train.py --config lightweight --data-root ./data

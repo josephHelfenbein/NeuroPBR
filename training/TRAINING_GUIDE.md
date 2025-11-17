@@ -155,14 +155,14 @@ The dataset separates **input renders** (what the model sees) from **output PBR 
 ```
 your_data/
 ├── input/
-│   ├── clean/                    # Optional: clean renders (no artifacts)
+│   ├── clean/                    # Required: clean renders (default input)
 │   │   ├── sample_0000/
 │   │   │   ├── 0.png            # View 1 (clean)
 │   │   │   ├── 1.png            # View 2 (clean)
 │   │   │   └── 2.png            # View 3 (clean)
 │   │   ├── sample_0001/
 │   │   └── ...
-│   ├── dirty/                    # Required: dirty renders (with artifacts)
+│   ├── dirty/                    # Optional: dirty renders (with artifacts)
 │   │   ├── sample_0000/
 │   │   │   ├── 0.png            # View 1 (dirty - training input)
 │   │   │   ├── 1.png            # View 2 (dirty)
@@ -195,21 +195,21 @@ This file maps sample folder names to material names:
 
 **Location:** `{data_root}/input/render_metadata.json`
 
-**Purpose:** Connects the 3 rendered views in `input/dirty/sample_XXXX/` to the ground truth PBR maps in `output/material_name/`.
+**Purpose:** Connects the 3 rendered views in `input/clean/sample_XXXX/` (or `input/dirty/...` when enabled) to the ground truth PBR maps in `output/material_name/`.
 
 ### Training on Clean vs Dirty Renders
 
-**Default (recommended):** Train on **dirty renders**
+**Default (recommended):** Train on **clean renders**
 ```python
-config.data.use_clean_renders = False  # Default
-```
-Uses: `input/dirty/sample_XXXX/{0,1,2}.png`
-
-**Ablation studies:** Train on **clean renders**
-```python
-config.data.use_clean_renders = True
+config.data.use_dirty_renders = False  # Default
 ```
 Uses: `input/clean/sample_XXXX/{0,1,2}.png`
+
+**Artifact robustness:** Train on **dirty renders**
+```python
+config.data.use_dirty_renders = True
+```
+Uses: `input/dirty/sample_XXXX/{0,1,2}.png`
 
 ### Train/Val Split
 
@@ -230,12 +230,12 @@ config.training.seed = 42     # Seed for reproducible shuffling
 
 ```bash
 # Check structure
-ls your_data/input/dirty/sample_*
+ls your_data/input/clean/sample_*
 ls your_data/output/*/
 cat your_data/input/render_metadata.json
 
 # Count samples
-echo "Dirty renders:" (ls your_data/input/dirty/ | wc -l)
+echo "Clean renders:" (ls your_data/input/clean/ | wc -l)
 echo "Output materials:" (ls your_data/output/ | wc -l)
 
 # Test loading
@@ -243,10 +243,12 @@ cd training
 python -c "
 from utils.dataset import PBRDataset
 ds = PBRDataset(
-    root_dir='../your_data',
-    transform_mean=[0.5, 0.5, 0.5],
-    transform_std=[0.5, 0.5, 0.5],
-    use_clean=False
+  input_dir='../your_data/input',
+  output_dir='../your_data/output',
+  metadata_path='../your_data/input/render_metadata.json',
+  transform_mean=[0.5, 0.5, 0.5],
+  transform_std=[0.5, 0.5, 0.5],
+  use_dirty=True
 )
 print(f'Total samples: {len(ds)}')
 inputs, outputs = ds[0]
@@ -805,14 +807,14 @@ training/
 
 ### Using Clean vs Dirty Renders
 
-By default, the model trains on **dirty renders** (with artifacts):
+By default, the model trains on **clean renders**:
 ```python
-config.data.use_clean_renders = False  # Default
+config.data.use_dirty_renders = False  # Default
 ```
 
-For ablation studies, you can train on clean renders:
+To emphasize artifact robustness, train on dirty renders:
 ```python
-config.data.use_clean_renders = True
+config.data.use_dirty_renders = True
 ```
 
 ### Train/Val Split

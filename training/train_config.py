@@ -11,6 +11,9 @@ from pathlib import Path
 class DataConfig:
     """Dataset and dataloader configuration."""
     data_root: str = "./data"
+    input_dir: Optional[str] = None
+    output_dir: Optional[str] = None
+    metadata_path: Optional[str] = None
     # Input size to encoder (what dataset loads/resizes to)
     image_size: tuple = (2048, 2048)
     # Output size from decoder (achieved via SR scale in decoder)
@@ -22,8 +25,8 @@ class DataConfig:
     prefetch_factor: int = 2
 
     # Dataset options
-    # If True, use clean renders; if False, use dirty renders
-    use_clean_renders: bool = False
+    # If True, train on dirty renders; otherwise use clean renders (default)
+    use_dirty_renders: bool = False
     val_ratio: float = 0.1  # Train/val split ratio
 
     # Data augmentation
@@ -217,6 +220,17 @@ class TrainConfig:
 
     def __post_init__(self):
         """Validate and auto-adjust configuration."""
+        data_root_path = Path(self.data.data_root) if self.data.data_root else None
+
+        if self.data.input_dir is None and data_root_path:
+            self.data.input_dir = str(data_root_path / "input")
+
+        if self.data.output_dir is None and data_root_path:
+            self.data.output_dir = str(data_root_path / "output")
+
+        if self.data.metadata_path is None and self.data.input_dir:
+            self.data.metadata_path = str(Path(self.data.input_dir) / "render_metadata.json")
+
         # Adjust decoder SR scale based on encoder stride
         if self.model.encoder_stride == 1:
             self.model.decoder_sr_scale = 2  # 1024 → 2048

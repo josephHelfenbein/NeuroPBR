@@ -2,7 +2,7 @@
 Multi-view Fusion GAN Training Script for NeuroPBR
 
 This script trains a model that:
-1. Takes 3 rendered views as input (dirty renders with artifacts)
+1. Takes 3 rendered views as input (clean by default, dirty optional)
 2. Uses multi-view fusion with Vision Transformer
 3. Outputs 4 PBR maps (albedo, roughness, metallic, normal)
 4. Trained with adversarial loss (GAN) + reconstruction losses
@@ -10,8 +10,8 @@ This script trains a model that:
 Dataset structure:
     root_dir/
     ├── input/
-    │   ├── clean/sample_XXXX/{0,1,2}.png       (optional clean renders)
-    │   ├── dirty/sample_XXXX/{0,1,2}.png       (dirty renders - training input)
+    │   ├── clean/sample_XXXX/{0,1,2}.png       (default training input)
+    │   ├── dirty/sample_XXXX/{0,1,2}.png       (optional dirty renders)
     │   └── render_metadata.json                 (sample -> material mapping)
     └── output/
         └── material_name/
@@ -798,6 +798,14 @@ def main(args):
         config.data.data_root = args.data_root
     if args.batch_size:
         config.data.batch_size = args.batch_size
+    if args.input_dir:
+        config.data.input_dir = args.input_dir
+    if args.output_dir:
+        config.data.output_dir = args.output_dir
+    if args.metadata_path:
+        config.data.metadata_path = args.metadata_path
+    if args.use_dirty:
+        config.data.use_dirty_renders = True
     if args.epochs:
         config.training.epochs = args.epochs
     if args.checkpoint_dir:
@@ -818,7 +826,9 @@ def main(args):
         std = config.transform.std
     
     train_loader = get_dataloader(
-        root_dir=config.data.data_root,
+        input_dir=config.data.input_dir,
+        output_dir=config.data.output_dir,
+        metadata_path=config.data.metadata_path,
         transform_mean=mean,
         transform_std=std,
         batch_size=config.data.batch_size,
@@ -826,7 +836,7 @@ def main(args):
         num_workers=config.data.num_workers,
         pin_memory=config.data.pin_memory,
         persistent_workers=config.data.persistent_workers,
-        use_clean=config.data.use_clean_renders,
+        use_dirty=config.data.use_dirty_renders,
         split="train",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,  # Use input size for now
@@ -834,7 +844,9 @@ def main(args):
     )
     
     val_loader = get_dataloader(
-        root_dir=config.data.data_root,
+        input_dir=config.data.input_dir,
+        output_dir=config.data.output_dir,
+        metadata_path=config.data.metadata_path,
         transform_mean=mean,
         transform_std=std,
         batch_size=config.data.batch_size,
@@ -842,7 +854,7 @@ def main(args):
         num_workers=config.data.num_workers,
         pin_memory=config.data.pin_memory,
         persistent_workers=False,
-        use_clean=config.data.use_clean_renders,
+        use_dirty=config.data.use_dirty_renders,
         split="val",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,  # Use input size for now
@@ -873,9 +885,17 @@ if __name__ == "__main__":
     
     # Data
     parser.add_argument("--data-root", type=str, default=None,
-                      help="Root directory of dataset")
+                      help="Root directory containing input/output subfolders (optional when using explicit directories)")
     parser.add_argument("--batch-size", type=int, default=None,
                       help="Batch size per GPU")
+    parser.add_argument("--input-dir", type=str, default=None,
+                      help="Directory containing rendered samples (expects dirty/ and optional clean/)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                      help="Directory containing ground-truth material folders")
+    parser.add_argument("--metadata-path", type=str, default=None,
+                      help="Path to render_metadata.json mapping sample folders to materials")
+    parser.add_argument("--use-dirty", action="store_true",
+                      help="Use dirty renders instead of the default clean renders")
     
     # Training
     parser.add_argument("--epochs", type=int, default=None,
