@@ -53,13 +53,6 @@ Future<void> runNeuropbrPreviewDemo() async {
       format: 'r32float',
       channels: 1,
     ),
-    ao: NeuropbrTexturePayload.fromBytes(
-      textureBytes,
-      width: 256,
-      height: 256,
-      format: 'r32float',
-      channels: 1,
-    ),
   ));
 
   await renderer.setEnvironment(const NeuropbrEnvironment(
