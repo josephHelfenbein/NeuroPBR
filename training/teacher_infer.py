@@ -1,0 +1,244 @@
+"""
+Teacher inference script for precomputed distillation.
+
+This runs a trained teacher generator over the dataset once and saves its
+outputs (PBR maps) into compact `.pt` shards for student distillation.
+
+Example usage from the `training` directory:
+
+    # Using default config, clean renders, 1024x1024 (from config)
+    python teacher_infer.py \
+        --data-root /path/to/data \
+        --checkpoint checkpoints/best_model.pth
+
+    # Explicit input/output dirs and dirty renders
+    python teacher_infer.py \
+        --input-dir /path/to/data/input \
+        --output-dir /path/to/data/output \
+        --metadata-path /path/to/data/input/render_metadata.json \
+        --use-dirty \
+        --checkpoint checkpoints/best_model.pth
+"""
+
+from pathlib import Path
+import argparse
+
+import torch
+
+from train import MultiViewPBRGenerator
+from train_config import (
+    TrainConfig,
+    get_default_config,
+    get_quick_test_config,
+    get_lightweight_config,
+)
+from utils.dataset import PBRDataset
+
+
+def _load_config(config_arg: str) -> TrainConfig:
+    """Mirror train.py's config loading logic."""
+    if config_arg == "default":
+        config = get_default_config()
+    elif config_arg == "quick_test":
+        config = get_quick_test_config()
+    elif config_arg == "lightweight":
+        config = get_lightweight_config()
+    else:
+        # Custom config file path
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "custom_config", config_arg)
+        custom_config = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(custom_config)
+        config = custom_config.get_config()
+    return config
+
+
+def _apply_data_overrides(config: TrainConfig, args: argparse.Namespace) -> None:
+    """Apply CLI overrides for data paths and dirty/clean choice."""
+    if args.data_root:
+        config.data.data_root = args.data_root
+
+    root_path = Path(config.data.data_root) if config.data.data_root else None
+
+    # Input/output/metadata: explicit CLI wins; otherwise fall back to data_root
+    if args.input_dir:
+        config.data.input_dir = args.input_dir
+    elif config.data.input_dir is None and root_path:
+        config.data.input_dir = str(root_path / "input")
+
+    if args.output_dir:
+        config.data.output_dir = args.output_dir
+    elif config.data.output_dir is None and root_path:
+        config.data.output_dir = str(root_path / "output")
+
+    if args.metadata_path:
+        config.data.metadata_path = args.metadata_path
+    elif config.data.metadata_path is None and config.data.input_dir:
+        config.data.metadata_path = str(
+            Path(config.data.input_dir) / "render_metadata.json")
+
+    if args.use_dirty:
+        config.data.use_dirty_renders = True
+
+
+def save_shard(out_dir: Path, idx: int, sample_indices, outputs):
+    """Save a single shard of teacher outputs to disk."""
+    shard_path = out_dir / f"shard_{idx:05d}.pt"
+    tensor_outputs = {k: torch.cat(v, dim=0)
+                      for k, v in outputs.items()}  # (B, C, H, W)
+    torch.save(
+        {
+            "indices": sample_indices,
+            "teacher_outputs": tensor_outputs,
+        },
+        shard_path,
+    )
+    print(f"Saved {shard_path}")
+
+
+def run_inference(
+    config: TrainConfig,
+    checkpoint_path: str,
+    out_dir: str = "teacher_shards",
+    shard_size: int = 256,
+):
+    out_dir_path = Path(out_dir)
+    out_dir_path.mkdir(parents=True, exist_ok=True)
+
+    # 1) Load teacher model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = MultiViewPBRGenerator(config).to(device)
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(ckpt["generator_state_dict"])
+    model.eval()
+
+    # 2) Build dataset (no train/val split, use all samples once)
+    if config.transform.use_imagenet_stats:
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+    else:
+        mean = config.transform.mean
+        std = config.transform.std
+
+    ds = PBRDataset(
+        input_dir=config.data.input_dir,
+        output_dir=config.data.output_dir,
+        metadata_path=config.data.metadata_path,
+        transform_mean=mean,
+        transform_std=std,
+        image_size=config.data.image_size,
+        use_dirty=config.data.use_dirty_renders,
+        split=None,  # use all samples
+        val_ratio=config.data.val_ratio,
+        seed=config.training.seed,
+    )
+
+    shard_idx = 0
+    shard_samples = []
+    shard_outputs = {"albedo": [], "roughness": [],
+                     "metallic": [], "normal": []}
+
+    print(f"Running teacher over {len(ds)} samples...")
+    with torch.no_grad():
+        for i in range(len(ds)):
+            inputs, _ = ds[i]  # inputs: (3,3,H,W)
+            inputs = inputs.unsqueeze(0).to(device)  # (1,3,3,H,W)
+
+            pred = model(inputs)
+            for k in shard_outputs:
+                shard_outputs[k].append(pred[k].cpu())
+
+            shard_samples.append(i)
+
+            # When shard is full, write to disk
+            if len(shard_samples) == shard_size:
+                save_shard(out_dir_path, shard_idx,
+                           shard_samples, shard_outputs)
+                shard_idx += 1
+                shard_samples = []
+                shard_outputs = {k: [] for k in shard_outputs}
+
+        # Flush last partial shard
+        if shard_samples:
+            save_shard(out_dir_path, shard_idx, shard_samples, shard_outputs)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Run teacher model to generate distillation shards.")
+
+    # Config (mirror train.py)
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="default",
+        help="Config to use: 'default', 'quick_test', 'lightweight', or path to custom config",
+    )
+
+    # Data (same flags as train.py for familiarity)
+    parser.add_argument(
+        "--data-root",
+        type=str,
+        default=None,
+        help="Root directory containing input/output subfolders (optional when using explicit directories)",
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=str,
+        default=None,
+        help="Directory containing rendered samples (expects clean/ and optional dirty/)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory containing ground-truth material folders",
+    )
+    parser.add_argument(
+        "--metadata-path",
+        type=str,
+        default=None,
+        help="Path to render_metadata.json mapping sample folders to materials",
+    )
+    parser.add_argument(
+        "--use-dirty",
+        action="store_true",
+        help="Use dirty renders instead of the default clean renders",
+    )
+
+    # Distillation output
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        required=True,
+        help="Path to trained teacher checkpoint (e.g. checkpoints/best_model.pth).",
+    )
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default="teacher_shards",
+        help="Directory to save .pt shard files.",
+    )
+    parser.add_argument(
+        "--shard-size",
+        type=int,
+        default=256,
+        help="Number of samples per .pt shard.",
+    )
+
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    cfg = _load_config(args.config)
+    _apply_data_overrides(cfg, args)
+    run_inference(
+        config=cfg,
+        checkpoint_path=args.checkpoint,
+        out_dir=args.out_dir,
+        shard_size=args.shard_size,
+    )
