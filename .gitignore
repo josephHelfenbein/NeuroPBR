@@ -27,3 +27,4 @@ dataset/matsynth_raw
 dataset/matsynth_clean
 .venv
 checkpoints
+inference_outputs
