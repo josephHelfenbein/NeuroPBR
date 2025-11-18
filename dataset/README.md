@@ -2,9 +2,28 @@
 
 Contains scripts and resources for building and managing datasets.
 
-- Includes raw PBR texture sets (from submodules like MatSynth).
+- Pulls PBR texture sets on demand via the Hugging Face `datasets` library (e.g., MatSynth).
 - Stores generated multi-view IBL renders and ground-truth PBR maps.
 - Used by the `renderer/` to generate synthetic training samples.
+
+## Exporting MatSynth via Hugging Face
+
+The repository includes `dataset/export_matsynth.py`, which streams the public `gvecchio/MatSynth` dataset from Hugging Face and materializes it on disk—no external Git submodule required.
+
+```bash
+pip install datasets pillow
+python dataset/export_matsynth.py \
+  --dst dataset/matsynth_raw \
+  --split train \
+  --limit 500
+```
+
+Script highlights:
+
+- Uses `datasets.load_dataset(..., streaming=True)` to avoid downloading the full archive.
+- Exports the core channels (`basecolor`, `normal`, `roughness`, `metallic`) plus auxiliary maps when available.
+- Writes per-material folders (`mat_00000`, `mat_00001`, …) so they can be passed directly into the cleaner or renderer pipelines.
+- Adds the optional MatSynth metadata JSON per material when available.
 
 ## Cleaning and Normalizing PBR Texture Sets
 
@@ -27,15 +46,25 @@ Use `--keep-ext` if you prefer to preserve original file extensions and skip PNG
 ### Quick start
 
 ```bash
-# Example: create MatSynth-like structure usable by the renderer
-python dataset/clean_dataset.py \
-  --src dataset/external/MatSynth \
-  --dst dataset/testing \
-  --require-all \
-  --manifest dataset/testing/manifest.json
+cd dataset
 
-# If you want to keep original extensions instead of PNG:
-python dataset/clean_dataset.py --src <src> --dst <dst> --keep-ext
+# Create & activate a virtual environment (Windows PowerShell shown)
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install datasets pillow
+
+# 1) Export MatSynth locally (see section above)
+python export_matsynth.py --dst matsynth_raw --limit 500
+
+# 2) Clean and normalize the exported materials for the renderer
+python clean_dataset.py \
+  --src matsynth_raw \
+  --dst matsynth_clean \
+  --require-all \
+  --manifest matsynth_clean/manifest.json
+
+# Optional: keep original extensions instead of PNG
+python clean_dataset.py --src <src> --dst <dst> --keep-ext
 ```
 
 ### CLI options

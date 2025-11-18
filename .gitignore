@@ -23,3 +23,7 @@ bin/
 *.pth
 
 output
+dataset/matsynth_raw
+dataset/matsynth_clean
+.venv
+checkpoints

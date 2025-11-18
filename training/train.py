@@ -22,33 +22,47 @@ Dataset structure:
 
 Usage:
     # Train with default config
-    python train.py --data-root /path/to/data
+    python train.py --input-dir /path/to/data/input --output-dir /path/to/data/output
     
     # Train with custom config
-    python train.py --config configs/custom.py --data-root /path/to/data
+    python train.py --config configs/custom.py --input-dir /path/to/data/input --output-dir /path/to/data/output
+    
+    # Force GPU/CPU selection
+    python train.py --input-dir /path/to/data/input --output-dir /path/to/data/output --device cuda
     
     # Resume from checkpoint
     python train.py --resume checkpoints/model_epoch_50.pth
     
     # Distributed training (4 GPUs)
-    torchrun --nproc_per_node=4 train.py --distributed --data-root /path/to/data
+    torchrun --nproc_per_node=4 train.py --distributed --input-dir /path/to/data/input --output-dir /path/to/data/output
 """
 
-import os
 import sys
 import argparse
 import random
 import numpy as np
+import inspect
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
+from contextlib import nullcontext
 from tqdm import tqdm
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
+
+try:
+    from torch.amp import autocast as _autocast, GradScaler as _GradScaler
+except ImportError:  # Older PyTorch
+    from torch.cuda.amp import autocast as _autocast, GradScaler as _GradScaler
+
+AUTOCAST_SUPPORTS_DEVICE = "device_type" in inspect.signature(_autocast).parameters
+GRADSCALER_SUPPORTS_DEVICE = "device_type" in inspect.signature(_GradScaler.__init__).parameters
+
+autocast = _autocast
+GradScaler = _GradScaler
 
 # Local imports
 from train_config import TrainConfig, get_default_config, get_quick_test_config, get_lightweight_config
@@ -74,6 +88,12 @@ class MultiViewPBRGenerator(nn.Module):
         
         # Create encoder (shared across all views)
         self.encoder = self._build_encoder(config.model)
+        self.latent_channels, self.encoder_skip_channels = self._inspect_encoder()
+        target_dim = config.model.transformer_dim
+        if self.latent_channels == target_dim:
+            self.latent_proj = nn.Identity()
+        else:
+            self.latent_proj = nn.Conv2d(self.latent_channels, target_dim, kernel_size=1, bias=False)
         
         # Cross-view fusion transformer
         if config.model.use_transformer:
@@ -96,13 +116,31 @@ class MultiViewPBRGenerator(nn.Module):
             )
         
         # Decoder with 4 heads (albedo, roughness, metallic, normal)
+        skip_channels = self.encoder_skip_channels or config.model.decoder_skip_channels
         self.decoder = UNetDecoderHeads(
             in_channel=config.model.transformer_dim,
-            skip_channels=config.model.decoder_skip_channels,
+            skip_channels=skip_channels,
             out_channels=config.model.output_channels,
             sr_scale=config.model.decoder_sr_scale
         )
     
+    def _inspect_encoder(self) -> Tuple[int, List[int]]:
+        """Determine the encoder's latent and skip channel counts."""
+        image_size = getattr(self.config.data, "image_size", (1024, 1024))
+        in_ch = self.config.model.encoder_in_channels
+        device = next(self.encoder.parameters()).device
+        dtype = next(self.encoder.parameters()).dtype
+        dummy = torch.zeros(1, in_ch, image_size[0], image_size[1], device=device, dtype=dtype)
+        was_training = self.encoder.training
+        self.encoder.eval()
+        with torch.no_grad():
+            latent, skips = self.encoder(dummy)
+        if was_training:
+            self.encoder.train()
+        skip_channels = [s.shape[1] for s in skips] if skips else []
+        skip_channels = list(reversed(skip_channels))
+        return latent.shape[1], skip_channels
+
     def _build_encoder(self, model_config):
         """Build encoder based on config."""
         if model_config.encoder_type == "resnet":
@@ -147,6 +185,7 @@ class MultiViewPBRGenerator(nn.Module):
         for i in range(num_views):
             view = views[:, i]  # (B, C, H, W)
             latent, skips = self.encoder(view)
+            latent = self.latent_proj(latent)
             latents.append(latent)
             if i == 0:
                 skips_list = skips  # Use skips from first view (all should be similar)
@@ -182,17 +221,53 @@ class MultiViewPBRGenerator(nn.Module):
 class Trainer:
     """Trainer class for multi-view PBR GAN."""
     
+    def _resolve_device(self, preferred_device: Optional[str]) -> torch.device:
+        """Resolve torch.device based on preference and availability."""
+        preference = (preferred_device or "auto").lower()
+        cuda_available = torch.cuda.is_available()
+        mps_available = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        auto_selected = preference == "auto"
+
+        if auto_selected:
+            if cuda_available:
+                max_index = max(torch.cuda.device_count() - 1, 0)
+                device_index = min(self.rank, max_index)
+                return torch.device(f"cuda:{device_index}")
+            if mps_available:
+                return torch.device("mps")
+            return torch.device("cpu")
+
+        if preference.startswith("cuda"):
+            if not cuda_available:
+                raise RuntimeError("CUDA requested via --device but torch.cuda.is_available() is False.")
+            return torch.device(preference)
+
+        if preference.startswith("mps"):
+            if not mps_available:
+                raise RuntimeError("MPS requested via --device but torch.backends.mps.is_available() is False.")
+            return torch.device("mps")
+
+        if preference.startswith("cpu"):
+            return torch.device("cpu")
+
+        raise ValueError(
+            f"Unknown device option '{preferred_device}'. Use 'auto', 'cuda', 'cuda:0', 'mps', or 'cpu'."
+        )
+
     def __init__(self, config: TrainConfig, rank: int = 0):
         self.config = config
         self.rank = rank
         self.is_main_process = (rank == 0)
-        
+
         # Set device
-        if torch.cuda.is_available():
-            self.device = torch.device(f"cuda:{rank}")
+        self.device_preference = getattr(config.training, "device", "auto")
+        self.device = self._resolve_device(self.device_preference)
+        if self.device.type == "cuda":
             torch.cuda.set_device(self.device)
         else:
-            self.device = torch.device("cpu")
+            auto_selected = (self.device_preference is None) or (self.device_preference.lower() == "auto")
+            if self.device.type == "cpu" and auto_selected:
+                print("  No CUDA/MPS devices detected; training will run on CPU.")
         
         # Build models
         self.generator = MultiViewPBRGenerator(config).to(self.device)
@@ -224,7 +299,12 @@ class Trainer:
         self.g_scheduler, self.d_scheduler = self._build_schedulers()
         
         # AMP scaler
-        self.scaler = GradScaler() if config.training.use_amp else None
+        self.use_amp = config.training.use_amp and self.device.type == "cuda"
+        self.amp_device_type = "cuda" if self.device.type == "cuda" else "cpu"
+        scaler_kwargs = {}
+        if self.use_amp and GRADSCALER_SUPPORTS_DEVICE:
+            scaler_kwargs["device_type"] = self.amp_device_type
+        self.scaler = GradScaler(**scaler_kwargs) if self.use_amp else None
         
         # Logging
         self.writer = None
@@ -237,7 +317,7 @@ class Trainer:
         self.use_wandb = config.training.use_wandb
         if self.use_wandb and self.is_main_process:
             try:
-                import wandb
+                import wandb  # type: ignore
                 wandb.init(
                     project=config.training.wandb_project,
                     name=config.training.wandb_run_name,
@@ -258,6 +338,7 @@ class Trainer:
         print(f"  Generator params: {sum(p.numel() for p in self.generator.parameters()):,}")
         if self.discriminator:
             print(f"  Discriminator params: {sum(p.numel() for p in self.discriminator.parameters()):,}")
+        print(f"  Mixed precision (AMP): {'enabled' if self.use_amp else 'disabled'}")
     
     def _build_loss(self):
         """Build loss function."""
@@ -376,6 +457,14 @@ class Trainer:
             self.warmup_epochs = 0
         
         return g_sched, d_sched
+
+    def _autocast(self):
+        """Return the appropriate autocast context manager for current AMP setup."""
+        if not self.use_amp:
+            return nullcontext()
+        if AUTOCAST_SUPPORTS_DEVICE:
+            return autocast(device_type=self.amp_device_type)
+        return autocast()
     
     def train_epoch(self, train_loader: DataLoader, epoch: int):
         """Train for one epoch."""
@@ -411,7 +500,7 @@ class Trainer:
                 for _ in range(self.config.training.d_steps_per_g_step):
                     self.d_optimizer.zero_grad()
                     
-                    with autocast(enabled=self.config.training.use_amp):
+                    with self._autocast():
                         # Generate fake PBR
                         with torch.no_grad():
                             fake_pbr = self.generator(input_renders)
@@ -456,7 +545,7 @@ class Trainer:
             # ==================== Train Generator ====================
             self.g_optimizer.zero_grad()
             
-            with autocast(enabled=self.config.training.use_amp):
+            with self._autocast():
                 # Generate PBR maps
                 pred_pbr = self.generator(input_renders)
                 
@@ -509,7 +598,7 @@ class Trainer:
                         self.writer.add_scalar(f"train/{key}", val, self.global_step)
                 
                 if self.use_wandb:
-                    import wandb
+                    import wandb  # type: ignore
                     log_dict = {
                         "train/g_loss": loss_info["loss_total"],
                         "train/d_loss": d_loss_val,
@@ -618,7 +707,7 @@ class Trainer:
                     self.writer.add_scalar(f"val/{key}", val, epoch)
             
             if self.use_wandb:
-                import wandb
+                import wandb  # type: ignore
                 log_dict = {"val/loss": avg_loss, "epoch": epoch}
                 for key, val in avg_metrics.items():
                     log_dict[f"val/{key}"] = val
@@ -753,9 +842,9 @@ def set_seed(seed: int):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
     
     if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
@@ -793,23 +882,44 @@ def main(args):
         spec.loader.exec_module(custom_config)
         config = custom_config.get_config()
     
+    prev_input_dir = config.data.input_dir
+    prev_metadata_path = config.data.metadata_path
+    prev_default_metadata = None
+    if prev_input_dir:
+        prev_default_metadata = str(Path(prev_input_dir) / "render_metadata.json")
+
     # Override config with CLI args
-    if args.data_root:
-        config.data.data_root = args.data_root
     if args.batch_size:
         config.data.batch_size = args.batch_size
     if args.input_dir:
         config.data.input_dir = args.input_dir
     if args.output_dir:
         config.data.output_dir = args.output_dir
+    metadata_explicit = False
     if args.metadata_path:
         config.data.metadata_path = args.metadata_path
+        metadata_explicit = True
+    if not metadata_explicit:
+        input_changed = args.input_dir is not None and config.data.input_dir is not None
+        prev_was_default = prev_default_metadata and prev_metadata_path == prev_default_metadata
+        if input_changed or prev_was_default or config.data.metadata_path is None:
+            if config.data.input_dir:
+                config.data.metadata_path = str(Path(config.data.input_dir) / "render_metadata.json")
     if args.use_dirty:
         config.data.use_dirty_renders = True
+    if args.device:
+        config.training.device = args.device
     if args.epochs:
         config.training.epochs = args.epochs
     if args.checkpoint_dir:
         config.training.checkpoint_dir = args.checkpoint_dir
+
+    if not config.data.input_dir:
+        raise ValueError("Input directory is not set. Pass --input-dir or update config.data.input_dir")
+    if not config.data.output_dir:
+        raise ValueError("Output directory is not set. Pass --output-dir or update config.data.output_dir")
+    if not config.data.metadata_path:
+        raise ValueError("Metadata path is not set. Pass --metadata-path or keep render_metadata.json under the input directory")
     
     # Set seed
     set_seed(config.training.seed)
@@ -884,8 +994,6 @@ if __name__ == "__main__":
                       help="Config to use: 'default', 'quick_test', 'lightweight', or path to custom config")
     
     # Data
-    parser.add_argument("--data-root", type=str, default=None,
-                      help="Root directory containing input/output subfolders (optional when using explicit directories)")
     parser.add_argument("--batch-size", type=int, default=None,
                       help="Batch size per GPU")
     parser.add_argument("--input-dir", type=str, default=None,
@@ -896,6 +1004,8 @@ if __name__ == "__main__":
                       help="Path to render_metadata.json mapping sample folders to materials")
     parser.add_argument("--use-dirty", action="store_true",
                       help="Use dirty renders instead of the default clean renders")
+    parser.add_argument("--device", type=str, default=None,
+                      help="Device override: 'auto' (default), 'cuda', 'cuda:0', 'cpu', or 'mps'")
     
     # Training
     parser.add_argument("--epochs", type=int, default=None,

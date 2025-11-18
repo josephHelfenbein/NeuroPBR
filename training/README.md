@@ -9,16 +9,16 @@ Multi-view fusion GAN training for PBR texture reconstruction from rendered imag
 pip install -r requirements.txt
 
 # Train with default config
-python train.py --data-root /path/to/your/data
+python train.py --input-dir /path/to/your/data/input --output-dir /path/to/your/data/output
+
+# Force GPU selection (auto-falls back to CPU otherwise)
+python train.py --input-dir /path/to/your/data/input --output-dir /path/to/your/data/output --device cuda
 
 # Train with dirty renders instead of clean
-python train.py --data-root /path/to/your/data --use-dirty
-
-# Train with explicit directories (bypass data-root layout)
-python train.py --input-dir /path/to/input --output-dir /path/to/output --metadata-path /path/to/render_metadata.json
+python train.py --input-dir /path/to/your/data/input --output-dir /path/to/your/data/output --use-dirty
 
 # Quick test (small model, 10 epochs)
-python train.py --config quick_test --data-root /path/to/your/data
+python train.py --config quick_test --input-dir /path/to/your/data/input --output-dir /path/to/your/data/output
 
 # Monitor training
 tensorboard --logdir checkpoints/logs
@@ -91,28 +91,38 @@ your_data/
 
 See [TRAINING_GUIDE.md](TRAINING_GUIDE.md#dataset-setup) for detailed setup instructions.
 
-Prefer separate folders? Pass them directly via `--input-dir`, `--output-dir`, and (optionally) `--metadata-path` to bypass the default `{data_root}/input|output` layout. Clean renders remain the default input unless you pass `--use-dirty` or set `config.data.use_dirty_renders = True`.
+By default the trainer looks for `./data/input`, `./data/output`, and `./data/input/render_metadata.json`. Override any of them via `--input-dir`, `--output-dir`, and `--metadata-path`. Clean renders remain the default input unless you pass `--use-dirty` or set `config.data.use_dirty_renders = True`.
+
+The dataloader automatically resizes both the input renders and PBR targets to
+`config.data.image_size` (1024×1024 by default) during batch loading, so you can
+keep full-resolution renders on disk and still train at 1024 without extra
+preprocessing.
+
+Device selection defaults to automatic: the trainer uses CUDA when `torch.cuda.is_available()` and otherwise falls back to CPU. Override the behavior with `--device cuda`, `--device cuda:1`, or `--device cpu` if you need to force a specific accelerator.
 
 ## Common Commands
 
 ```bash
 # Default training (ResNet50 + GAN)
-python train.py --data-root ./data
-
-# Train using dirty renders
-python train.py --data-root ./data --use-dirty
-
-# Explicit directories (input + GT)
 python train.py --input-dir ./data/input --output-dir ./data/output
 
+# Train using dirty renders
+python train.py --input-dir ./data/input --output-dir ./data/output --use-dirty
+
+# Explicit metadata path (if not under input dir)
+python train.py --input-dir ./data/input --output-dir ./data/output --metadata-path ./metadata/render_metadata.json
+
+# Force device selection (auto picks CUDA when available)
+python train.py --input-dir ./data/input --output-dir ./data/output --device cuda
+
 # No GAN (faster baseline)
-python train.py --config lightweight --data-root ./data
+python train.py --config lightweight --input-dir ./data/input --output-dir ./data/output
 
 # High quality (ResNet101 + perceptual)
-python train.py --config configs/high_quality.py --data-root ./data
+python train.py --config configs/high_quality.py --input-dir ./data/input --output-dir ./data/output
 
 # Custom batch size
-python train.py --data-root ./data --batch-size 8 --epochs 100
+python train.py --input-dir ./data/input --output-dir ./data/output --batch-size 8 --epochs 100
 
 # Resume training
 python train.py --resume checkpoints/latest.pth

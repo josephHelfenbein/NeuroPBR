@@ -5,7 +5,9 @@ Optimized for mobile deployment on 4GB iPhone.
 Based on memory profiling showing ~100 MB usage on Mac (FP32).
 
 Usage:
-    python train.py --config configs/mobilenetv3_2048.py --data-root /path/to/data
+    python train.py --config configs/mobilenetv3_2048.py \
+        --input-dir /path/to/data/input \
+        --output-dir /path/to/data/output
 """
 
 from train_config import TrainConfig
@@ -25,6 +27,7 @@ def get_config() -> TrainConfig:
     config.model.encoder_type = "mobilenetv3"
     config.model.encoder_backbone = "mobilenet_v3_large"
     config.model.encoder_stride = 1  # 2048 → 2048 (no downsampling)
+    config.model.decoder_sr_scale = 2  # Restore 2048 resolution from 1024 features
     config.model.freeze_backbone = False  # Fine-tune the backbone
     config.model.freeze_bn = False
 

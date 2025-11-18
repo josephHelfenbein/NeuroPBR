@@ -26,19 +26,19 @@ NeuroPBR trains a deep learning model that:
 
 1. Takes **3 rendered views** (with artifacts like smudges, scratches)
 2. Uses **multi-view fusion** with Vision Transformer
-3. Outputs **4 PBR maps** (albedo, roughness, metallic, normal) at 2048×2048
+3. Outputs **4 PBR maps** (albedo, roughness, metallic, normal) at **1024×1024 by default** (configurable up to 2048×2048)
 4. Trained with **GAN + reconstruction losses**
 
 ### Architecture
 
 ```
-Input: 3 Rendered Views (dirty) → (B, 3, 3, 2048, 2048)
+Input: 3 Rendered Views (dirty) → (B, 3, 3, 1024, 1024)
   ↓
 Shared Encoder (ResNet/UNet) → 3 Latent Representations @ 64×64
   ↓
 ViT Cross-View Fusion (attention) → Fused Latent (B, 2048, 64, 64)
   ↓
-Multi-Head Decoder + Super-Resolution (2×) → 2048×2048
+Multi-Head Decoder (+ optional SR head) → 1024×1024 (default) / 2048×2048 (high-res)
   ↓
 Output: 4 PBR Maps
   ├── albedo (3ch, sigmoid)
@@ -117,19 +117,22 @@ The `render_metadata.json` should look like:
 
 ### 3. Train with Default Config
 ```bash
-python train.py --data-root ./data
+python train.py --input-dir ./data/input --output-dir ./data/output
+
+# Force CUDA explicitly if auto-detection can't see it
+python train.py --input-dir ./data/input --output-dir ./data/output --device cuda
 ```
 
 ### 4. Train with Custom Settings
 ```bash
 # Quick test (small model, few epochs)
-python train.py --config quick_test --data-root ./data --batch-size 2
+python train.py --config quick_test --input-dir ./data/input --output-dir ./data/output --batch-size 2
 
 # Without GAN (faster, simpler)
-python train.py --config lightweight --data-root ./data
+python train.py --config lightweight --input-dir ./data/input --output-dir ./data/output
 
 # Custom config
-python train.py --config configs/my_config.py --data-root ./data
+python train.py --config configs/my_config.py --input-dir ./data/input --output-dir ./data/output
 ```
 
 ### 5. Resume Training
@@ -180,6 +183,11 @@ your_data/
     └── ...
 ```
 
+> **Note:** The dataloader resizes both the input renders and the PBR targets to
+> `config.data.image_size` (1024×1024 by default) on-the-fly, so you don't need
+> to pre-bake 1024 assets. Keep your high-res renders on disk and let the
+> pipeline downsample as it loads batches.
+
 ### Creating render_metadata.json
 
 This file maps sample folder names to material names:
@@ -193,7 +201,7 @@ This file maps sample folder names to material names:
 }
 ```
 
-**Location:** `{data_root}/input/render_metadata.json`
+**Location:** `{input_dir}/render_metadata.json`
 
 **Purpose:** Connects the 3 rendered views in `input/clean/sample_XXXX/` (or `input/dirty/...` when enabled) to the ground truth PBR maps in `output/material_name/`.
 
@@ -261,7 +269,7 @@ print('✓ Dataset loaded successfully!')
 ### Common Dataset Issues
 
 **Issue:** `FileNotFoundError: render_metadata.json`  
-**Fix:** Create the JSON file at `{data_root}/input/render_metadata.json`
+**Fix:** Create the JSON file at `{input_dir}/render_metadata.json`
 
 **Issue:** `KeyError: sample_XXXX not in metadata`  
 **Fix:** Add missing sample mappings to `render_metadata.json`
@@ -332,7 +340,7 @@ def get_config():
 
 Then run:
 ```bash
-python train.py --config configs/my_config.py --data-root ./data
+python train.py --config configs/my_config.py --input-dir ./data/input --output-dir ./data/output
 ```
 
 ## Loss Configuration
@@ -400,7 +408,8 @@ config.loss.w_gan = 0.0
 # ResNet encoder (pretrained, best quality)
 config.model.encoder_type = "resnet"
 config.model.encoder_backbone = "resnet50"  # 18, 34, 50, 101, 152
-config.model.encoder_stride = 1  # 1 for 2048→2048, 2 for 1024→2048
+config.model.encoder_stride = 1  # Keeps 1024×1024 resolution through the encoder
+# Use stride=2 to halve spatial size (512 features) when memory is tight
 
 # Custom UNet encoder (from scratch)
 config.model.encoder_type = "unet"
@@ -426,12 +435,16 @@ config.model.transformer_depth = 2
 config.model.transformer_num_heads = 32
 config.model.transformer_depth = 6
 config.model.transformer_mlp_ratio = 4
+
+# The generator automatically projects encoder latents into
+# `config.model.transformer_dim`, so you can safely change the transformer
+# width even when using lightweight encoders that output 512-channel latents.
 ```
 
 ### Discriminator Options
 
 ```python
-# Configurable discriminator (recommended for 2048×2048)
+# Configurable discriminator (recommended once you upscale past 1024×1024)
 config.model.discriminator_type = "configurable"
 config.model.discriminator_n_layers = 6  # 4-6 layers (more = larger receptive field)
 config.model.discriminator_ndf = 64      # Base filters
@@ -442,10 +455,10 @@ config.model.discriminator_type = "simple"
 config.model.discriminator_ndf = 64
 ```
 
-**Receptive field by layer count (2048×2048 input):**
+**Receptive field by layer count (assuming 2048×2048 input):**
 - 4 layers: ~142×142 pixels (6.9% coverage)
 - 5 layers: ~286×286 pixels (14% coverage)
-- 6 layers: ~574×574 pixels (28% coverage) ← Recommended for 2048×2048
+- 6 layers: ~574×574 pixels (28% coverage) ← Use this when training at 2048×2048
 
 ### Freeze Pretrained Weights
 
@@ -458,6 +471,18 @@ config.model.freeze_bn = True
 ```
 
 ## Training Features
+
+### Device Selection
+The trainer automatically chooses the best available accelerator:
+
+```python
+config.training.device = "auto"  # Default: CUDA → MPS → CPU fallback
+```
+
+- Override in configs with values like `"cuda"`, `"cuda:1"`, `"cpu"`, or `"mps"`.
+- Command-line flag `--device cuda` (or `--device cpu`) takes precedence over the config.
+- If you request a device that PyTorch can't access, the script raises a helpful error instead of silently falling back.
+- AMP is only enabled when running on CUDA; CPU/MPS runs automatically disable it to avoid warnings.
 
 ### Mixed Precision Training
 Automatically enabled by default for faster training:
@@ -541,7 +566,10 @@ tensorboard --logdir checkpoints/logs
 
 ```bash
 # 4 GPUs
-torchrun --nproc_per_node=4 train.py --distributed --data-root ./data
+torchrun --nproc_per_node=4 train.py \
+  --distributed \
+  --input-dir ./data/input \
+  --output-dir ./data/output
 
 # 2 nodes, 4 GPUs each
 torchrun \
@@ -550,7 +578,10 @@ torchrun \
   --node_rank=0 \
   --master_addr="192.168.1.1" \
   --master_port=29500 \
-  train.py --distributed --data-root ./data
+  train.py \
+    --distributed \
+    --input-dir ./data/input \
+    --output-dir ./data/output
 ```
 
 ---
@@ -561,25 +592,28 @@ torchrun \
 
 ```bash
 # Default config (ResNet50 + ViT + GAN, 100 epochs)
-python train.py --data-root /path/to/data
+python train.py --input-dir /path/to/data/input --output-dir /path/to/data/output
+
+# Force CUDA selection (auto picks CUDA when available, but this is explicit)
+python train.py --input-dir /path/to/data/input --output-dir /path/to/data/output --device cuda
 
 # Quick test (ResNet18, 10 epochs)
-python train.py --config quick_test --data-root /path/to/data
+python train.py --config quick_test --input-dir /path/to/data/input --output-dir /path/to/data/output
 
 # No GAN (faster, simpler baseline)
-python train.py --config lightweight --data-root /path/to/data
+python train.py --config lightweight --input-dir /path/to/data/input --output-dir /path/to/data/output
 
 # High quality (ResNet101 + perceptual loss)
-python train.py --config configs/high_quality.py --data-root /path/to/data
+python train.py --config configs/high_quality.py --input-dir /path/to/data/input --output-dir /path/to/data/output
 
 # Custom batch size and epochs
-python train.py --data-root /path/to/data --batch-size 8 --epochs 100
+python train.py --input-dir /path/to/data/input --output-dir /path/to/data/output --batch-size 8 --epochs 100
 
 # Resume from checkpoint
 python train.py --resume checkpoints/checkpoint_epoch_0050.pth
 
 # Custom checkpoint directory
-python train.py --data-root /path/to/data --checkpoint-dir ./my_experiment
+python train.py --input-dir /path/to/data/input --output-dir /path/to/data/output --checkpoint-dir ./my_experiment
 ```
 
 ### Config Presets Quick Reference
@@ -598,13 +632,13 @@ python train.py --data-root /path/to/data --checkpoint-dir ./my_experiment
 **Workflow 1: First-time training**
 ```bash
 # Start with quick test to verify everything works
-python train.py --config quick_test --data-root ./data --batch-size 2
+python train.py --config quick_test --input-dir ./data/input --output-dir ./data/output --batch-size 2
 
 # Monitor in separate terminal
 tensorboard --logdir checkpoints/logs
 
 # If successful, run full training
-python train.py --data-root ./data --checkpoint-dir ./experiments/run_001
+python train.py --input-dir ./data/input --output-dir ./data/output --checkpoint-dir ./experiments/run_001
 ```
 
 **Workflow 2: Hyperparameter tuning**
@@ -614,7 +648,7 @@ cp configs/high_quality.py configs/my_experiment.py
 # Edit configs/my_experiment.py with your settings
 
 # Train
-python train.py --config configs/my_experiment.py --data-root ./data
+python train.py --config configs/my_experiment.py --input-dir ./data/input --output-dir ./data/output
 ```
 
 **Workflow 3: Resume interrupted training**
@@ -668,6 +702,15 @@ Saved best model: checkpoints/best_model.pth
 - `val/input_views` - Input render views (images)
 
 ## Troubleshooting
+
+### Training only uses CPU
+1. Verify PyTorch sees your GPU:
+  ```bash
+  python -c "import torch; print(torch.cuda.is_available())"
+  ```
+  If it prints `False`, install a CUDA-enabled PyTorch build or fix your driver/toolkit install.
+2. Force CUDA usage explicitly: `python train.py ... --device cuda` (or `cuda:1`). The script raises an error if CUDA was requested but unavailable, removing silent fallbacks.
+3. To debug on CPU intentionally, pass `--device cpu` so you know the mode was selected on purpose.
 
 ### Out of Memory
 ```python
@@ -839,7 +882,7 @@ The `render_metadata.json` file maps sample names to material names:
 }
 ```
 
-This file should be placed at: `{data_root}/input/render_metadata.json`
+This file should be placed at: `{input_dir}/render_metadata.json`
 
 ---
 
@@ -967,10 +1010,10 @@ config.training.epochs = 200  # More training
 ## FAQ
 
 **Q: How much GPU memory do I need?**  
-A: For 2048×2048 images: Minimum 16GB (batch_size=2 with ResNet50). Recommended 24GB+ for larger batches. For 1024×1024: 8GB works with batch_size=2.
+A: For the default 1024×1024 pipeline, 8GB VRAM handles batch_size=2 with ResNet50. High-res 2048×2048 runs need 16GB+ (batch_size=2) and ideally 24GB+ for larger batches.
 
 **Q: How long does training take?**  
-A: ~18-24 hours for 100 epochs with ResNet50 + 6-layer discriminator on 2048×2048 images (single V100/A100, depends on dataset size).
+A: ~8-10 hours for 100 epochs at 1024×1024 on a single A6000/A100-class GPU. Expect 18-24 hours when training at 2048×2048 with the 6-layer discriminator.
 
 **Q: Can I train on CPU?**  
 A: Technically yes, but very slow (not recommended). Use at least 1 GPU with 16GB+ VRAM.
@@ -979,7 +1022,7 @@ A: Technically yes, but very slow (not recommended). Use at least 1 GPU with 16G
 A: No, `input/clean/` is optional. Only `input/dirty/` is required for training.
 
 **Q: What resolution should my renders be?**  
-A: Default is 2048×2048 (loaded and output at same resolution). Can be configured to 1024×1024 for faster training. Higher resolution = better quality but slower and more memory.
+A: Default training now downsamples renders to 1024×1024 on-the-fly (and predicts at 1024×1024). You can keep native 2048×2048 renders and switch configs to upscale if you need the extra detail.
 
 **Q: How do I create the metadata JSON?**  
 A: Write a script to map your sample folders to material names, or create it manually if small dataset.

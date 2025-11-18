@@ -2,7 +2,9 @@
 Quick config example for 2048x2048 training with 6-layer discriminator.
 
 Copy this to configs/high_res.py and use with:
-    python train.py --config configs/high_res.py --data-root /path/to/data
+    python train.py --config configs/high_res.py \
+        --input-dir /path/to/data/input \
+        --output-dir /path/to/data/output
 """
 
 from train_config import TrainConfig, DataConfig, ModelConfig, LossConfig, OptimizerConfig, TrainingConfig
@@ -20,6 +22,7 @@ def get_config() -> TrainConfig:
     
     # Model: 6-layer discriminator
     config.model.encoder_stride = 1  # 2048 → 2048
+    config.model.decoder_sr_scale = 2  # Upsample decoder output back to 2048
     config.model.discriminator_type = "configurable"
     config.model.discriminator_n_layers = 6  # Large receptive field
     config.model.discriminator_use_sigmoid = False  # For hinge loss

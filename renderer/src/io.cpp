@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <iterator>
 #include <map>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -141,67 +142,19 @@ inline bool isEscapedQuote(const std::string& text, size_t quoteIndex, size_t st
 }
 
 void parseExistingMetadata(const std::string& content, std::map<std::string, std::string>& entries) {
-    std::string currentRender;
-    size_t pos = 0;
+    static const std::regex kEntry(R"(("(?:[^"\\]|\\.)+")\s*:\s*("(?:[^"\\]|\\.)+"))");
 
-    while (true) {
-        size_t keyStart = content.find('"', pos);
-        if (keyStart == std::string::npos) {
-            break;
-        }
-        size_t keyEnd = content.find('"', keyStart + 1);
-        if (keyEnd == std::string::npos) {
-            break;
+    for (std::sregex_iterator it(content.begin(), content.end(), kEntry), end; it != end; ++it) {
+        const std::string rawKey = (*it)[1].str();
+        const std::string rawValue = (*it)[2].str();
+
+        if (rawKey.size() < 2 || rawValue.size() < 2) {
+            continue;
         }
 
-        std::string key = unescapeJsonString(content.substr(keyStart + 1, keyEnd - keyStart - 1));
-        pos = keyEnd + 1;
-
-        size_t colon = content.find(':', pos);
-        if (colon == std::string::npos) {
-            break;
-        }
-        pos = colon + 1;
-
-        while (pos < content.size() && std::isspace(static_cast<unsigned char>(content[pos]))) {
-            ++pos;
-        }
-        if (pos >= content.size()) {
-            break;
-        }
-
-        std::string value;
-        if (content[pos] == '"') {
-            size_t valueStart = pos + 1;
-            size_t valueEnd = valueStart;
-            while (valueEnd < content.size()) {
-                if (content[valueEnd] == '"' && !isEscapedQuote(content, valueEnd, valueStart)) {
-                    break;
-                }
-                ++valueEnd;
-            }
-            if (valueEnd >= content.size()) {
-                break;
-            }
-            value = unescapeJsonString(content.substr(valueStart, valueEnd - valueStart));
-            pos = valueEnd + 1;
-        } else {
-            size_t valueEnd = pos;
-            while (valueEnd < content.size() && content[valueEnd] != ',' && content[valueEnd] != '}' && content[valueEnd] != ']') {
-                ++valueEnd;
-            }
-            value = content.substr(pos, valueEnd - pos);
-            pos = valueEnd;
-        }
-
-        if (key == "render") {
-            currentRender = std::filesystem::path(value).filename().string();
-        } else if (key == "material") {
-            if (!currentRender.empty()) {
-                entries[currentRender] = value;
-                currentRender.clear();
-            }
-        }
+        std::string key = unescapeJsonString(rawKey.substr(1, rawKey.size() - 2));
+        std::string value = unescapeJsonString(rawValue.substr(1, rawValue.size() - 2));
+        entries[key] = value;
     }
 }
 

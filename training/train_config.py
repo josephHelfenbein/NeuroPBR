@@ -10,15 +10,14 @@ from pathlib import Path
 @dataclass
 class DataConfig:
     """Dataset and dataloader configuration."""
-    data_root: str = "./data"
-    input_dir: Optional[str] = None
-    output_dir: Optional[str] = None
+    input_dir: Optional[str] = "./data/input"
+    output_dir: Optional[str] = "./data/output"
     metadata_path: Optional[str] = None
     # Input size to encoder (what dataset loads/resizes to)
-    image_size: tuple = (2048, 2048)
+    image_size: tuple = (1024, 1024)
     # Output size from decoder (achieved via SR scale in decoder)
-    output_size: tuple = (2048, 2048)
-    batch_size: int = 2  # Per GPU (reduced for 2048x2048 images)
+    output_size: tuple = (1024, 1024)
+    batch_size: int = 2  # Per GPU (increase if GPU memory allows at 1024²)
     num_workers: int = 8
     pin_memory: bool = True
     persistent_workers: bool = True
@@ -49,7 +48,7 @@ class ModelConfig:
     encoder_backbone: Literal["resnet18", "resnet34", "resnet50", "resnet101",
                               "resnet152", "mobilenet_v3_large", "mobilenet_v3_small"] = "resnet50"
     encoder_in_channels: int = 3  # RGB input per view
-    encoder_stride: Literal[1, 2] = 1  # 1 for 2048→2048, 2 for 1024→2048
+    encoder_stride: Literal[1, 2] = 1  # 1 keeps 1024→1024, 2 halves to 512
     encoder_channels: List[int] = field(
         default_factory=lambda: [64, 128, 256, 512, 1024, 2048])
     freeze_backbone: bool = False
@@ -70,7 +69,7 @@ class ModelConfig:
     decoder_type: Literal["shared_heads", "single"] = "shared_heads"
     decoder_skip_channels: List[int] = field(
         default_factory=lambda: [1024, 512, 256, 64])  # ResNet skips
-    decoder_sr_scale: Literal[0, 2, 4] = 4  # 4 for stride=2 encoder (512→2048)
+    decoder_sr_scale: Literal[0, 2, 4] = 0  # No SR needed for 1024×1024 outputs
 
     # Output channels for each PBR map
     # albedo, roughness, metallic, normal
@@ -153,6 +152,9 @@ class TrainingConfig:
     epochs: int = 100
     start_epoch: int = 0
 
+    # Device selection
+    device: str = "auto"
+
     # Mixed precision training
     use_amp: bool = True
 
@@ -220,22 +222,18 @@ class TrainConfig:
 
     def __post_init__(self):
         """Validate and auto-adjust configuration."""
-        data_root_path = Path(self.data.data_root) if self.data.data_root else None
-
-        if self.data.input_dir is None and data_root_path:
-            self.data.input_dir = str(data_root_path / "input")
-
-        if self.data.output_dir is None and data_root_path:
-            self.data.output_dir = str(data_root_path / "output")
-
         if self.data.metadata_path is None and self.data.input_dir:
             self.data.metadata_path = str(Path(self.data.input_dir) / "render_metadata.json")
 
-        # Adjust decoder SR scale based on encoder stride
+        # Ensure output_size defaults to image_size when unspecified
+        if self.data.output_size is None:
+            self.data.output_size = self.data.image_size
+
+        # Adjust decoder SR scale so default configs stay at 1024×1024
         if self.model.encoder_stride == 1:
-            self.model.decoder_sr_scale = 2  # 1024 → 2048
+            self.model.decoder_sr_scale = 0  # Keep 1024 resolution
         elif self.model.encoder_stride == 2:
-            self.model.decoder_sr_scale = 4  # 512 → 2048
+            self.model.decoder_sr_scale = 2  # Upsample 512 → 1024
 
         # Update skip channels based on encoder type
         if self.model.encoder_type == "resnet":
