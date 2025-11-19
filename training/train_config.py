@@ -292,6 +292,8 @@ def get_quick_test_config() -> TrainConfig:
     config.data.batch_size = 2
     config.data.num_workers = 4
 
+    config.optimizer.scheduler_warmup_epochs = 2
+
     return config
 
 
