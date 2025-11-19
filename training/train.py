@@ -42,6 +42,7 @@ import argparse
 import random
 import numpy as np
 import inspect
+import pickle
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 from contextlib import nullcontext
@@ -759,7 +760,11 @@ class Trainer:
     def load_checkpoint(self, checkpoint_path: str):
         """Load checkpoint."""
         print(f"Loading checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        try:
+            with torch.serialization.safe_globals([TrainConfig]):
+                checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        except pickle.UnpicklingError:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         self.generator.load_state_dict(checkpoint["generator_state_dict"])
         self.g_optimizer.load_state_dict(checkpoint["g_optimizer_state_dict"])
@@ -771,7 +776,7 @@ class Trainer:
         if self.scaler and "scaler_state_dict" in checkpoint:
             self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
         
-        self.current_epoch = checkpoint["epoch"]
+        self.current_epoch = min(checkpoint["epoch"] + 1, self.config.training.epochs)
         self.global_step = checkpoint["global_step"]
         self.best_val_loss = checkpoint.get("best_val_loss", float('inf'))
         

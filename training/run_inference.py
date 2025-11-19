@@ -47,11 +47,9 @@ save_image(pred["roughness"], out_dir / "roughness.png")
 save_image(pred["metallic"], out_dir / "metallic.png")
 
 # Also save the normalized input renders actually fed to the model
-inputs_dir = out_dir / "inputs"
-inputs_dir.mkdir(parents=True, exist_ok=True)
 mean = torch.tensor(cfg.transform.mean, dtype=inputs_cpu.dtype).view(1, 3, 1, 1)
 std = torch.tensor(cfg.transform.std, dtype=inputs_cpu.dtype).view(1, 3, 1, 1)
 denorm_inputs = inputs_cpu * std + mean
 denorm_inputs = denorm_inputs.clamp(0.0, 1.0)
 for view_idx, view in enumerate(denorm_inputs):
-    save_image(view, inputs_dir / f"view_{view_idx}.png")
+    save_image(view, out_dir / f"view_{view_idx}.png")

@@ -276,8 +276,8 @@ def get_quick_test_config() -> TrainConfig:
 
     # Fewer epochs
     config.training.epochs = 10
-    config.training.val_every_n_epochs = 2
-    config.training.save_every_n_epochs = 5
+    config.training.val_every_n_epochs = 1
+    config.training.save_every_n_epochs = 1
 
     # Smaller batch
     config.data.batch_size = 2
