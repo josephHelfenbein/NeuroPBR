@@ -181,15 +181,19 @@ class MultiViewPBRGenerator(nn.Module):
         
         # Encode each view separately (shared encoder weights)
         latents = []
-        skips_list = []
+        aggregated_skips = None
         
         for i in range(num_views):
             view = views[:, i]  # (B, C, H, W)
             latent, skips = self.encoder(view)
             latent = self.latent_proj(latent)
             latents.append(latent)
-            if i == 0:
-                skips_list = skips  # Use skips from first view (all should be similar)
+            if aggregated_skips is None:
+                aggregated_skips = [s for s in skips]
+            else:
+                aggregated_skips = [acc + s for acc, s in zip(aggregated_skips, skips)]
+        
+        skips_list = [s / num_views for s in aggregated_skips] if aggregated_skips else []
         
         # Fuse latents with transformer
         if self.config.model.use_transformer:
