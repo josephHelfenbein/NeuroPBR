@@ -76,6 +76,9 @@ output/
 python train.py --input-dir ./data/input --output-dir ./data/output
 # Explicit CUDA selection
 python train.py --input-dir ./data/input --output-dir ./data/output --device cuda
+
+# Mixed clean/dirty renders (curriculum 1)
+python train.py --input-dir ./data/input --output-dir ./data/output --render-curriculum 1
 ```
 
 ### 4. Alternate Presets
@@ -122,11 +125,24 @@ output/
 ```
 Location: `{input_dir}/render_metadata.json`.
 
-### Clean vs Dirty
+### Render Curriculum (Clean ↔ Dirty)
 ```python
-config.data.use_dirty_renders = False  # default (clean)
-config.data.use_dirty_renders = True   # train on dirty renders
+config.data.render_curriculum = 0  # default clean-only curriculum
+config.data.render_curriculum = 1  # Match on-disk clean/dirty mix each epoch
+config.data.render_curriculum = 2  # dirty-only curriculum
 ```
+Use `--render-curriculum {0|1|2}` on the CLI to override per run. The legacy
+`--use-dirty` flag still works and simply maps to curriculum `2` for backwards
+compatibility.
+
+| Curriculum | Clean Renders | Dirty Renders | Notes |
+| --- | --- | --- | --- |
+| `0` | 100% | 0% | Default clean-only training |
+| `1` | Mirrors dataset | Mirrors dataset | Mix follows whatever ratio exists on disk (clean entry included once, dirty once) |
+
+When a sample exists in both folders it is queued twice (once per source); otherwise it appears only where present,
+so the loader respects the natural clean/dirty balance without duplicating the smaller pool.
+| `2` | 0% | 100% | Use for dirty-only runs (e.g., student training) |
 
 ### Automatic Train/Val Split
 ```python
@@ -151,7 +167,8 @@ ds = PBRDataset(
     transform_mean=cfg.transform.mean,
     transform_std=cfg.transform.std,
     image_size=cfg.data.image_size,
-    use_dirty=cfg.data.use_dirty_renders
+  use_dirty=cfg.data.use_dirty_renders,
+  curriculum_mode=cfg.data.render_curriculum
 )
 print('Total samples:', len(ds))
 inputs, targets = ds[0]

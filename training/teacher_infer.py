@@ -16,7 +16,7 @@ Example usage from the `training` directory:
         --input-dir /path/to/data/input \
         --output-dir /path/to/data/output \
         --metadata-path /path/to/data/input/render_metadata.json \
-        --use-dirty \
+        --render-curriculum 1 \
         --checkpoint checkpoints/best_model.pth
 """
 
@@ -80,8 +80,11 @@ def _apply_data_overrides(config: TrainConfig, args: argparse.Namespace) -> None
         config.data.metadata_path = str(
             Path(config.data.input_dir) / "render_metadata.json")
 
-    if args.use_dirty:
-        config.data.use_dirty_renders = True
+    if args.render_curriculum is not None:
+        config.data.render_curriculum = args.render_curriculum
+    elif args.use_dirty:
+        config.data.render_curriculum = 2
+    config.data.use_dirty_renders = (config.data.render_curriculum == 2)
 
 
 def save_shard(out_dir: Path, idx: int, sample_indices, outputs):
@@ -131,6 +134,7 @@ def run_inference(
         transform_std=std,
         image_size=config.data.image_size,
         use_dirty=config.data.use_dirty_renders,
+        curriculum_mode=config.data.render_curriculum,
         split=None,  # use all samples
         val_ratio=config.data.val_ratio,
         seed=config.training.seed,
@@ -207,6 +211,13 @@ def parse_args():
         "--use-dirty",
         action="store_true",
         help="Use dirty renders instead of the default clean renders",
+    )
+    parser.add_argument(
+        "--render-curriculum",
+        type=int,
+        choices=[0, 1, 2],
+        default=None,
+        help="0=clean only, 1=match dataset clean/dirty ratio, 2=dirty only (overrides --use-dirty)",
     )
 
     # Distillation output
