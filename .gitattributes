@@ -1,0 +1,10 @@
+mobile_app/.dart_tool/** linguist-vendored
+mobile_app/build/** linguist-vendored
+mobile_app/android/** linguist-vendored
+mobile_app/macos/** linguist-vendored
+mobile_app/windows/** linguist-vendored
+mobile_app/linux/** linguist-vendored
+mobile_app/web/** linguist-vendored
+mobile_app/ios/** linguist-vendored
+!mobile_app/ios/CoreML/**
+!mobile_app/ios/MetalRenderer/**
