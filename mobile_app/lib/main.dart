@@ -1,7 +1,7 @@
 // lib/main.dart
 
 import 'package:flutter/material.dart';
-import 'screens/start_screen.dart';
+import 'screens/carousel_screen.dart';
 
 void main() {
   runApp(const NeuroPBRApp());
@@ -20,7 +20,7 @@ class NeuroPBRApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueAccent),
         useMaterial3: true,
       ),
-      home: const StartScreen(),
+      home: const CarouselScreen(),
     );
   }
 }
