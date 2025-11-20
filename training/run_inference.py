@@ -4,6 +4,8 @@ from PIL import Image
 from torchvision import transforms
 from torchvision.utils import save_image
 
+from utils.visualization import normal_to_rgb
+
 from train import MultiViewPBRGenerator
 from train_config import get_default_config, TrainConfig
 from utils.dataset import PBRDataset
@@ -85,7 +87,11 @@ out_dir.mkdir(parents=True, exist_ok=True)
 
 # Save generator outputs
 save_image(pred["albedo"], out_dir / "albedo.png", normalize=True, value_range=(0, 1))
-save_image(pred["normal"], out_dir / "normal.png", normalize=True, value_range=(0, 1))
+
+# Normal map prediction is in [-1, 1]; convert to displayable RGB before saving.
+normal_rgb = normal_to_rgb(pred["normal"], normalize=True)
+save_image(normal_rgb, out_dir / "normal.png", normalize=False)
+
 save_image(pred["roughness"], out_dir / "roughness.png")
 save_image(pred["metallic"], out_dir / "metallic.png")
 
