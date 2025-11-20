@@ -275,7 +275,7 @@ def get_quick_test_config() -> TrainConfig:
     config.model.transformer_num_heads = 16
 
     # Fewer epochs
-    config.training.epochs = 10
+    config.training.epochs = 20
     config.training.val_every_n_epochs = 1
     config.training.save_every_n_epochs = 1
 
