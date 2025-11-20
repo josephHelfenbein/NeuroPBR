@@ -114,7 +114,7 @@ python train.py `
 Key options:
 
 - `--input-dir / --output-dir / --metadata-path` let you point to any folder layout.
-- `--use-dirty` trains with dirty renders instead of clean ones (clean is the default input).
+- `--render-curriculum {0|1|2}` picks clean-only, dataset-balanced clean+dirty, or dirty-only inputs (`--use-dirty` remains a shortcut for `2`).
 - The dataloader downsamples both renders and targets to 1024×1024 by default, so you can keep full-res assets on disk without preprocessing.
 - `--device {auto|cuda|cuda:0|cpu}` forces the accelerator if auto-detection doesn't pick the GPU you expect.
 - Preset configs like `--config quick_test` or `--config lightweight` adjust model/compute tradeoffs.

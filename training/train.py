@@ -914,8 +914,12 @@ def main(args):
         if input_changed or prev_was_default or config.data.metadata_path is None:
             if config.data.input_dir:
                 config.data.metadata_path = str(Path(config.data.input_dir) / "render_metadata.json")
-    if args.use_dirty:
-        config.data.use_dirty_renders = True
+    if args.render_curriculum is not None:
+        config.data.render_curriculum = args.render_curriculum
+    elif args.use_dirty:
+        config.data.render_curriculum = 2
+
+    config.data.use_dirty_renders = (config.data.render_curriculum == 2)
     if args.device:
         config.training.device = args.device
     if args.epochs:
@@ -956,6 +960,7 @@ def main(args):
         pin_memory=config.data.pin_memory,
         persistent_workers=config.data.persistent_workers,
         use_dirty=config.data.use_dirty_renders,
+        curriculum_mode=config.data.render_curriculum,
         split="train",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,  # Use input size for now
@@ -974,6 +979,7 @@ def main(args):
         pin_memory=config.data.pin_memory,
         persistent_workers=False,
         use_dirty=config.data.use_dirty_renders,
+        curriculum_mode=config.data.render_curriculum,
         split="val",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,  # Use input size for now
@@ -1013,6 +1019,8 @@ if __name__ == "__main__":
                       help="Path to render_metadata.json mapping sample folders to materials")
     parser.add_argument("--use-dirty", action="store_true",
                       help="Use dirty renders instead of the default clean renders")
+    parser.add_argument("--render-curriculum", type=int, choices=[0, 1, 2], default=None,
+                      help="0=clean only, 1=match dataset clean/dirty ratio, 2=dirty only (overrides --use-dirty)")
     parser.add_argument("--device", type=str, default=None,
                       help="Device override: 'auto' (default), 'cuda', 'cuda:0', 'cpu', or 'mps'")
     

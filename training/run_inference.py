@@ -68,10 +68,12 @@ transform = _build_input_transform(cfg.data.image_size, cfg.transform.mean, cfg.
 if args.input_dir:
     inputs_cpu = _load_inputs_from_directory(Path(args.input_dir), transform)
 else:
+    curriculum = getattr(cfg.data, "render_curriculum", 2 if cfg.data.use_dirty_renders else 0)
     ds = PBRDataset(
         cfg.data.input_dir, cfg.data.output_dir, cfg.data.metadata_path,
         cfg.transform.mean, cfg.transform.std, cfg.data.image_size,
-        cfg.data.use_dirty_renders, split=None, val_ratio=cfg.data.val_ratio,
+        cfg.data.use_dirty_renders, curriculum_mode=curriculum,
+        split=None, val_ratio=cfg.data.val_ratio,
         seed=cfg.training.seed,
     )
     inputs_cpu, _ = ds[args.sample_idx]

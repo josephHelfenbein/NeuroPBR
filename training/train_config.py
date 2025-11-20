@@ -26,6 +26,8 @@ class DataConfig:
     # Dataset options
     # If True, train on dirty renders; otherwise use clean renders (default)
     use_dirty_renders: bool = False
+    # Curriculum selector: 0=clean only, 1=data-proportional clean+dirty, 2=dirty only
+    render_curriculum: Literal[0, 1, 2] = 0
     val_ratio: float = 0.1  # Train/val split ratio
 
     # Data augmentation
@@ -224,6 +226,13 @@ class TrainConfig:
         """Validate and auto-adjust configuration."""
         if self.data.metadata_path is None and self.data.input_dir:
             self.data.metadata_path = str(Path(self.data.input_dir) / "render_metadata.json")
+
+        # Keep legacy flag aligned with new curriculum selector
+        if self.data.render_curriculum not in (0, 1, 2):
+            raise ValueError("data.render_curriculum must be 0, 1, or 2")
+        if self.data.use_dirty_renders and self.data.render_curriculum == 0:
+            self.data.render_curriculum = 2
+        self.data.use_dirty_renders = (self.data.render_curriculum == 2)
 
         # Ensure output_size defaults to image_size when unspecified
         if self.data.output_size is None:
