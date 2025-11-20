@@ -33,6 +33,23 @@ cmake --build build --config Release --parallel
 
 The binary will be written to `bin/Release/neuropbr_renderer.exe`. If you want a Debug build, replace the last line with `--config Debug`.
 
+### Command-line usage
+
+```bash
+neuropbr_renderer.exe <materials_dir> <num_samples>
+```
+
+- `<materials_dir>` – Path to the cleaned material dataset (each folder must contain `albedo.png`, `normal.png`, `roughness.png`, `metallic.png`).
+- `<num_samples>` – Number of samples to render; each sample produces three views and writes to `output/clean` or `output/dirty` plus `output/render_metadata.json`.
+
+Example (from `renderer/`):
+
+```powershell
+.\bin\Release\neuropbr_renderer.exe ..\\dataset\\matsynth_clean 2000
+```
+
+Ensure `assets/hdris`, `assets/camerasmudges`, and `assets/lensflares` contain the required textures before rendering.
+
 ### Ninja / Make (optional)
 
 If you have the CUDA toolkit configured with a GCC/Clang host compiler, you can use a single-config generator instead:

@@ -9,7 +9,7 @@ class ViTCrossViewFusion(nn.Module):
             self,
             dim=2048,
             num_views=3,
-            num_heads: Literal[16, 24, 28, 32] = 32,
+            num_heads: Literal[8, 16, 24, 28, 32] = 32,
             depth: Literal[2, 4, 6] = 4,
             mlp_ratio: Literal[2, 4] = 2,
             proj_drop: float = 0.2,
@@ -58,7 +58,7 @@ class ViT(nn.Module):
     def __init__(
             self,
             dim=2048,
-            num_heads: Literal[16, 24, 28, 32] = 32,
+            num_heads: Literal[8, 16, 24, 28, 32] = 32,
             depth: Literal[2, 4, 6] = 4,
             mlp_ratio: Literal[2, 4] = 2,
             proj_drop: float = 0.2,

@@ -3,6 +3,7 @@
 .idea/
 
 #python
+.pytest_cache
 __pycache__/
 *.pyc
 *.env
@@ -23,3 +24,9 @@ bin/
 *.pth
 
 output
+dataset/matsynth_raw
+dataset/matsynth_clean
+.venv
+checkpoints
+inference_outputs
+inference_inputs

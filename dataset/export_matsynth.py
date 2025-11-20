@@ -9,7 +9,7 @@ def save_image(img, path):
     (img if isinstance(img, Image.Image) else Image.fromarray(img)).save(path)
 
 
-def main(dst="dataset/external/MatSynth_files", split="train", limit=100, save_metadata=True):
+def main(dst="matsynth_raw", split="train", limit=100, save_metadata=True):
     out = Path(dst)
     out.mkdir(parents=True, exist_ok=True)
     ds = load_dataset("gvecchio/MatSynth", streaming=True, split=split)

@@ -52,7 +52,7 @@ class SSIMLoss(nn.Module):
         self.sigma = sigma
         self.window = None
 
-    def _create_window(self, channel: int, device: torch.device) -> torch.Tensor:
+    def _create_window(self, channel: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         coords = torch.arange(self.window_size, dtype=torch.float32, device=device)
         coords -= self.window_size // 2
         g = torch.exp(-(coords ** 2) / (2 * self.sigma ** 2))
@@ -61,16 +61,21 @@ class SSIMLoss(nn.Module):
         window_2d = g.unsqueeze(1) @ g.unsqueeze(0)
         window = window_2d.unsqueeze(0).unsqueeze(0)
         window = window.expand(channel, 1, self.window_size, self.window_size).contiguous()
-        return window
+        return window.to(dtype=dtype)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
         _, channel, _, _ = pred.shape
+        dtype = pred.dtype
         
-        if self.window is None or self.window.shape[0] != channel or self.window.device != pred.device:
-            self.window = self._create_window(channel, pred.device)
+        if (self.window is None or self.window.shape[0] != channel or
+                self.window.device != pred.device or self.window.dtype != dtype):
+            self.window = self._create_window(channel, pred.device, dtype)
         
-        C1 = (0.01) ** 2
-        C2 = (0.03) ** 2
+        if target.dtype != dtype:
+            target = target.to(dtype=dtype)
+        
+        C1 = torch.tensor((0.01) ** 2, device=pred.device, dtype=dtype)
+        C2 = torch.tensor((0.03) ** 2, device=pred.device, dtype=dtype)
         
         mu1 = F.conv2d(pred, self.window, padding=self.window_size // 2, groups=channel)
         mu2 = F.conv2d(target, self.window, padding=self.window_size // 2, groups=channel)
