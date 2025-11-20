@@ -3,6 +3,7 @@
 .idea/
 
 #python
+.pytest_cache
 __pycache__/
 *.pyc
 *.env
