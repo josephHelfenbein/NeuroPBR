@@ -313,7 +313,7 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                              cameraPos.y + rayDir.y * t,
                              cameraPos.z + rayDir.z * t);
 
-    if (fabsf(hit.x) > 0.5f || fabsf(hit.z) > 0.5f) {
+    if (fabsf(hit.x) > 1.5f || fabsf(hit.z) > 1.5f) {
         outRGBA[4 * idx + 0] = 0.0f;
         outRGBA[4 * idx + 1] = 0.0f;
         outRGBA[4 * idx + 2] = 0.0f;
@@ -321,10 +321,10 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
         return;
     }
 
-    float u = hit.x + 0.5f;
-    float v = -hit.z + 0.5f;
-    float tiledU = u * 2.0f;
-    float tiledV = v * 2.0f;
+    float u = hit.x;
+    float v = -hit.z;
+    float tiledU = u * 2.0f + 0.5f;
+    float tiledV = v * 2.0f + 0.5f;
     tiledU = tiledU - floorf(tiledU);
     tiledV = tiledV - floorf(tiledV);
     tiledU = clamp01(tiledU);

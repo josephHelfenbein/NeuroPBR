@@ -141,7 +141,7 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
     const float degToRad = static_cast<float>(M_PI) / 180.0f;
     float theta = polarDist(rng) * degToRad;
     float phi = azimuthDist(rng) * degToRad;
-    constexpr float radius = 0.3f;
+    constexpr float radius = 0.6f;
 
     float camX = radius * sinf(phi) * cosf(theta);
     float camY = radius * cosf(phi);

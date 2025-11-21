@@ -17,7 +17,6 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaSetDevice(0));
 
         const std::filesystem::path hdrDir = std::filesystem::path("assets") / "hdris";
-        const std::filesystem::path lensflaresDir = std::filesystem::path("assets") / "lensflares";
 
         constexpr unsigned kEnvFaceSize = 512;
         constexpr unsigned kIrradianceFaceSize = 32;
@@ -37,13 +36,6 @@ int main(int argc, char** argv) {
 
         BRDFLookupTable brdfLut = createBRDFLUT(512);
         loadBRDFLUT(brdfLut);
-
-        std::vector<FloatImage> lensFlares;
-        for (const auto& entry : std::filesystem::directory_iterator(lensflaresDir)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".png") {
-                lensFlares.push_back(loadPNGImage(entry.path(), 4, true));
-            }
-        }
 
         std::cout << "Precomputation complete. Starting rendering. Press CTRL+C to stop." << std::endl;
 
