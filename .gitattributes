@@ -6,5 +6,5 @@ mobile_app/windows/** linguist-vendored
 mobile_app/linux/** linguist-vendored
 mobile_app/web/** linguist-vendored
 mobile_app/ios/** linguist-vendored
-!mobile_app/ios/CoreML/**
-!mobile_app/ios/MetalRenderer/**
+mobile_app/ios/CoreML/** linguist-vendored=false
+mobile_app/ios/MetalRenderer/** linguist-vendored=false
