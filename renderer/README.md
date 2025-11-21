@@ -48,7 +48,7 @@ Example (from `renderer/`):
 .\bin\Release\neuropbr_renderer.exe ..\\dataset\\matsynth_clean 2000
 ```
 
-Ensure `assets/hdris`, `assets/camerasmudges`, and `assets/lensflares` contain the required textures before rendering.
+Ensure `assets/hdris` contain the required textures before rendering.
 
 ### Ninja / Make (optional)
 

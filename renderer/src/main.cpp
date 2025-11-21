@@ -18,7 +18,6 @@ int main(int argc, char** argv) {
 
         const std::filesystem::path hdrDir = std::filesystem::path("assets") / "hdris";
         const std::filesystem::path lensflaresDir = std::filesystem::path("assets") / "lensflares";
-        const std::filesystem::path smudgesDir = std::filesystem::path("assets") / "camerasmudges";
 
         constexpr unsigned kEnvFaceSize = 512;
         constexpr unsigned kIrradianceFaceSize = 32;
@@ -39,13 +38,6 @@ int main(int argc, char** argv) {
         BRDFLookupTable brdfLut = createBRDFLUT(512);
         loadBRDFLUT(brdfLut);
 
-        std::cout << "Loading camera smudge textures..." << std::endl;
-        std::vector<FloatImage> cameraSmudges;
-        for (const auto& entry : std::filesystem::directory_iterator(smudgesDir)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".png") {
-                cameraSmudges.push_back(loadPNGImage(entry.path(), 4, true));
-            }
-        }
         std::vector<FloatImage> lensFlares;
         for (const auto& entry : std::filesystem::directory_iterator(lensflaresDir)) {
             if (entry.is_regular_file() && entry.path().extension() == ".png") {
@@ -76,6 +68,7 @@ int main(int argc, char** argv) {
         std::uniform_real_distribution<float> uni(0.0f, 1.0f);
         std::uniform_int_distribution<size_t> textureIndexDist(0, textureNames.size() - 1);
         std::uniform_int_distribution<size_t> environmentIndexDist(0, environments.size() - 1);
+        std::uniform_int_distribution<unsigned long long> seedDist;
 
         while (frameIndex < maxRenders) {
             size_t randomTexIndex = textureIndexDist(rng);
@@ -94,22 +87,18 @@ int main(int argc, char** argv) {
             std::filesystem::path targetDir;
             if (dirtySet) {
                 bool enableShadows = (uni(rng) < P_SHADOW);
-                bool enableCameraSmudge = (uni(rng) < P_SMUDGE);
+                bool enableCameraArtifacts = (uni(rng) < P_SMUDGE);
+                unsigned long long artifactSeed = seedDist(rng);
+
                 targetDir = std::filesystem::path("output") / "dirty" / sampleName;
                 std::filesystem::create_directories(targetDir);
                 
-                FloatImage* cameraSmudge = nullptr;
-                if (!cameraSmudges.empty()) {
-                    std::uniform_int_distribution<size_t> smudgeIndexDist(0, cameraSmudges.size() - 1);
-                    cameraSmudge = &cameraSmudges[smudgeIndexDist(rng)];
-                }
-
                 for (int i = 0; i < 3; ++i) {
                     renderPlane(environments[randomEnvIndex], brdfLut,
                                 dAlbedo.data.data(), dNormal.data.data(),
                                 dRoughness.data.data(), dMetallic.data.data(),
                                 W, H, frameRGBAs[i], 
-                                enableShadows, enableCameraSmudge, cameraSmudge);
+                                enableShadows, enableCameraArtifacts, artifactSeed);
 
                     std::filesystem::path outputPath = targetDir /
                         (std::to_string(i) + ".png");
@@ -123,7 +112,7 @@ int main(int argc, char** argv) {
                                 dAlbedo.data.data(), dNormal.data.data(),
                                 dRoughness.data.data(), dMetallic.data.data(),
                                 W, H, frameRGBAs[i],
-                                false, false, nullptr);
+                                false, false, 0);
 
                     std::filesystem::path outputPath = targetDir /
                         (std::to_string(i) + ".png");

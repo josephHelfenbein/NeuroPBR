@@ -106,8 +106,8 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float* roughness, const float* metallic,
                  int width, int height, std::vector<float4>& frameRGBA,
                  bool enableShadows,
-                 bool enableCameraSmudge,
-                 FloatImage* cameraSmudge) {
+                 bool enableCameraArtifacts,
+                 unsigned long long artifactSeed) {
     size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     size_t vec3Bytes = pixelCount * 3 * sizeof(float);
     size_t scalarBytes = pixelCount * sizeof(float);
@@ -188,34 +188,6 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
     float tanHalfFovY = static_cast<float>(std::tan(verticalFovDeg * 0.5f * degToRad));
     float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
 
-    float* dCameraSmudge = nullptr;
-    int cameraSmudgeWidth = 0;
-    int cameraSmudgeHeight = 0;
-    int cameraSmudgeChannels = 0;
-
-    float* dLensFlare = nullptr;
-    int lensFlareWidth = 0;
-    int lensFlareHeight = 0;
-    int lensFlareChannels = 0;
-
-    bool smudgeActive = enableCameraSmudge && cameraSmudge;
-
-    if (smudgeActive){
-        size_t expectedSize = static_cast<size_t>(cameraSmudge->width) *
-                                static_cast<size_t>(cameraSmudge->height) *
-                                static_cast<size_t>(cameraSmudge->channels);
-        if (cameraSmudge->width == width && cameraSmudge->height == height &&
-            cameraSmudge->channels > 0 &&
-            cameraSmudge->data.size() == expectedSize) {
-            size_t smudgeBytes = cameraSmudge->data.size() * sizeof(float);
-            CUDA_CHECK(cudaMalloc(&dCameraSmudge, smudgeBytes));
-            CUDA_CHECK(cudaMemcpy(dCameraSmudge, cameraSmudge->data.data(), smudgeBytes, cudaMemcpyHostToDevice));
-            cameraSmudgeWidth = cameraSmudge->width;
-            cameraSmudgeHeight = cameraSmudge->height;
-            cameraSmudgeChannels = cameraSmudge->channels;
-        }
-    }
-
     launchShadeKernel(grid, block,
                       env.envTexture, env.specularTexture,
                       static_cast<int>(env.mipLevels),
@@ -224,9 +196,8 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                       reinterpret_cast<float*>(dFrame),
                       width, height, cameraPos, forward,
                       right, up, tanHalfFovY, aspectRatio,
-                      enableShadows, smudgeActive, dCameraSmudge,
-                      cameraSmudgeWidth, cameraSmudgeHeight,
-                      cameraSmudgeChannels, env.horizonBrightness,
+                      enableShadows, enableCameraArtifacts, artifactSeed,
+                      env.horizonBrightness,
                       env.zenithBrightness, env.hardness);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -234,8 +205,6 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
     frameRGBA.resize(pixelCount);
     CUDA_CHECK(cudaMemcpy(frameRGBA.data(), dFrame, frameBytes, cudaMemcpyDeviceToHost));
 
-    cudaFree(dLensFlare);
-    cudaFree(dCameraSmudge);
     cudaFree(dFrame);
     cudaFree(dMetallic);
     cudaFree(dRoughness);

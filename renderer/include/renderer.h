@@ -170,8 +170,8 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float* roughness, const float* metallic,
                  int width, int height, std::vector<float4>& frameRGBA,
                  bool enableShadows = false,
-                 bool enableCameraSmudge = false,
-                 FloatImage* cameraSmudge = nullptr);
+                 bool enableCameraArtifacts = false,
+                 unsigned long long artifactSeed = 0);
 
 EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& filePath, 
                                                  unsigned faceSize, unsigned irradianceSize,

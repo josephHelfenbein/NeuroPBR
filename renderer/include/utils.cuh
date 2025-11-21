@@ -44,6 +44,36 @@ __device__ inline float dot2(const float2& a, const float2& b) {
     return a.x * b.x + a.y * b.y;
 }
 
+__device__ inline float2 operator*(const float2& a, float b) {
+    return make_float2(a.x * b, a.y * b);
+}
+
+__device__ inline float2 operator+(const float2& a, const float2& b) {
+    return make_float2(a.x + b.x, a.y + b.y);
+}
+
+__device__ inline float3 operator*(const float3& a, float b) {
+    return make_float3(a.x * b, a.y * b, a.z * b);
+}
+
+__device__ inline float3 operator+(const float3& a, const float3& b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+__device__ inline void operator+=(float3& a, float b) {
+    a.x += b;
+    a.y += b;
+    a.z += b;
+}
+
+__device__ inline float3 fractf(const float3& v) {
+    return make_float3(fractf(v.x), fractf(v.y), fractf(v.z));
+}
+
+__device__ inline float3 lerp(const float3& a, const float3& b, float t) {
+	return make_float3(lerp(a.x, b.x, t), lerp(a.y, b.y, t), lerp(a.z, b.z, t));
+}
+
 __device__ inline float texelSolidAngle(int x, int y, int size) {
 	float u0 = (2.0f * float(x) / float(size)) - 1.0f;
 	float u1 = (2.0f * float(x + 1) / float(size)) - 1.0f;
