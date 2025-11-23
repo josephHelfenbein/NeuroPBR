@@ -3,8 +3,10 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:provider/provider.dart';
 import 'dart:io';
 import 'captured_images_screen.dart';
+import '../theme/theme_provider.dart';
 
 class ScanScreenNew extends StatefulWidget {
   const ScanScreenNew({super.key});
@@ -33,8 +35,8 @@ class _ScanScreenNewState extends State<ScanScreenNew>
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   List<double> _availableZoomLevels = [1.0];
-  String _aspectRatio = 'Full'; // '3:4', '9:16', 'Full'
-  List<String> _capturedImages = []; // Store paths of captured images (max 3)
+  String _aspectRatio = 'Full';
+  List<String> _capturedImages = [];
 
   late AnimationController _focusController;
   late AnimationController _captureController;
@@ -120,7 +122,7 @@ class _ScanScreenNewState extends State<ScanScreenNew>
 
       _controller = CameraController(
         _cameras![_currentCameraIndex],
-        ResolutionPreset.max, // Highest quality available
+        ResolutionPreset.max,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
@@ -240,662 +242,354 @@ class _ScanScreenNewState extends State<ScanScreenNew>
     }
   }
 
-  void _openCapturedImages() {
+  Future<void> _openCapturedImages() async {
     if (_capturedImages.isEmpty) return;
 
     HapticFeedback.lightImpact();
-    Navigator.push(
+
+    // We use 'await' to pause here until the user comes back
+    final updatedList = await Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => CapturedImagesScreen(imagePaths: _capturedImages),
       ),
     );
+
+    // When they return, we check if they sent back a list
+    if (updatedList != null && updatedList is List<String> && mounted) {
+      setState(() {
+        _capturedImages = updatedList;
+      });
+    }
   }
 
   Future<void> _capturePhoto() async {
-    if (_controller == null || !_controller!.value.isInitialized || _isCapturing) {
+    // 1. Hardware Check & Initial Guard
+    // We add _isCapturing to the check to prevent double-tapping while the UI is locked
+    if (_controller == null || !_controller!.value.isInitialized || _controller!.value.isTakingPicture || _isCapturing) {
       return;
     }
 
+    // 2. INSTANT FEEDBACK: Haptic + Animation immediately
+    HapticFeedback.heavyImpact();
+    setState(() => _isCapturing = true); // Set capturing flag
+    _scanAnimationController.forward(from: 0.0);
+    _captureController.forward();
+
     try {
-      setState(() => _isCapturing = true);
-      HapticFeedback.heavyImpact();
+      // 3. Take picture in background (hardware call)
+      final XFile image = await _controller!.takePicture();
 
-      _scanAnimationController.forward(from: 0.0);
-      _captureController.forward();
-
-      // Capture in background
-      _controller!.takePicture().then((XFile image) {
-        // Add to captured images (max 3)
-        if (_capturedImages.length < 3 && mounted) {
-          setState(() {
-            _capturedImages.add(image.path);
-          });
-        }
-      }).catchError((e) {
-        debugPrint('Error saving photo: $e');
-      });
-
-      await Future.delayed(const Duration(milliseconds: 400));
-      await _captureController.reverse();
-      _scanAnimationController.reset();
-      setState(() => _isCapturing = false);
+      // 4. Update captured list
+      if (mounted) {
+        setState(() {
+          _capturedImages.add(image.path);
+        });
+      }
     } catch (e) {
       debugPrint('Error capturing photo: $e');
-      setState(() => _isCapturing = false);
-      _captureController.reset();
-      _scanAnimationController.reset();
+    } finally {
+      // 5. Reset UI State and Animations
+      if (mounted) {
+
+        // FIX: Remove 'await' here. The reverse animation will start immediately,
+        // but the code won't wait for its completion. This makes the button clickable sooner.
+        _captureController.reverse();
+
+        _scanAnimationController.reset();
+
+        // This is the CRUCIAL line. It resets the _isCapturing flag immediately,
+        // making the button active even while the capture animation is still fading out.
+        setState(() => _isCapturing = false);
+      }
     }
+  }
+
+  void _showMaterialToast() {
+    // Toast removed per user request
   }
 
   @override
   Widget build(BuildContext context) {
+    final colors = Provider.of<ThemeProvider>(context).colors;
+
     SystemChrome.setSystemUIOverlayStyle(
-      const SystemUiOverlayStyle(
-        systemNavigationBarColor: Color(0xFF000000),
-        systemNavigationBarIconBrightness: Brightness.light,
+      SystemUiOverlayStyle(
+        systemNavigationBarColor: colors.background,
+        systemNavigationBarIconBrightness: colors.statusBarBrightness,
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: Brightness.light,
+        statusBarIconBrightness: colors.statusBarBrightness,
       ),
     );
 
     return Scaffold(
-      backgroundColor: const Color(0xFF1A1A1A),
+      backgroundColor: colors.background,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Container(
-            decoration: BoxDecoration(
-              color: const Color(0xFF2C2C2C),
-              borderRadius: BorderRadius.circular(40),
-              border: Border.all(color: const Color(0xFF444444), width: 1),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.4),
-                  blurRadius: 12,
-                  offset: const Offset(0, 6),
+        child: Stack(
+          children: [
+            Column(
+              children: [
+                TopControls(
+                  selectedMaterial: _selectedMaterial,
+                  aspectRatio: _aspectRatio,
+                  flashOn: _flashOn,
+                  onMaterialSelector: _toggleMaterialSelector,
+                  onAspectRatioChange: (ratio) {
+                    HapticFeedback.lightImpact();
+                    setState(() => _aspectRatio = ratio);
+                  },
+                  onFlashToggle: _toggleFlash,
                 ),
+                const SizedBox(height: 12),
+                ResolutionInfo(resolutionInfo: _resolutionInfo, fpsInfo: _fpsInfo),
+                const SizedBox(height: 16),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Stack(
+                      children: [
+                        CameraView(
+                          isInitialized: _isInitialized,
+                          controller: _controller,
+                          aspectRatio: _aspectRatio,
+                          focusAnimation: _focusAnimation,
+                        ),
+                        FlashAnimation(
+                          isCapturing: _isCapturing,
+                          scanLineAnimation: _scanLineAnimation,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                BottomControls(
+                  availableZoomLevels: _availableZoomLevels,
+                  currentZoom: _currentZoom,
+                  exposureValue: _exposureValue,
+                  minExposure: _minExposure,
+                  maxExposure: _maxExposure,
+                  capturedImages: _capturedImages,
+                  onGalleryTap: _pickFromGallery,
+                  onCaptureTap: _capturePhoto,
+                  onZoomChange: _setZoom,
+                  onExposureChange: (value) {
+                    HapticFeedback.selectionClick();
+                    setState(() => _exposureValue = value);
+                    _applyExposure();
+                  },
+                  onImagesTap: _openCapturedImages,
+                ),
+                const SizedBox(height: 20),
               ],
             ),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Stack(
-                children: [
-                  Column(
-                    children: [
-                      // Top controls row
-                      _buildTopControls(),
-
-                      const SizedBox(height: 12),
-
-                      // Resolution and FPS info
-                      _buildResolutionInfo(),
-
-                      const SizedBox(height: 16),
-
-                      // Camera viewfinder with aspect ratio frame
-                      Expanded(
-                        child: Stack(
-                          children: [
-                            _buildCameraView(),
-                            _buildFlashAnimation(),
-                          ],
-                        ),
-                      ),
-
-                      const SizedBox(height: 20),
-
-                      // Bottom controls
-                      _buildBottomControls(),
-                    ],
-                  ),
-
-                  // Material selector overlay
-                  if (_materialSelectorExpanded)
-                    Positioned.fill(
-                      child: GestureDetector(
-                        onTap: () {
-                          setState(() => _materialSelectorExpanded = false);
-                        },
-                        child: Container(
-                          color: Colors.transparent,
-                          child: Center(
-                            child: GestureDetector(
-                              onTap: () {}, // Prevent clicks from closing when tapping menu
-                              child: Container(
-                                margin: const EdgeInsets.symmetric(horizontal: 40, vertical: 40),
-                                padding: const EdgeInsets.all(20),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF2C2C2C),
-                                  borderRadius: BorderRadius.circular(20),
-                                  border: Border.all(
-                                    color: const Color(0xFF444444),
-                                    width: 1,
-                                  ),
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: Colors.black.withOpacity(0.5),
-                                      blurRadius: 20,
-                                      spreadRadius: 5,
-                                      offset: const Offset(0, 10),
-                                    ),
-                                  ],
-                                ),
-                                child: SingleChildScrollView(
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: _materialTypes.map((type) {
-                                      final isSelected = _selectedMaterial == type;
-                                      return GestureDetector(
-                                        onTap: () {
-                                          HapticFeedback.lightImpact();
-                                          setState(() {
-                                            _selectedMaterial = type;
-                                            _materialSelectorExpanded = false;
-                                          });
-
-                                          // Show toast at top
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(
-                                              content: Row(
-                                                mainAxisSize: MainAxisSize.min,
-                                                children: [
-                                                  Icon(
-                                                    Icons.folder_outlined,
-                                                    color: const Color(0xFFea580c),
-                                                    size: 16,
-                                                  ),
-                                                  const SizedBox(width: 8),
-                                                  Text(
-                                                    'Saved under $type',
-                                                    style: GoogleFonts.robotoMono(
-                                                      fontWeight: FontWeight.w600,
-                                                      fontSize: 11,
-                                                      color: Colors.white,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                              duration: const Duration(milliseconds: 1500),
-                                              backgroundColor: const Color(0xFF2C2C2C),
-                                              behavior: SnackBarBehavior.floating,
-                                              margin: EdgeInsets.only(
-                                                top: MediaQuery.of(context).padding.top + 10,
-                                                left: 40,
-                                                right: 40,
-                                                bottom: MediaQuery.of(context).size.height - 100,
-                                              ),
-                                              shape: RoundedRectangleBorder(
-                                                borderRadius: BorderRadius.circular(20),
-                                                side: BorderSide(
-                                                  color: const Color(0xFFea580c),
-                                                  width: 1.5,
-                                                ),
-                                              ),
-                                              elevation: 8,
-                                            ),
-                                          );
-                                        },
-                                        child: Container(
-                                          width: double.infinity,
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 20,
-                                            vertical: 14,
-                                          ),
-                                          margin: const EdgeInsets.only(bottom: 8),
-                                          decoration: BoxDecoration(
-                                            color: isSelected
-                                                ? const Color(0xFFea580c)
-                                                : const Color(0xFF444444),
-                                            borderRadius: BorderRadius.circular(12),
-                                          ),
-                                          child: Text(
-                                            type,
-                                            textAlign: TextAlign.center,
-                                            style: GoogleFonts.robotoMono(
-                                              color: Colors.white,
-                                              fontSize: 14,
-                                              fontWeight: FontWeight.w700,
-                                              letterSpacing: 1.2,
-                                            ),
-                                          ),
-                                        ),
-                                      );
-                                    }).toList(),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTopControls() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        // Material selector button
-        Flexible(
-          child: GestureDetector(
-            onTap: _toggleMaterialSelector,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF444444),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(color: const Color(0xFF222222), width: 1),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.5),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.label_outline, color: Colors.white, size: 14),
-                  const SizedBox(width: 6),
-                  Text(
-                    _selectedMaterial,
-                    style: GoogleFonts.robotoMono(
-                      color: Colors.white,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-
-        const SizedBox(width: 8),
-
-        // Aspect ratio selector
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 3),
-          decoration: BoxDecoration(
-            color: const Color(0xFF444444),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: const Color(0xFF222222), width: 1),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: ['3:4', '9:16', 'Full'].map((ratio) {
-              final isSelected = _aspectRatio == ratio;
-              return GestureDetector(
-                onTap: () {
+            if (_materialSelectorExpanded)
+              MaterialSelectorOverlay(
+                materialTypes: _materialTypes,
+                selectedMaterial: _selectedMaterial,
+                onMaterialSelect: (type) {
                   HapticFeedback.lightImpact();
-                  setState(() => _aspectRatio = ratio);
+                  setState(() {
+                    _selectedMaterial = type;
+                    _materialSelectorExpanded = false;
+                  });
+                  _showMaterialToast();
                 },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: isSelected ? const Color(0xFF666666) : Colors.transparent,
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: Text(
-                    ratio,
-                    style: GoogleFonts.robotoMono(
-                      color: Colors.white,
-                      fontSize: 9,
-                      fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
-          ),
-        ),
-
-        const SizedBox(width: 8),
-
-        // Flash toggle
-        GestureDetector(
-          onTap: _toggleFlash,
-          child: Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: _flashOn ? const Color(0xFFea580c) : const Color(0xFF444444),
-              shape: BoxShape.circle,
-              border: Border.all(color: const Color(0xFF222222), width: 1),
-            ),
-            child: Icon(
-              _flashOn ? Icons.flash_on : Icons.flash_off,
-              color: Colors.white,
-              size: 20,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCameraView() {
-    double aspectRatioValue = 3 / 4; // Default 3:4
-    if (_aspectRatio == '9:16') {
-      aspectRatioValue = 9 / 16;
-    }
-
-    return Center(
-      child: _aspectRatio == 'Full'
-          ? _buildFullCameraView()
-          : AspectRatio(
-              aspectRatio: aspectRatioValue,
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: const Color(0xFF444444), width: 2),
-                ),
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(18),
-                  child: _isInitialized && _controller != null
-                      ? Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            CameraPreview(_controller!),
-                            _buildReticle(),
-                          ],
-                        )
-                      : Center(
-                          child: CircularProgressIndicator(
-                            color: const Color(0xFFea580c),
-                            strokeWidth: 2,
-                          ),
-                        ),
-                ),
+                onClose: () {
+                  setState(() => _materialSelectorExpanded = false);
+                },
               ),
-            ),
+          ],
+        ),
+      ),
     );
   }
+}
 
-  Widget _buildFullCameraView() {
+// --- Component: Top Controls ---
+class TopControls extends StatelessWidget {
+  final String selectedMaterial;
+  final String aspectRatio;
+  final bool flashOn;
+  final VoidCallback onMaterialSelector;
+  final Function(String) onAspectRatioChange;
+  final VoidCallback onFlashToggle;
+
+  const TopControls({
+    super.key,
+    required this.selectedMaterial,
+    required this.aspectRatio,
+    required this.flashOn,
+    required this.onMaterialSelector,
+    required this.onAspectRatioChange,
+    required this.onFlashToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return Container(
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: const Color(0xFF444444), width: 2),
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(18),
-        child: _isInitialized && _controller != null
-            ? FittedBox(
-                fit: BoxFit.cover,
-                child: SizedBox(
-                  width: _controller!.value.previewSize!.height,
-                  height: _controller!.value.previewSize!.width,
-                  child: CameraPreview(_controller!),
-                ),
-              )
-            : Center(
-                child: CircularProgressIndicator(
-                  color: const Color(0xFFea580c),
-                  strokeWidth: 2,
-                ),
-              ),
-      ),
-    );
-  }
-
-  Widget _buildReticle() {
-    return Center(
-      child: AnimatedBuilder(
-        animation: _focusAnimation,
-        builder: (context, child) {
-          return Opacity(
-            opacity: _focusAnimation.value,
+      padding: const EdgeInsets.all(20),
+      color: Colors.transparent,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          GestureDetector(
+            onTap: onMaterialSelector,
             child: Container(
-              width: 200,
-              height: 200,
+              width: 44,
+              height: 44,
               decoration: BoxDecoration(
-                border: Border.all(
-                  color: const Color(0xFFfbbf24),
-                  width: 2,
-                ),
-                borderRadius: BorderRadius.circular(4),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildFlashAnimation() {
-    if (!_isCapturing) return const SizedBox.shrink();
-
-    return Positioned.fill(
-      child: AnimatedBuilder(
-        animation: _scanLineAnimation,
-        builder: (context, child) {
-          double opacity = 0.0;
-          if (_scanLineAnimation.value < 0.1) {
-            opacity = _scanLineAnimation.value / 0.1;
-          } else if (_scanLineAnimation.value < 0.3) {
-            opacity = (0.3 - _scanLineAnimation.value) / 0.2;
-          }
-
-          return IgnorePointer(
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white.withOpacity(opacity),
-                borderRadius: BorderRadius.circular(18),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildBottomControls() {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        // Left side: Gallery and image progress
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _buildControlButton(
-              icon: Icons.photo_library,
-              onTap: _pickFromGallery,
-            ),
-            const SizedBox(height: 12),
-            _buildCapturedImagesPreview(),
-          ],
-        ),
-
-        // Shutter button
-        GestureDetector(
-          onTap: _capturePhoto,
-          child: Container(
-            width: 80,
-            height: 80,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: const Color(0xFFD32F2F),
-              border: Border.all(color: const Color(0xFF8B0000), width: 2),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.5),
-                  blurRadius: 6,
-                  offset: const Offset(0, 4),
-                ),
-              ],
-            ),
-            child: Container(
-              margin: const EdgeInsets.all(6),
-              decoration: BoxDecoration(
+                color: const Color(0xFF262626),
                 shape: BoxShape.circle,
-                color: Colors.black.withOpacity(0.1),
+                border: Border.all(color: const Color(0xFF3A3A3A)),
               ),
+              child: const Icon(Icons.label_outline, size: 20, color: Colors.white),
             ),
           ),
-        ),
-
-        // Right side: Zoom and EV
-        Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Zoom selector
-            if (_availableZoomLevels.length > 1)
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF444444),
-                  borderRadius: BorderRadius.circular(999),
-                  border: Border.all(color: const Color(0xFF222222), width: 1),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: _availableZoomLevels.map((zoom) {
-                    final isSelected = _currentZoom == zoom;
-                    return GestureDetector(
-                      onTap: () => _setZoom(zoom),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: isSelected ? const Color(0xFF666666) : Colors.transparent,
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          '${zoom.toInt()}×',
-                          style: GoogleFonts.robotoMono(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                          ),
-                        ),
-                      ),
-                    );
-                  }).toList(),
-                ),
-              )
-            else
-              const SizedBox(width: 56),
-
-            const SizedBox(height: 12),
-
-            // EV control
-            _buildEVControl(),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildEVControl() {
-    final showValue = _exposureValue.abs() > 0.05; // Only show if not essentially zero
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-          decoration: BoxDecoration(
-            color: const Color(0xFF444444),
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: const Color(0xFF222222), width: 1),
+          AspectRatioSelector(
+            aspectRatio: aspectRatio,
+            onAspectRatioChange: onAspectRatioChange,
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              GestureDetector(
-                onTap: () {
-                  if (_exposureValue > _minExposure) {
-                    HapticFeedback.selectionClick();
-                    setState(() {
-                      _exposureValue = (_exposureValue - 0.2).clamp(_minExposure, _maxExposure);
-                    });
-                    _applyExposure();
-                  }
-                },
-                child: Container(
-                  padding: const EdgeInsets.all(4),
-                  child: Icon(Icons.remove, color: Colors.white, size: 14),
-                ),
-              ),
-              const SizedBox(width: 4),
-              Text(
-                'EV',
-                style: GoogleFonts.robotoMono(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(width: 4),
-              GestureDetector(
-                onTap: () {
-                  if (_exposureValue < _maxExposure) {
-                    HapticFeedback.selectionClick();
-                    setState(() {
-                      _exposureValue = (_exposureValue + 0.2).clamp(_minExposure, _maxExposure);
-                    });
-                    _applyExposure();
-                  }
-                },
-                child: Container(
-                  padding: const EdgeInsets.all(4),
-                  child: Icon(Icons.add, color: Colors.white, size: 14),
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (showValue) ...[
-          const SizedBox(height: 4),
-          Text(
-            _exposureValue > 0 ? '+${_exposureValue.toStringAsFixed(1)}' : _exposureValue.toStringAsFixed(1),
-            style: GoogleFonts.robotoMono(
-              color: const Color(0xFF999999),
-              fontSize: 9,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+          FlashToggle(flashOn: flashOn, onToggle: onFlashToggle),
         ],
-      ],
+      ),
     );
   }
+}
 
-  Widget _buildResolutionInfo() {
+// --- Component: Aspect Ratio Selector ---
+class AspectRatioSelector extends StatelessWidget {
+  final String aspectRatio;
+  final Function(String) onAspectRatioChange;
+
+  const AspectRatioSelector({
+    super.key,
+    required this.aspectRatio,
+    required this.onAspectRatioChange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF262626),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.05), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: ['1:1', '3:4', '9:16', 'Full'].map((ratio) {
+          final isSelected = aspectRatio == ratio;
+          return GestureDetector(
+            onTap: () => onAspectRatioChange(ratio),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.white.withOpacity(0.1) : Colors.transparent,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                ratio,
+                style: GoogleFonts.robotoMono(
+                  color: isSelected ? Colors.white : Colors.grey[600],
+                  fontSize: 10,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// --- Component: Flash Toggle ---
+class FlashToggle extends StatelessWidget {
+  final bool flashOn;
+  final VoidCallback onToggle;
+
+  const FlashToggle({
+    super.key,
+    required this.flashOn,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onToggle,
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: flashOn ? Colors.red : const Color(0xFF262626),
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: flashOn
+                ? Colors.red.withOpacity(0.3)
+                : Colors.white.withOpacity(0.05),
+            width: 1,
+          ),
+          boxShadow: flashOn
+              ? [
+            BoxShadow(
+              color: Colors.red.withOpacity(0.5),
+              blurRadius: 15,
+              spreadRadius: 2,
+            ),
+          ]
+              : null,
+        ),
+        child: Icon(
+          flashOn ? Icons.flash_on : Icons.flash_off,
+          color: Colors.white,
+          size: 20,
+        ),
+      ),
+    );
+  }
+}
+
+// --- Component: Resolution Info ---
+class ResolutionInfo extends StatelessWidget {
+  final String resolutionInfo;
+  final String fpsInfo;
+
+  const ResolutionInfo({
+    super.key,
+    required this.resolutionInfo,
+    required this.fpsInfo,
+  });
+
+  @override
+  Widget build(BuildContext context) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         Text(
-          _resolutionInfo,
+          resolutionInfo,
           style: GoogleFonts.robotoMono(
-            color: const Color(0xFFea580c),
+            color: Colors.white,
             fontSize: 12,
-            fontWeight: FontWeight.w700,
+            fontWeight: FontWeight.bold,
             letterSpacing: 1.5,
           ),
         ),
-        const SizedBox(width: 8),
+        SizedBox(width: 8),
         Text(
           '•',
-          style: GoogleFonts.robotoMono(
-            color: const Color(0xFF666666),
+          style: TextStyle(
+            color: Colors.grey[600],
             fontSize: 12,
           ),
         ),
-        const SizedBox(width: 8),
+        SizedBox(width: 8),
         Text(
-          _fpsInfo,
+          fpsInfo,
           style: GoogleFonts.robotoMono(
-            color: const Color(0xFF999999),
+            color: Colors.grey[600],
             fontSize: 12,
             fontWeight: FontWeight.w600,
             letterSpacing: 1.2,
@@ -904,81 +598,587 @@ class _ScanScreenNewState extends State<ScanScreenNew>
       ],
     );
   }
+}
 
-  Widget _buildCapturedImagesPreview() {
-    final isComplete = _capturedImages.length == 3;
+// --- Component: Camera View ---
+class CameraView extends StatelessWidget {
+  final bool isInitialized;
+  final CameraController? controller;
+  final String aspectRatio;
+  final Animation<double> focusAnimation;
 
-    return GestureDetector(
-      onTap: _capturedImages.isNotEmpty ? _openCapturedImages : null,
-      child: Container(
-        width: 56,
-        height: 56,
-        decoration: BoxDecoration(
-          color: const Color(0xFF444444),
-          shape: BoxShape.circle,
-          border: Border.all(
-            color: isComplete ? const Color(0xFFea580c) : const Color(0xFF222222),
-            width: isComplete ? 3 : 1,
+  const CameraView({
+    super.key,
+    required this.isInitialized,
+    required this.controller,
+    required this.aspectRatio,
+    required this.focusAnimation,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    double aspectRatioValue = 3 / 4;
+    if (aspectRatio == '1:1') {
+      aspectRatioValue = 1 / 1;
+    } else if (aspectRatio == '9:16') {
+      aspectRatioValue = 9 / 16;
+    }
+
+    return Center(
+      child: aspectRatio == 'Full'
+          ? _buildFullCameraView()
+          : AspectRatio(
+        aspectRatio: aspectRatioValue,
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: Colors.white.withOpacity(0.1),
+              width: 2,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.6),
+                blurRadius: 20,
+                spreadRadius: 5,
+              ),
+            ],
           ),
-          boxShadow: isComplete
-              ? [
-                  BoxShadow(
-                    color: const Color(0xFFea580c).withOpacity(0.5),
-                    blurRadius: 12,
-                    spreadRadius: 2,
-                  ),
-                ]
-              : [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.5),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-        ),
-        child: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: List.generate(3, (index) {
-              final isCaptured = index < _capturedImages.length;
-              return Container(
-                margin: const EdgeInsets.symmetric(vertical: 2),
-                width: 6,
-                height: 6,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isCaptured
-                      ? const Color(0xFFea580c)
-                      : const Color(0xFF666666),
-                ),
-              );
-            }),
-          ),
+          clipBehavior: Clip.antiAlias,
+          child: _buildCameraContent(),
         ),
       ),
     );
   }
 
-  Widget _buildControlButton({required IconData icon, required VoidCallback onTap}) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 56,
-        height: 56,
-        decoration: BoxDecoration(
-          color: const Color(0xFF444444),
-          shape: BoxShape.circle,
-          border: Border.all(color: const Color(0xFF222222), width: 1),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.5),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
+  Widget _buildFullCameraView() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.1),
+          width: 2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.6),
+            blurRadius: 20,
+            spreadRadius: 5,
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: _buildCameraContent(),
+    );
+  }
+
+  Widget _buildCameraContent() {
+    if (!isInitialized || controller == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              color: Colors.white.withOpacity(0.5),
+              strokeWidth: 2,
+            ),
+            SizedBox(height: 16),
+            Text(
+              'Initializing camera...',
+              style: GoogleFonts.robotoMono(
+                color: Colors.grey[600],
+                fontSize: 12,
+              ),
             ),
           ],
         ),
-        child: Icon(icon, color: Colors.white, size: 24),
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        CameraPreview(controller!),
+        Center(
+          child: AnimatedBuilder(
+            animation: focusAnimation,
+            builder: (context, child) {
+              return Transform.scale(
+                scale: focusAnimation.value,
+                child: Container(
+                  width: 120,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.6),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Component: Flash Animation ---
+class FlashAnimation extends StatelessWidget {
+  final bool isCapturing;
+  final Animation<double> scanLineAnimation;
+
+  const FlashAnimation({
+    super.key,
+    required this.isCapturing,
+    required this.scanLineAnimation,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isCapturing) return SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: scanLineAnimation,
+      builder: (context, child) {
+        double whiteOpacity;
+        if (scanLineAnimation.value < 0.8) {
+          whiteOpacity = 0.3;
+        } else {
+          // Normalize the last 20% (from 0.8 to 1.0) into a 0.0 to 1.0 scale
+          double fadeProgress = (scanLineAnimation.value - 0.8) * 5.0;
+          whiteOpacity = 0.3 * (1.0 - fadeProgress);
+        }
+
+        return Stack(
+          children: [
+            Container(
+              color: Colors.white.withOpacity(whiteOpacity),
+            ),
+            Positioned(
+              top: scanLineAnimation.value * MediaQuery.of(context).size.height * 0.6,
+              left: 0,
+              right: 0,
+              child: Container(
+                height: 2,
+                decoration: BoxDecoration(
+                  color: Colors.red,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.red.withOpacity(0.8),
+                      blurRadius: 10,
+                      spreadRadius: 3,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// --- Component: Bottom Controls ---
+class BottomControls extends StatelessWidget {
+  final List<double> availableZoomLevels;
+  final double currentZoom;
+  final double exposureValue;
+  final double minExposure;
+  final double maxExposure;
+  final List<String> capturedImages;
+  final VoidCallback onGalleryTap;
+  final VoidCallback onCaptureTap;
+  final Function(double) onZoomChange;
+  final Function(double) onExposureChange;
+  final VoidCallback onImagesTap;
+
+  const BottomControls({
+    super.key,
+    required this.availableZoomLevels,
+    required this.currentZoom,
+    required this.exposureValue,
+    required this.minExposure,
+    required this.maxExposure,
+    required this.capturedImages,
+    required this.onGalleryTap,
+    required this.onCaptureTap,
+    required this.onZoomChange,
+    required this.onExposureChange,
+    required this.onImagesTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Column(
+        children: [
+          ZoomSelector(
+            availableZoomLevels: availableZoomLevels,
+            currentZoom: currentZoom,
+            onZoomChange: onZoomChange,
+          ),
+          const SizedBox(height: 16),
+          ExposureControl(
+            exposureValue: exposureValue,
+            minExposure: minExposure,
+            maxExposure: maxExposure,
+            onExposureChange: onExposureChange,
+          ),
+          const SizedBox(height: 20),
+          CaptureControls(
+            capturedImages: capturedImages,
+            onGalleryTap: onGalleryTap,
+            onCaptureTap: onCaptureTap,
+            onImagesTap: onImagesTap,
+          ),
+        ],
       ),
     );
   }
 }
+
+// --- Component: Zoom Selector ---
+class ZoomSelector extends StatelessWidget {
+  final List<double> availableZoomLevels;
+  final double currentZoom;
+  final Function(double) onZoomChange;
+
+  const ZoomSelector({
+    super.key,
+    required this.availableZoomLevels,
+    required this.currentZoom,
+    required this.onZoomChange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF262626),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.05), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: availableZoomLevels.map((zoom) {
+          final isSelected = (currentZoom - zoom).abs() < 0.01;
+          return GestureDetector(
+            onTap: () => onZoomChange(zoom),
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              margin: EdgeInsets.symmetric(horizontal: 2),
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.white.withOpacity(0.1) : Colors.transparent,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                '${zoom.toStringAsFixed(0)}x',
+                style: GoogleFonts.robotoMono(
+                  color: isSelected ? Colors.white : Colors.grey[600],
+                  fontSize: 12,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// --- Component: Exposure Control ---
+class ExposureControl extends StatelessWidget {
+  final double exposureValue;
+  final double minExposure;
+  final double maxExposure;
+  final Function(double) onExposureChange;
+
+  const ExposureControl({
+    super.key,
+    required this.exposureValue,
+    required this.minExposure,
+    required this.maxExposure,
+    required this.onExposureChange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(Icons.brightness_6, color: Colors.grey[600], size: 18),
+        SizedBox(width: 12),
+        Expanded(
+          child: SliderTheme(
+            data: SliderThemeData(
+              activeTrackColor: Colors.white,
+              inactiveTrackColor: Colors.white.withOpacity(0.1),
+              thumbColor: Colors.white,
+              overlayColor: Colors.white.withOpacity(0.2),
+              trackHeight: 3,
+              thumbShape: RoundSliderThumbShape(enabledThumbRadius: 8),
+            ),
+            child: Slider(
+              value: exposureValue,
+              min: minExposure,
+              max: maxExposure,
+              onChanged: onExposureChange,
+            ),
+          ),
+        ),
+        SizedBox(width: 12),
+        SizedBox(
+          width: 40,
+          child: Text(
+            exposureValue.toStringAsFixed(1),
+            style: GoogleFonts.robotoMono(
+              color: Colors.grey[600],
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+            textAlign: TextAlign.end,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Component: Capture Controls ---
+class CaptureControls extends StatelessWidget {
+  final List<String> capturedImages;
+  final VoidCallback onGalleryTap;
+  final VoidCallback onCaptureTap;
+  final VoidCallback onImagesTap;
+
+  const CaptureControls({
+    super.key,
+    required this.capturedImages,
+    required this.onGalleryTap,
+    required this.onCaptureTap,
+    required this.onImagesTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        GestureDetector(
+          onTap: onGalleryTap,
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: const Color(0xFF262626),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withOpacity(0.1), width: 2),
+            ),
+            child: Icon(Icons.photo_library, color: Colors.white, size: 24),
+          ),
+        ),
+        GestureDetector(
+          onTap: onCaptureTap,
+          child: Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: Colors.red,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withOpacity(0.2), width: 4),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.red.withOpacity(0.5),
+                  blurRadius: 20,
+                  spreadRadius: 3,
+                ),
+              ],
+            ),
+            child: Icon(Icons.camera_alt, color: Colors.white, size: 32),
+          ),
+        ),
+        GestureDetector(
+          onTap: onImagesTap,
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: const Color(0xFF262626),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withOpacity(0.1), width: 2),
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(Icons.photo, color: Colors.white, size: 24),
+                if (capturedImages.isNotEmpty)
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: Container(
+                      padding: EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.red.withOpacity(0.5),
+                            blurRadius: 8,
+                            spreadRadius: 1,
+                          ),
+                        ],
+                      ),
+                      constraints: BoxConstraints(minWidth: 18, minHeight: 18),
+                      child: Center(
+                        child: Text(
+                          '${capturedImages.length}',
+                          style: GoogleFonts.robotoMono(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Component: Material Selector Overlay ---
+class MaterialSelectorOverlay extends StatelessWidget {
+  final List<String> materialTypes;
+  final String selectedMaterial;
+  final Function(String) onMaterialSelect;
+  final VoidCallback onClose;
+
+  const MaterialSelectorOverlay({
+    super.key,
+    required this.materialTypes,
+    required this.selectedMaterial,
+    required this.onMaterialSelect,
+    required this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onClose,
+      child: Container(
+        color: Colors.black.withOpacity(0.8),
+        child: Center(
+          child: GestureDetector(
+            onTap: () {},
+            child: Container(
+              margin: EdgeInsets.symmetric(horizontal: 32),
+              padding: EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: const Color(0xFF262626),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.6),
+                    blurRadius: 30,
+                    spreadRadius: 10,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'SELECT MATERIAL',
+                        style: GoogleFonts.robotoMono(
+                          color: Colors.grey[600],
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: onClose,
+                        child: Icon(Icons.close, color: Colors.grey[600], size: 20),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 20),
+                  ...materialTypes.map((material) {
+                    final isSelected = material == selectedMaterial;
+                    return GestureDetector(
+                      onTap: () => onMaterialSelect(material),
+                      child: Container(
+                        margin: EdgeInsets.only(bottom: 12),
+                        padding: EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? Colors.white.withOpacity(0.1)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: isSelected
+                                ? Colors.white.withOpacity(0.2)
+                                : Colors.transparent,
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: isSelected ? Colors.red : Colors.grey[700],
+                                shape: BoxShape.circle,
+                                boxShadow: isSelected
+                                    ? [
+                                  BoxShadow(
+                                    color: Colors.red.withOpacity(0.5),
+                                    blurRadius: 8,
+                                    spreadRadius: 1,
+                                  ),
+                                ]
+                                    : null,
+                              ),
+                            ),
+                            SizedBox(width: 16),
+                            Text(
+                              material,
+                              style: GoogleFonts.robotoMono(
+                                color: isSelected ? Colors.white : Colors.grey[600],
+                                fontSize: 14,
+                                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
