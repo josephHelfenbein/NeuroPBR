@@ -109,28 +109,66 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  bool enableCameraArtifacts,
                  unsigned long long artifactSeed) {
     size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-    size_t vec3Bytes = pixelCount * 3 * sizeof(float);
-    size_t scalarBytes = pixelCount * sizeof(float);
     size_t frameBytes = pixelCount * sizeof(float4);
 
-    float *dAlbedo = nullptr;
-    float *dNormal = nullptr;
-    float *dRoughness = nullptr;
-    float *dMetallic = nullptr;
+    auto packRGB = [pixelCount](const float* src, std::vector<float4>& dst) {
+        for (size_t i = 0; i < pixelCount; ++i) {
+            size_t base = i * 3;
+            dst[i] = make_float4(src[base + 0], src[base + 1], src[base + 2], 0.0f);
+        }
+    };
+
+    std::vector<float4> packedAlbedo(pixelCount);
+    std::vector<float4> packedNormal(pixelCount);
+    packRGB(albedo, packedAlbedo);
+    packRGB(normal, packedNormal);
+
+    float4* dAlbedo = nullptr;
+    float4* dNormal = nullptr;
+    float* dRoughness = nullptr;
+    float* dMetallic = nullptr;
     float4* dFrame = nullptr;
 
-    CUDA_CHECK(cudaMalloc(&dAlbedo, vec3Bytes));
-    CUDA_CHECK(cudaMalloc(&dNormal, vec3Bytes));
-    CUDA_CHECK(cudaMalloc(&dRoughness, scalarBytes));
-    CUDA_CHECK(cudaMalloc(&dMetallic, scalarBytes));
+    CUDA_CHECK(cudaMalloc(&dAlbedo, pixelCount * sizeof(float4)));
+    CUDA_CHECK(cudaMalloc(&dNormal, pixelCount * sizeof(float4)));
+    CUDA_CHECK(cudaMalloc(&dRoughness, pixelCount * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&dMetallic, pixelCount * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&dFrame, frameBytes));
 
-    CUDA_CHECK(cudaMemcpy(dAlbedo, albedo, vec3Bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dNormal, normal, vec3Bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dRoughness, roughness, scalarBytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dMetallic, metallic, scalarBytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dAlbedo, packedAlbedo.data(), pixelCount * sizeof(float4), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dNormal, packedNormal.data(), pixelCount * sizeof(float4), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dRoughness, roughness, pixelCount * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(dMetallic, metallic, pixelCount * sizeof(float), cudaMemcpyHostToDevice));
 
-    dim3 block(16, 16);
+    int minShadeGrid = 0;
+    int optimalShadeBlockSize = 0;
+    CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(&minShadeGrid, &optimalShadeBlockSize, shadeKernel, 0, 0));
+
+    auto choose2DBlock = [](int totalThreads) {
+        if (totalThreads <= 0) {
+            return dim3(16, 16, 1);
+        }
+        const int warp = 32;
+        int blockX = warp;
+        while (blockX > 1 && totalThreads % blockX != 0) {
+            blockX >>= 1;
+        }
+        if (totalThreads % blockX != 0) {
+            blockX = totalThreads;
+        }
+        int blockY = std::max(totalThreads / blockX, 1);
+
+        while (blockY > warp && blockX < 64 && blockX * 2 <= 1024) {
+            blockX *= 2;
+            blockY = std::max(totalThreads / blockX, 1);
+        }
+
+        return dim3(static_cast<unsigned>(blockX),
+                    static_cast<unsigned>(blockY),
+                    1u);
+    };
+
+    dim3 block = choose2DBlock(optimalShadeBlockSize);
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
 
@@ -192,7 +230,8 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                       env.envTexture, env.specularTexture,
                       static_cast<int>(env.mipLevels),
                       env.irradianceTexture, brdf.texture,
-                      dAlbedo, dNormal, dRoughness, dMetallic,
+                      dAlbedo, dNormal,
+                      dRoughness, dMetallic,
                       reinterpret_cast<float*>(dFrame),
                       width, height, cameraPos, forward,
                       right, up, tanHalfFovY, aspectRatio,
@@ -450,6 +489,18 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
                     (faceSize + block.y - 1) / block.y,
                     6);
 
+    int currentDevice = 0;
+    CUDA_CHECK(cudaGetDevice(&currentDevice));
+    cudaDeviceProp deviceProps{};
+    CUDA_CHECK(cudaGetDeviceProperties(&deviceProps, currentDevice));
+    const unsigned int targetPrefilterBlocks = static_cast<unsigned int>(deviceProps.multiProcessorCount);
+
+    auto makePrefilterGrid = [](unsigned int size, const dim3& blockDim) {
+        return dim3((size + blockDim.x - 1u) / blockDim.x,
+                    (size + blockDim.y - 1u) / blockDim.y,
+                    6u);
+    };
+
     launchEquirectangularToCubemap(grid, block, hdrTexture.value, envSurface.value, static_cast<int>(faceSize));
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -525,14 +576,25 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
         CUDA_CHECK(cudaCreateSurfaceObject(&levelSurface.value, &levelRes));
 
         unsigned mipFaceSize = std::max(1u, faceSize >> level);
-        dim3 mipGrid((mipFaceSize + block.x - 1) / block.x,
-                     (mipFaceSize + block.y - 1) / block.y,
-                     6);
+        dim3 mipBlock = block;
+        dim3 mipGrid = makePrefilterGrid(mipFaceSize, mipBlock);
+        unsigned int totalBlocks = mipGrid.x * mipGrid.y * mipGrid.z;
+
+        while (totalBlocks < targetPrefilterBlocks && (mipBlock.x > 1u || mipBlock.y > 1u)) {
+            if (mipBlock.x >= mipBlock.y && mipBlock.x > 1u) {
+                mipBlock.x = std::max(1u, mipBlock.x / 2u);
+            } else if (mipBlock.y > 1u) {
+                mipBlock.y = std::max(1u, mipBlock.y / 2u);
+            }
+
+            mipGrid = makePrefilterGrid(mipFaceSize, mipBlock);
+            totalBlocks = mipGrid.x * mipGrid.y * mipGrid.z;
+        }
         float roughness = result.mipLevels > 1 ?
                           static_cast<float>(level) / static_cast<float>(result.mipLevels - 1) :
                           0.0f;
 
-        launchPrefilterSpecularCubemap(mipGrid, block,
+        launchPrefilterSpecularCubemap(mipGrid, mipBlock,
                        envTextureForSampling.value,
                        levelSurface.value,
                        static_cast<int>(mipFaceSize),

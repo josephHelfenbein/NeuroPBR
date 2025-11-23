@@ -199,72 +199,117 @@ __device__ float4 computeProceduralArtifacts(float2 uv, unsigned long long seed)
     return make_float4(finalColor.x, finalColor.y, finalColor.z, finalAlpha);
 }
 
-__device__ float sampleScalar(const float* data, int width, int height, float u, float v) {
-    u = clamp01(u);
-    v = clamp01(v);
-
-    float x = u * static_cast<float>(width - 1);
-    float y = v * static_cast<float>(height - 1);
-
-    int x0 = static_cast<int>(floorf(x));
-    int y0 = static_cast<int>(floorf(y));
-    int x1 = min(x0 + 1, width - 1);
-    int y1 = min(y0 + 1, height - 1);
-    float tx = x - static_cast<float>(x0);
-    float ty = y - static_cast<float>(y0);
-
-    float c00 = data[y0 * width + x0];
-    float c10 = data[y0 * width + x1];
-    float c01 = data[y1 * width + x0];
-    float c11 = data[y1 * width + x1];
-
-    float c0 = c00 * (1.0f - tx) + c10 * tx;
-    float c1 = c01 * (1.0f - tx) + c11 * tx;
-    return c0 * (1.0f - ty) + c1 * ty;
+__device__ inline float clampf(float value, float minValue, float maxValue) {
+    return fminf(fmaxf(value, minValue), maxValue);
 }
 
-__device__ float3 sampleRGB(const float* data, int width, int height, float u, float v) {
-    u = clamp01(u);
-    v = clamp01(v);
+__device__ inline int clampi(int value, int minValue, int maxValue) {
+    return max(minValue, min(value, maxValue));
+}
 
-    float x = u * static_cast<float>(width - 1);
-    float y = v * static_cast<float>(height - 1);
+__device__ inline float4 lerpFloat4(const float4& a, const float4& b, float t) {
+    return make_float4(lerp(a.x, b.x, t),
+                       lerp(a.y, b.y, t),
+                       lerp(a.z, b.z, t),
+                       lerp(a.w, b.w, t));
+}
 
-    int x0 = static_cast<int>(floorf(x));
-    int y0 = static_cast<int>(floorf(y));
-    int x1 = min(x0 + 1, width - 1);
-    int y1 = min(y0 + 1, height - 1);
-    float tx = x - static_cast<float>(x0);
-    float ty = y - static_cast<float>(y0);
+__device__ inline float4 bilinearSampleFloat4(const float4* tile, int tileWidth, int tileHeight,
+                                              float localX, float localY) {
+    int x0 = clampi(static_cast<int>(floorf(localX)), 0, tileWidth - 1);
+    int y0 = clampi(static_cast<int>(floorf(localY)), 0, tileHeight - 1);
+    int x1 = clampi(x0 + 1, 0, tileWidth - 1);
+    int y1 = clampi(y0 + 1, 0, tileHeight - 1);
+    float tx = clampf(localX - static_cast<float>(x0), 0.0f, 1.0f);
+    float ty = clampf(localY - static_cast<float>(y0), 0.0f, 1.0f);
 
-    int idx00 = (y0 * width + x0) * 3;
-    int idx10 = (y0 * width + x1) * 3;
-    int idx01 = (y1 * width + x0) * 3;
-    int idx11 = (y1 * width + x1) * 3;
+    float4 c00 = tile[y0 * tileWidth + x0];
+    float4 c10 = tile[y0 * tileWidth + x1];
+    float4 c01 = tile[y1 * tileWidth + x0];
+    float4 c11 = tile[y1 * tileWidth + x1];
 
-    float3 c00 = make_float3(data[idx00 + 0], data[idx00 + 1], data[idx00 + 2]);
-    float3 c10 = make_float3(data[idx10 + 0], data[idx10 + 1], data[idx10 + 2]);
-    float3 c01 = make_float3(data[idx01 + 0], data[idx01 + 1], data[idx01 + 2]);
-    float3 c11 = make_float3(data[idx11 + 0], data[idx11 + 1], data[idx11 + 2]);
+    float4 c0 = lerpFloat4(c00, c10, tx);
+    float4 c1 = lerpFloat4(c01, c11, tx);
+    return lerpFloat4(c0, c1, ty);
+}
 
-    float3 c0 = make_float3(c00.x * (1.0f - tx) + c10.x * tx,
-                            c00.y * (1.0f - tx) + c10.y * tx,
-                            c00.z * (1.0f - tx) + c10.z * tx);
-    float3 c1 = make_float3(c01.x * (1.0f - tx) + c11.x * tx,
-                            c01.y * (1.0f - tx) + c11.y * tx,
-                            c01.z * (1.0f - tx) + c11.z * tx);
+__device__ inline float bilinearSampleFloat(const float* tile, int tileWidth, int tileHeight,
+                                            float localX, float localY) {
+    int x0 = clampi(static_cast<int>(floorf(localX)), 0, tileWidth - 1);
+    int y0 = clampi(static_cast<int>(floorf(localY)), 0, tileHeight - 1);
+    int x1 = clampi(x0 + 1, 0, tileWidth - 1);
+    int y1 = clampi(y0 + 1, 0, tileHeight - 1);
+    float tx = clampf(localX - static_cast<float>(x0), 0.0f, 1.0f);
+    float ty = clampf(localY - static_cast<float>(y0), 0.0f, 1.0f);
 
-    return make_float3(c0.x * (1.0f - ty) + c1.x * ty,
-                       c0.y * (1.0f - ty) + c1.y * ty,
-                       c0.z * (1.0f - ty) + c1.z * ty);
+    float c00 = tile[y0 * tileWidth + x0];
+    float c10 = tile[y0 * tileWidth + x1];
+    float c01 = tile[y1 * tileWidth + x0];
+    float c11 = tile[y1 * tileWidth + x1];
+
+    float c0 = lerp(c00, c10, tx);
+    float c1 = lerp(c01, c11, tx);
+    return lerp(c0, c1, ty);
+}
+
+__device__ inline float3 float4ToFloat3(const float4& value) {
+    return make_float3(value.x, value.y, value.z);
+}
+
+__device__ inline float4 bilinearSampleFloat4Global(const float4* data, int width, int height,
+                                                    float texelX, float texelY) {
+    int x0 = clampi(static_cast<int>(floorf(texelX)), 0, width - 1);
+    int y0 = clampi(static_cast<int>(floorf(texelY)), 0, height - 1);
+    int x1 = clampi(x0 + 1, 0, width - 1);
+    int y1 = clampi(y0 + 1, 0, height - 1);
+    float tx = clampf(texelX - static_cast<float>(x0), 0.0f, 1.0f);
+    float ty = clampf(texelY - static_cast<float>(y0), 0.0f, 1.0f);
+
+    int idx00 = y0 * width + x0;
+    int idx10 = y0 * width + x1;
+    int idx01 = y1 * width + x0;
+    int idx11 = y1 * width + x1;
+
+    float4 c00 = __ldg(&data[idx00]);
+    float4 c10 = __ldg(&data[idx10]);
+    float4 c01 = __ldg(&data[idx01]);
+    float4 c11 = __ldg(&data[idx11]);
+
+    float4 c0 = lerpFloat4(c00, c10, tx);
+    float4 c1 = lerpFloat4(c01, c11, tx);
+    return lerpFloat4(c0, c1, ty);
+}
+
+__device__ inline float bilinearSampleFloatGlobal(const float* data, int width, int height,
+                                                  float texelX, float texelY) {
+    int x0 = clampi(static_cast<int>(floorf(texelX)), 0, width - 1);
+    int y0 = clampi(static_cast<int>(floorf(texelY)), 0, height - 1);
+    int x1 = clampi(x0 + 1, 0, width - 1);
+    int y1 = clampi(y0 + 1, 0, height - 1);
+    float tx = clampf(texelX - static_cast<float>(x0), 0.0f, 1.0f);
+    float ty = clampf(texelY - static_cast<float>(y0), 0.0f, 1.0f);
+
+    int idx00 = y0 * width + x0;
+    int idx10 = y0 * width + x1;
+    int idx01 = y1 * width + x0;
+    int idx11 = y1 * width + x1;
+
+    float c00 = __ldg(&data[idx00]);
+    float c10 = __ldg(&data[idx10]);
+    float c01 = __ldg(&data[idx01]);
+    float c11 = __ldg(&data[idx11]);
+
+    float c0 = lerp(c00, c10, tx);
+    float c1 = lerp(c01, c11, tx);
+    return lerp(c0, c1, ty);
 }
 
 extern "C" __global__
 void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  int specularMipLevels, cudaTextureObject_t irradianceTex,
-                 cudaTextureObject_t brdfLutTex, const float* albedo,
-                 const float* normal, const float* roughness,
-                 const float* metallic, float* outRGBA,
+                 cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
+                 const float4* __restrict__ normal, const float* __restrict__ roughness,
+                 const float* __restrict__ metallic, float* __restrict__ outRGBA,
                  int width, int height, float3 cameraPos,
                  float3 cameraForward, float3 cameraRight,
                  float3 cameraUp, float tanHalfFovY, float aspect,
@@ -330,10 +375,134 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
     tiledU = clamp01(tiledU);
     tiledV = clamp01(tiledV);
 
-    float3 albedoColor = sampleRGB(albedo, width, height, tiledU, tiledV);
-    float3 normalSample = sampleRGB(normal, width, height, tiledU, tiledV);
-    float rough = sampleScalar(roughness, width, height, tiledU, tiledV);
-    float metal = sampleScalar(metallic, width, height, tiledU, tiledV);
+    const int widthMinusOne = max(width - 1, 0);
+    const int heightMinusOne = max(height - 1, 0);
+    float texelX = tiledU * static_cast<float>(widthMinusOne);
+    float texelY = tiledV * static_cast<float>(heightMinusOne);
+
+    int texelX0 = clampi(static_cast<int>(floorf(texelX)), 0, widthMinusOne);
+    int texelY0 = clampi(static_cast<int>(floorf(texelY)), 0, heightMinusOne);
+    int texelX1 = clampi(texelX0 + 1, 0, widthMinusOne);
+    int texelY1 = clampi(texelY0 + 1, 0, heightMinusOne);
+
+    __shared__ int sharedMinX;
+    __shared__ int sharedMinY;
+    __shared__ int sharedMaxX;
+    __shared__ int sharedMaxY;
+    __shared__ int sharedTileWidth;
+    __shared__ int sharedTileHeight;
+    __shared__ int sharedHasTile;
+
+    const bool blockLeader = (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0);
+    if (blockLeader) {
+        sharedMinX = widthMinusOne;
+        sharedMinY = heightMinusOne;
+        sharedMaxX = 0;
+        sharedMaxY = 0;
+    }
+    __syncthreads();
+
+    atomicMin(&sharedMinX, texelX0);
+    atomicMin(&sharedMinX, texelX1);
+    atomicMin(&sharedMinY, texelY0);
+    atomicMin(&sharedMinY, texelY1);
+    atomicMax(&sharedMaxX, texelX1);
+    atomicMax(&sharedMaxY, texelY1);
+    __syncthreads();
+
+    if (blockLeader) {
+        sharedMinX = clampi(sharedMinX - 1, 0, widthMinusOne);
+        sharedMinY = clampi(sharedMinY - 1, 0, heightMinusOne);
+        sharedMaxX = clampi(sharedMaxX + 1, 0, widthMinusOne);
+        sharedMaxY = clampi(sharedMaxY + 1, 0, heightMinusOne);
+        sharedTileWidth = sharedMaxX - sharedMinX + 1;
+        sharedTileHeight = sharedMaxY - sharedMinY + 1;
+        sharedHasTile = (sharedTileWidth > 0 && sharedTileHeight > 0) ? 1 : 0;
+    }
+    __syncthreads();
+
+    extern __shared__ unsigned char shadeSharedMem[];
+    float4* sharedAlbedo = reinterpret_cast<float4*>(shadeSharedMem);
+    float4* sharedNormal = sharedAlbedo + SHADE_TILE_CAPACITY;
+    float* sharedRoughness = reinterpret_cast<float*>(sharedNormal + SHADE_TILE_CAPACITY);
+    float* sharedMetallic = sharedRoughness + SHADE_TILE_CAPACITY;
+
+    const int tileMinX = sharedMinX;
+    const int tileMinY = sharedMinY;
+    (void)sharedTileWidth;
+    (void)sharedTileHeight;
+    const int tileMaxX = sharedMaxX;
+    const int tileMaxY = sharedMaxY;
+    const bool hasTile = (sharedHasTile != 0);
+    const int linearThread = threadIdx.z * blockDim.y * blockDim.x +
+                             threadIdx.y * blockDim.x + threadIdx.x;
+    const int totalThreads = blockDim.x * blockDim.y * blockDim.z;
+    const int chunkOverlap = 2;
+    const int chunkStride = max(SHADE_TILE_MAX_DIM - chunkOverlap, 1);
+
+    float3 albedoColor;
+    float3 normalSample;
+    float rough;
+    float metal;
+
+    bool sampledFromTile = false;
+
+    if (hasTile) {
+        for (int chunkY = tileMinY; chunkY <= tileMaxY; chunkY += chunkStride) {
+            int chunkYEnd = min(chunkY + SHADE_TILE_MAX_DIM - 1, tileMaxY);
+            int chunkHeight = chunkYEnd - chunkY + 1;
+            for (int chunkX = tileMinX; chunkX <= tileMaxX; chunkX += chunkStride) {
+                int chunkXEnd = min(chunkX + SHADE_TILE_MAX_DIM - 1, tileMaxX);
+                int chunkWidth = chunkXEnd - chunkX + 1;
+                int chunkArea = chunkWidth * chunkHeight;
+
+                for (int tileIdx = linearThread; tileIdx < chunkArea; tileIdx += totalThreads) {
+                    int localY = tileIdx / chunkWidth;
+                    int localX = tileIdx % chunkWidth;
+                    int globalX = chunkX + localX;
+                    int globalY = chunkY + localY;
+                    int globalIdx = globalY * width + globalX;
+                    sharedAlbedo[tileIdx] = __ldg(&albedo[globalIdx]);
+                    sharedNormal[tileIdx] = __ldg(&normal[globalIdx]);
+                    sharedRoughness[tileIdx] = __ldg(&roughness[globalIdx]);
+                    sharedMetallic[tileIdx] = __ldg(&metallic[globalIdx]);
+                }
+                __syncthreads();
+
+                if (!sampledFromTile) {
+                    bool insideX = (texelX0 >= chunkX) && (texelX1 <= chunkXEnd);
+                    bool insideY = (texelY0 >= chunkY) && (texelY1 <= chunkYEnd);
+                    if (insideX && insideY) {
+                        float localSampleX = texelX - static_cast<float>(chunkX);
+                        float localSampleY = texelY - static_cast<float>(chunkY);
+                        float4 albedo4 = bilinearSampleFloat4(sharedAlbedo, chunkWidth, chunkHeight,
+                                                              localSampleX, localSampleY);
+                        float4 normal4 = bilinearSampleFloat4(sharedNormal, chunkWidth, chunkHeight,
+                                                              localSampleX, localSampleY);
+                        float roughValue = bilinearSampleFloat(sharedRoughness, chunkWidth, chunkHeight,
+                                                               localSampleX, localSampleY);
+                        float metalValue = bilinearSampleFloat(sharedMetallic, chunkWidth, chunkHeight,
+                                                               localSampleX, localSampleY);
+                        albedoColor = float4ToFloat3(albedo4);
+                        normalSample = float4ToFloat3(normal4);
+                        rough = roughValue;
+                        metal = metalValue;
+                        sampledFromTile = true;
+                    }
+                }
+                __syncthreads();
+            }
+        }
+    }
+
+    if (!sampledFromTile) {
+        float4 albedo4 = bilinearSampleFloat4Global(albedo, width, height, texelX, texelY);
+        float4 normal4 = bilinearSampleFloat4Global(normal, width, height, texelX, texelY);
+        albedoColor = float4ToFloat3(albedo4);
+        normalSample = float4ToFloat3(normal4);
+        rough = bilinearSampleFloatGlobal(roughness, width, height, texelX, texelY);
+        metal = bilinearSampleFloatGlobal(metallic, width, height, texelX, texelY);
+    }
 
     float3 normalTS = make_float3(normalSample.x * 2.0f - 1.0f,
                                   normalSample.y * 2.0f - 1.0f,
@@ -464,9 +633,9 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
 void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                        int specularMipLevels, cudaTextureObject_t irradianceTex,
-                       cudaTextureObject_t brdfLutTex, const float* albedo,
-                       const float* normal, const float* roughness,
-                       const float* metallic, float* outRGBA,
+                       cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
+                       const float4* __restrict__ normal, const float* __restrict__ roughness,
+                       const float* __restrict__ metallic, float* __restrict__ outRGBA,
                        int width, int height, float3 cameraPos,
                        float3 cameraForward, float3 cameraRight, 
                        float3 cameraUp, float tanHalfFovY, float aspect,
@@ -474,7 +643,7 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        unsigned long long artifactSeed,
                        float horizonBrightness,
                        float zenithBrightness, float hardness) {
-    shadeKernel<<<gridDim, blockDim>>>(envTex, specularTex, specularMipLevels,
+    shadeKernel<<<gridDim, blockDim, SHADE_KERNEL_SHARED_MEM_BYTES>>>(envTex, specularTex, specularMipLevels,
                                        irradianceTex, brdfLutTex, albedo, normal,
                                        roughness, metallic, outRGBA,
                                        width, height, cameraPos,
