@@ -385,13 +385,11 @@ class Trainer:
             "w_l1": self.config.loss.w_l1,
             "w_ssim": self.config.loss.w_ssim,
             "w_normal": self.config.loss.w_normal,
-            "w_perceptual": self.config.loss.w_perceptual,
             "w_gan": self.config.loss.w_gan,
             "w_albedo": self.config.loss.w_albedo,
             "w_roughness": self.config.loss.w_roughness,
             "w_metallic": self.config.loss.w_metallic,
             "w_normal_map": self.config.loss.w_normal_map,
-            "use_perceptual": self.config.loss.use_perceptual,
             "gan_loss_type": self.config.loss.gan_loss_type
         }
         return HybridLoss(loss_config).to(self.device)
@@ -595,14 +593,12 @@ class Trainer:
                 # Generate PBR maps
                 pred_pbr = self.generator(input_renders)
                 
-                # Compute loss (use albedo as RGB proxy for perceptual loss if enabled)
+                # Compute loss
                 discriminator_for_loss = self.discriminator if use_gan else None
                 g_loss, loss_info = self.criterion(
                     pred_pbr,
                     target,
-                    discriminator=discriminator_for_loss,
-                    pred_rgb=pred_pbr["albedo"] if self.config.loss.use_perceptual else None,
-                    target_rgb=target["albedo"] if self.config.loss.use_perceptual else None
+                    discriminator=discriminator_for_loss
                 )
             
             # Backward
@@ -980,6 +976,11 @@ def main(args):
     
     # Apply GPU optimizations
     gpu_optimization.apply_global_optimizations()
+    
+    # Optimize resolution for low VRAM
+    if config.training.auto_resize_on_low_vram:
+        config = gpu_optimization.optimize_resolution_for_vram(config)
+
     gpu_optimization.print_verification_commands()
 
     # Auto-tune batch size if not specified via CLI

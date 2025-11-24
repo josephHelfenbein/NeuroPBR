@@ -337,15 +337,6 @@ def apply_torch_compile(model, model_name="model"):
         # H100/A100/RTX30/40 (Ampere+) - These are great candidates for compilation!
         if is_ampere_plus:
             total_memory_gb = gpu_info["total_memory_gb"]
-            
-            # Disable compilation for < 16GB VRAM unless forced
-            if total_memory_gb < 16 and use_compile_env != 'true':
-                 return model, {
-                    "status": "uncompiled",
-                    "mode": None,
-                    "reason": f"VRAM ({total_memory_gb:.1f}GB) too low for torch.compile overhead. Disabled.",
-                    "warning": "Set USE_TORCH_COMPILE=true to force enable."
-                 }
 
             if is_spot_instance:
                 # Fast compile mode for short-lived instances
@@ -408,3 +399,34 @@ def verify_compilation(model, model_name):
     else:
         # It might be uncompiled or compilation failed silently/gracefully
         return False
+
+def optimize_resolution_for_vram(config):
+    """
+    Automatically adjusts image resolution if VRAM is limited.
+    """
+    gpu_info = detect_gpu_capabilities()
+    if not gpu_info["is_available"]:
+        return config
+
+    total_vram_gb = gpu_info["total_memory_gb"]
+    
+    # User requested threshold: 16GB
+    if total_vram_gb <= 16.0:
+        print(f"[GPU Optimization] Detected {total_vram_gb:.1f}GB VRAM (<= 16GB).")
+        print("[GPU Optimization] Auto-resizing inputs and outputs to 1024x1024 to prevent OOM.")
+        
+        # Update config
+        config.data.image_size = (1024, 1024)
+        config.data.output_size = (1024, 1024)
+        
+        # Ensure decoder doesn't try to upsample if we want 1024 output
+        # If encoder stride is 1, output is same as input.
+        # If encoder stride is 2, output is half input.
+        # We want output to be 1024.
+        
+        if config.model.encoder_stride == 1:
+            config.model.decoder_sr_scale = 0
+        elif config.model.encoder_stride == 2:
+            config.model.decoder_sr_scale = 2
+            
+    return config

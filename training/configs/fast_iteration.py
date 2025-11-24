@@ -4,7 +4,6 @@ Fast iteration config - quick experiments and debugging.
 Features:
 - ResNet18 encoder (fast)
 - 2-layer transformer (minimal)
-- No perceptual loss
 - Small batch size
 """
 
@@ -24,9 +23,7 @@ def get_config():
     config.loss.w_l1 = 1.0
     config.loss.w_ssim = 0.3
     config.loss.w_normal = 0.5
-    config.loss.w_perceptual = 0.0
     config.loss.w_gan = 0.05
-    config.loss.use_perceptual = False
 
     # Training
     config.training.epochs = 50

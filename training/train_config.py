@@ -99,7 +99,6 @@ class LossConfig:
     w_l1: float = 1.0
     w_ssim: float = 0.3
     w_normal: float = 0.5
-    w_perceptual: float = 0.0  # Set > 0 to enable VGG perceptual loss
     w_gan: float = 0.05  # Generator GAN loss weight
 
     # Individual map weights for L1
@@ -113,9 +112,6 @@ class LossConfig:
 
     # Discriminator loss weight
     w_discriminator: float = 1.0
-
-    # Use perceptual loss
-    use_perceptual: bool = False
 
 
 @dataclass
@@ -198,6 +194,9 @@ class TrainingConfig:
     # Reproducibility
     seed: int = 42
     deterministic: bool = False
+
+    # Auto-resize for low VRAM
+    auto_resize_on_low_vram: bool = True
 
 
 @dataclass

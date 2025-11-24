@@ -40,7 +40,7 @@ Renders (3 × RGB) → Shared Encoder → Cross-View ViT → Multi-head Decoder 
 ### Key Features
 
 - Multi-view fusion with ViT attention  
-- Flexible loss system (L1 / SSIM / Normal / GAN / Perceptual)  
+- Flexible loss system (L1 / SSIM / Normal / GAN)  
 - Mixed precision + gradient clipping  
 - Automatic train/val split with reproducible seeding  
 - Checkpointing (latest, best, periodic) and resume  
@@ -200,7 +200,7 @@ PY
 | `default` | ResNet50 encoder, ViT depth 4, GAN starts epoch 5 | Production training |
 | `quick_test` | ResNet18, ViT depth 2, 10 epochs | Debug / smoke tests |
 | `lightweight` | ResNet50, no GAN | Fast baseline |
-| `configs/high_quality.py` | ResNet101, deeper ViT, perceptual loss | Highest fidelity |
+| `configs/high_quality.py` | ResNet101, deeper ViT | Highest fidelity |
 | `configs/fast_iteration.py` | ResNet18, fewer epochs | Rapid experimentation |
 | `configs/normal_focused.py` | Normal-heavy loss weights | Emphasize normals |
 
@@ -220,8 +220,6 @@ def get_config():
     cfg.loss.w_l1 = 1.0
     cfg.loss.w_ssim = 0.5
     cfg.loss.w_normal = 0.7
-    cfg.loss.use_perceptual = True
-    cfg.loss.w_perceptual = 0.1
 
     cfg.optimizer.g_lr = 1e-4
     cfg.optimizer.d_lr = 4e-4
@@ -241,7 +239,6 @@ Run via `python train.py --config configs/my_config.py ...`.
 | SSIM | Structural similarity (albedo) | `w_ssim` | 0.3 |
 | Normal | Angular error for normals | `w_normal` | 0.5 |
 | GAN | Adversarial realism | `w_gan` | 0.05 |
-| Perceptual | VGG feature matching | `w_perceptual` | 0.0 |
 
 ### Per-Map Weights
 ```python
@@ -253,7 +250,7 @@ cfg.loss.w_normal_map = 1.0
 
 ### Recipes
 - Emphasize normals → raise `w_normal`, `w_normal_map`
-- Photographic albedo → bump `w_albedo`, `w_ssim`, enable perceptual loss
+- Photographic albedo → bump `w_albedo`, `w_ssim`
 - Disable GAN → set `cfg.model.use_gan = False`, `cfg.loss.w_gan = 0.0`
 
 ### GAN Modes
@@ -441,7 +438,7 @@ with torch.no_grad():
 
 ### Implemented
 - Full training pipeline (multi-view generator, PatchGAN discriminator)
-- Loss stack (L1, SSIM, normal, GAN, perceptual)
+- Loss stack (L1, SSIM, normal, GAN)
 - Mixed precision, gradient clipping, LR scheduling with warmup
 - Automatic train/val split, checkpointing, resume
 - TensorBoard + optional WandB logging
@@ -462,7 +459,6 @@ training/
 ├── train.py
 ├── run_inference.py
 ├── train_config.py
-├── TRAINING_GUIDE.md
 ├── requirements.txt
 ├── configs/
 ├── models/

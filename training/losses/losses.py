@@ -18,12 +18,6 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, Optional, Tuple
 
-try:
-    from torchvision.models import vgg16, VGG16_Weights
-    VGG_AVAILABLE = True
-except ImportError:
-    VGG_AVAILABLE = False
-
 
 class WeightedL1Loss(nn.Module):
     """Weighted L1 loss across multiple prediction targets."""
@@ -117,48 +111,6 @@ class NormalConsistencyLoss(nn.Module):
         return loss, angle_deg
 
 
-class VGGPerceptualLoss(nn.Module):
-    """VGG-based perceptual loss using intermediate feature layers."""
-    def __init__(self, feature_layers: list = [3, 8, 15, 22]):
-        super().__init__()
-        if not VGG_AVAILABLE:
-            raise ImportError("torchvision.models.vgg16 not available. Install torchvision for perceptual loss.")
-        
-        vgg = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
-        self.feature_extractors = nn.ModuleList()
-        
-        prev_layer = 0
-        for layer_idx in feature_layers:
-            self.feature_extractors.append(vgg[prev_layer:layer_idx + 1])
-            prev_layer = layer_idx + 1
-        
-        for param in self.parameters():
-            param.requires_grad = False
-        
-        self.eval()
-        
-        self.register_buffer("mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer("std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-
-    def normalize_input(self, x: torch.Tensor) -> torch.Tensor:
-        return (x - self.mean) / self.std
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        pred = self.normalize_input(pred)
-        target = self.normalize_input(target)
-        
-        loss = 0.0
-        x_pred = pred
-        x_target = target
-        
-        for extractor in self.feature_extractors:
-            x_pred = extractor(x_pred)
-            x_target = extractor(x_target)
-            loss += F.l1_loss(x_pred, x_target)
-        
-        return loss
-
-
 def discriminator_loss(real_logits: torch.Tensor, fake_logits: torch.Tensor, loss_type: str = "hinge") -> torch.Tensor:
     if loss_type == "hinge":
         real_loss = F.relu(1.0 - real_logits).mean()
@@ -209,7 +161,7 @@ class PatchGANDiscriminator(nn.Module):
         return self.model(x)
 
 class HybridLoss(nn.Module):
-    """Unified loss function for PBR reconstruction combining L1, SSIM, normal consistency, GAN, and perceptual losses."""
+    """Unified loss function for PBR reconstruction combining L1, SSIM, normal consistency, and GAN losses."""
     def __init__(self, config: Dict):
         super().__init__()
         self.config = config
@@ -224,17 +176,10 @@ class HybridLoss(nn.Module):
         self.ssim_loss = SSIMLoss()
         self.normal_loss = NormalConsistencyLoss()
         
-        if config.get("use_perceptual", False) and VGG_AVAILABLE:
-            self.perceptual_loss = VGGPerceptualLoss()
-        else:
-            self.perceptual_loss = None
-        
         self.gan_loss_type = config.get("gan_loss_type", "hinge")
 
     def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor],
-                discriminator: Optional[nn.Module] = None,
-                pred_rgb: Optional[torch.Tensor] = None,
-                target_rgb: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Dict]:
+                discriminator: Optional[nn.Module] = None) -> Tuple[torch.Tensor, Dict]:
         info = {}
         total_loss = 0.0
         
@@ -257,12 +202,6 @@ class HybridLoss(nn.Module):
             total_loss += w_normal * normal_loss
             info["loss_normal"] = normal_loss.item()
             info["normal_angle_deg"] = angle_deg
-        
-        w_perceptual = self.config.get("w_perceptual", 0.0)
-        if w_perceptual > 0 and self.perceptual_loss is not None and pred_rgb is not None and target_rgb is not None:
-            perceptual_loss = self.perceptual_loss(pred_rgb, target_rgb)
-            total_loss += w_perceptual * perceptual_loss
-            info["loss_perceptual"] = perceptual_loss.item()
         
         w_gan = self.config.get("w_gan", 0.0)
         if w_gan > 0 and discriminator is not None:
@@ -387,12 +326,12 @@ def run_tests():
     print("Test 8: HybridLoss weight sensitivity")
     
     config_with_ssim = {
-        "w_l1": 1.0, "w_ssim": 0.5, "w_normal": 0.5, "w_gan": 0.0, "w_perceptual": 0.0,
+        "w_l1": 1.0, "w_ssim": 0.5, "w_normal": 0.5, "w_gan": 0.0,
         "w_albedo": 1.0, "w_roughness": 1.0, "w_metallic": 1.0, "w_normal_map": 1.0
     }
     
     config_no_ssim = {
-        "w_l1": 1.0, "w_ssim": 0.0, "w_normal": 0.5, "w_gan": 0.0, "w_perceptual": 0.0,
+        "w_l1": 1.0, "w_ssim": 0.0, "w_normal": 0.5, "w_gan": 0.0,
         "w_albedo": 1.0, "w_roughness": 1.0, "w_metallic": 1.0, "w_normal_map": 1.0
     }
     
@@ -440,12 +379,10 @@ def example_training_step():
         "w_ssim": 0.3,
         "w_normal": 0.5,
         "w_gan": 0.05,
-        "w_perceptual": 0.0,
         "w_albedo": 1.0,
         "w_roughness": 1.0,
         "w_metallic": 1.0,
         "w_normal_map": 1.0,
-        "use_perceptual": False,
         "gan_loss_type": "hinge"
     }
     

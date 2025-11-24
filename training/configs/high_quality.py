@@ -4,7 +4,6 @@ High quality config - best results but slower training.
 Features:
 - ResNet101 encoder (large capacity)
 - 6-layer transformer (deep fusion)
-- Perceptual loss enabled
 - Higher loss weights for quality
 """
 
@@ -24,9 +23,7 @@ def get_config():
     config.loss.w_l1 = 1.0
     config.loss.w_ssim = 0.5
     config.loss.w_normal = 0.8
-    config.loss.w_perceptual = 0.2
     config.loss.w_gan = 0.1
-    config.loss.use_perceptual = True
     
     # Emphasize albedo quality
     config.loss.w_albedo = 1.2

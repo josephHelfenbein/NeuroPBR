@@ -67,14 +67,22 @@ class PBRDataset(Dataset):
         if self.curriculum_mode in (1, 2) and not self.dirty_dir.exists():
             raise FileNotFoundError(f"Dirty render directory not found: {self.dirty_dir}")
 
-        self.transform = transforms.Compose([
-            # transforms.Resize(image_size), # Removed for native 2048x2048 training
+        self.image_size = image_size
+        
+        transform_list = []
+        # Add resize if requested size differs from native 2048x2048
+        if self.image_size != (2048, 2048):
+             transform_list.append(transforms.Resize(self.image_size))
+             
+        transform_list.extend([
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=transform_mean,
                 std=transform_std
             )
         ])
+        
+        self.transform = transforms.Compose(transform_list)
 
         self.render_files = ['0.png', '1.png', '2.png']
         self.pbr_files = ['albedo.png', 'roughness.png', 'metallic.png', 'normal.png']
@@ -171,9 +179,10 @@ class PBRDataset(Dataset):
         if self.transform:
             img = self.transform(img)
             
-        # Verify tensor shape after transform (should be 2048x2048 if no resize)
-        if img.shape[1:] != (2048, 2048):
-             raise ValueError(f"Image at {path} has incorrect dimensions {img.shape[1:]}. Expected (2048, 2048).")
+        # Verify tensor shape after transform
+        expected_shape = (self.image_size[0], self.image_size[1])
+        if img.shape[1:] != expected_shape:
+             raise ValueError(f"Image at {path} has incorrect dimensions {img.shape[1:]}. Expected {expected_shape}.")
 
         return img
 

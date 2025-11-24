@@ -101,13 +101,11 @@ class DistillationLoss(nn.Module):
                 "w_l1": 1.0,
                 "w_ssim": 0.3,
                 "w_normal": 0.5,
-                "w_perceptual": 0.0,
                 "w_gan": 0.0,  # No GAN for student training
                 "w_albedo": 1.0,
                 "w_roughness": 1.0,
                 "w_metallic": 1.0,
                 "w_normal_map": 1.0,
-                "use_perceptual": False,
                 "gan_loss_type": "hinge"
             }
         self.hard_loss = HybridLoss(hard_loss_config)
@@ -317,13 +315,11 @@ class Trainer:
             "w_l1": config.loss.w_l1,
             "w_ssim": config.loss.w_ssim,
             "w_normal": config.loss.w_normal,
-            "w_perceptual": config.loss.w_perceptual,
             "w_gan": 0.0,  # No GAN for student
             "w_albedo": config.loss.w_albedo,
             "w_roughness": config.loss.w_roughness,
             "w_metallic": config.loss.w_metallic,
             "w_normal_map": config.loss.w_normal_map,
-            "use_perceptual": config.loss.use_perceptual,
             "gan_loss_type": config.loss.gan_loss_type
         }
         self.criterion = DistillationLoss(

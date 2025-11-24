@@ -112,7 +112,7 @@ Key options:
 - `--device {auto|cuda|cuda:0|cpu}` forces the accelerator if auto-detection doesn't pick the GPU you expect.
 - Preset configs like `--config quick_test` or `--config lightweight` adjust model/compute tradeoffs.
 
-Refer to `training/README.md` and `TRAINING_GUIDE.md` for the loss breakdown, advanced configs, and troubleshooting steps.
+Refer to `training/README.md` for the loss breakdown, advanced configs, and troubleshooting steps.
 
 ---
 
@@ -137,4 +137,4 @@ The training pipeline automatically detects your hardware and applies the best o
 
 - `dataset/README.md` – Deep dive on exporters, cleaning heuristics, and CLI options.
 - `renderer/README.md` – Detailed build instructions and asset requirements.
-- `training/README.md` & `TRAINING_GUIDE.md` – Model architecture, configs, and evaluation metrics.
+- `training/README.md` – Model architecture, configs, and evaluation metrics.
