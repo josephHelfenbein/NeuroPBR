@@ -2,8 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class PreferencesProvider extends ChangeNotifier {
-  // Default to cards
-  String _tagsViewMode = 'cards';
+  // Default to list
+  String _tagsViewMode = 'list';
 
   String get tagsViewMode => _tagsViewMode;
 
@@ -13,7 +13,7 @@ class PreferencesProvider extends ChangeNotifier {
 
   Future<void> _loadPreferences() async {
     final prefs = await SharedPreferences.getInstance();
-    _tagsViewMode = prefs.getString('tagsViewMode') ?? 'cards';
+    _tagsViewMode = prefs.getString('tagsViewMode') ?? 'list';
     notifyListeners();
   }
 

@@ -2,6 +2,7 @@
 
 import 'package:flutter/material.dart';
 import 'package:neuro_pbr/screens/main_tab_screen.dart';
+import 'package:neuro_pbr/screens/animated_splash_screen.dart';
 import 'package:neuro_pbr/providers/preferences_provider.dart';
 import 'package:provider/provider.dart';
 import 'screens/carousel_screen.dart';
@@ -27,10 +28,12 @@ class NeuroPBRApp extends StatelessWidget {
     final themeProvider = Provider.of<ThemeProvider>(context);
 
     return MaterialApp(
-      title: 'NeuroPBR',
+      title: 'Neuro PBR',
       debugShowCheckedModeBanner: false,
       theme: themeProvider.themeData,
-      home: const MainTabScreen(),
+      home: AnimatedSplashScreen(
+        nextScreen: const MainTabScreen(),
+      ),
     );
   }
 }
