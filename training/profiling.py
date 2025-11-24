@@ -18,7 +18,7 @@ def get_process_memory_mb():
     return mem
 
 
-def test_model_memory(model_name: str, model_fn, resolution: int = 2048):
+def test_model_memory(model_name: str, model_fn, resolution: int = 1024):
     """Test a model's memory usage using psutil."""
 
     print(f"\n{'='*60}")
@@ -100,7 +100,7 @@ if __name__ == "__main__":
     results = {}
 
     # Test at different resolutions
-    for resolution in [512, 1024, 2048]:
+    for resolution in [512, 1024]:
         print(f"\n{'#'*60}")
         print(f"# RESOLUTION: {resolution}×{resolution}")
         print(f"{'#'*60}")

@@ -68,7 +68,6 @@ class PBRDataset(Dataset):
             raise FileNotFoundError(f"Dirty render directory not found: {self.dirty_dir}")
 
         self.transform = transforms.Compose([
-            transforms.Resize(image_size),
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=transform_mean,

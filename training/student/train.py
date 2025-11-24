@@ -919,7 +919,7 @@ if __name__ == "__main__":
 
     # Config
     parser.add_argument("--config", type=str, default="default",
-                      help="Config to use: 'default' or path to custom config (e.g., configs/mobilenetv3_2048.py)")
+                      help="Config to use: 'default' or path to custom config (e.g., configs/mobilenetv3_1024.py)")
 
     # Distillation hyperparameters
     parser.add_argument("--temperature", type=float, default=4.0,

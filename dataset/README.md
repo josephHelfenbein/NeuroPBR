@@ -34,7 +34,7 @@ Use the Python script `dataset/clean_dataset.py` to scan a source directory recu
 - roughness
 - normal
 
-The script normalizes names and optionally flattens output. By default it writes per-material folders with fixed PNG filenames:
+The script normalizes names and optionally flattens output. By default it writes per-material folders with fixed PNG filenames, resized to 1024x1024:
 
 - `albedo.png`
 - `metallic.png`

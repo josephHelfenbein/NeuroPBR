@@ -1,5 +1,5 @@
 """
-Quick config example for 2048x2048 training with 6-layer discriminator.
+Quick config example for 1024x1024 training with 6-layer discriminator.
 
 Copy this to configs/high_res.py and use with:
     python train.py --config configs/high_res.py \
@@ -11,18 +11,18 @@ from train_config import TrainConfig, DataConfig, ModelConfig, LossConfig, Optim
 
 
 def get_config() -> TrainConfig:
-    """Configuration for high-resolution 2048x2048 training with 6-layer discriminator."""
+    """Configuration for high-resolution 1024x1024 training with 6-layer discriminator."""
     config = TrainConfig()
     
-    # Data: 2048x2048 images
-    config.data.image_size = (2048, 2048)
-    config.data.output_size = (2048, 2048)
+    # Data: 1024x1024 images
+    config.data.image_size = (1024, 1024)
+    config.data.output_size = (1024, 1024)
     config.data.batch_size = 2  # Reduced for memory
     config.data.num_workers = 8
     
     # Model: 6-layer discriminator
-    config.model.encoder_stride = 1  # 2048 → 2048
-    config.model.decoder_sr_scale = 2  # Upsample decoder output back to 2048
+    config.model.encoder_stride = 1  # 1024 → 1024
+    config.model.decoder_sr_scale = 0  # Keep 1024 resolution
     config.model.discriminator_type = "configurable"
     config.model.discriminator_n_layers = 6  # Large receptive field
     config.model.discriminator_use_sigmoid = False  # For hinge loss
@@ -54,7 +54,7 @@ def get_config() -> TrainConfig:
 if __name__ == "__main__":
     # Print config for verification
     config = get_config()
-    print("High-Resolution 2048x2048 Config:")
+    print("High-Resolution 1024x1024 Config:")
     print(f"  Image size: {config.data.image_size}")
     print(f"  Batch size: {config.data.batch_size}")
     print(f"  Encoder stride: {config.model.encoder_stride}")

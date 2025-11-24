@@ -9,15 +9,16 @@ def test_decoder_shapes_unet_encoder():
     decoder = UNetDecoder(
         in_channel=2048,
         skip_channels=[2048, 1024, 512, 256, 128, 64],  # Reversed from encoder
-        out_channel=8
+        out_channel=8,
+        sr_scale=0  # No upsampling needed for stride=1 (1024->1024)
     )
 
     x = torch.randn(1, 3, 1024, 1024)
     x, skips = encoder(x)
     output = decoder(x, skips)
 
-    # Should output 2048×2048 with 8 channels
-    assert output.shape == torch.Size([1, 8, 2048, 2048])
+    # Should output 1024×1024 with 8 channels
+    assert output.shape == torch.Size([1, 8, 1024, 1024])
 
 
 def test_decoder_shapes_resnet_stride1():
@@ -27,14 +28,15 @@ def test_decoder_shapes_resnet_stride1():
     decoder = UNetDecoder(
         in_channel=2048,
         skip_channels=[1024, 512, 256, 64],
-        out_channel=8
+        out_channel=8,
+        sr_scale=0  # No upsampling needed for stride=1 (1024->1024)
     )
 
     x = torch.randn(1, 3, 1024, 1024)
     x, skips = encoder(x)
     output = decoder(x, skips)
 
-    assert output.shape == torch.Size([1, 8, 2048, 2048])
+    assert output.shape == torch.Size([1, 8, 1024, 1024])
 
 
 def test_decoder_shapes_resnet_stride2():
@@ -45,14 +47,14 @@ def test_decoder_shapes_resnet_stride2():
         in_channel=2048,
         skip_channels=[1024, 512, 256, 64],
         out_channel=8,
-        sr_scale=4
+        sr_scale=2  # 2x upsampling for stride=2 (512->1024)
     )
 
     x = torch.randn(1, 3, 1024, 1024)
     x, skips = encoder(x)
     output = decoder(x, skips)
 
-    assert output.shape == torch.Size([1, 8, 2048, 2048])
+    assert output.shape == torch.Size([1, 8, 1024, 1024])
 
 
 def test_decoder_heads_output():
@@ -62,7 +64,8 @@ def test_decoder_heads_output():
     decoder = UNetDecoderHeads(
         in_channel=2048,
         skip_channels=[2048, 1024, 512, 256, 128, 64],
-        out_channels=[3, 1, 1, 3]
+        out_channels=[3, 1, 1, 3],
+        sr_scale=0  # No upsampling needed for stride=1 (1024->1024)
     )
 
     x = torch.randn(1, 3, 1024, 1024)
@@ -70,10 +73,10 @@ def test_decoder_heads_output():
     outputs = decoder(x, skips)
 
     assert len(outputs) == 4
-    assert outputs[0].shape == torch.Size([1, 3, 2048, 2048])
-    assert outputs[1].shape == torch.Size([1, 1, 2048, 2048])
-    assert outputs[2].shape == torch.Size([1, 1, 2048, 2048])
-    assert outputs[3].shape == torch.Size([1, 3, 2048, 2048])
+    assert outputs[0].shape == torch.Size([1, 3, 1024, 1024])
+    assert outputs[1].shape == torch.Size([1, 1, 1024, 1024])
+    assert outputs[2].shape == torch.Size([1, 1, 1024, 1024])
+    assert outputs[3].shape == torch.Size([1, 3, 1024, 1024])
 
 if __name__ == "__main__":
     pytest.main([__file__])

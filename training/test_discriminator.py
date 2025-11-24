@@ -1,5 +1,5 @@
 """
-Test script to verify the new 6-layer discriminator works with 2048x2048 images.
+Test script to verify the new 6-layer discriminator works with 1024x1024 images.
 """
 
 import torch
@@ -7,7 +7,7 @@ from models.gan.discriminator import PatchGANDiscriminator
 
 def test_discriminator():
     print("="*80)
-    print("Testing 6-layer PatchGAN Discriminator for 2048x2048 Images")
+    print("Testing 6-layer PatchGAN Discriminator for 1024x1024 Images")
     print("="*80)
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -25,9 +25,9 @@ def test_discriminator():
     num_params = sum(p.numel() for p in disc.parameters())
     print(f"\nDiscriminator Parameters: {num_params:,}")
     
-    # Test with 2048x2048 input
+    # Test with 1024x1024 input
     batch_size = 2
-    input_size = 2048
+    input_size = 1024
     
     print(f"\nTesting with batch_size={batch_size}, input_size={input_size}x{input_size}")
     
