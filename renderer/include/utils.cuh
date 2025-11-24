@@ -139,6 +139,9 @@ __device__ inline void blockReduce(float input[4]) {
 	}
 	__syncthreads();
 }
+#else
+// Host-side dummy implementation to satisfy linker if referenced
+inline void blockReduce(float input[4]) {}
 #endif
 
 __device__ inline float3 faceUvToDir(int face, float u, float v) {

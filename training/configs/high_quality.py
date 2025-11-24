@@ -38,7 +38,8 @@ def get_config():
     config.training.grad_clip_norm = 1.0
     
     # Data
-    config.data.batch_size = 4
+    config.data.image_size = (2048, 2048)
+    config.data.batch_size = 1  # Reduced for 2048x2048
     config.data.num_workers = 8
     
     # Optimizer

@@ -41,7 +41,7 @@ class PBRDataset(Dataset):
         metadata_path: Optional[str],
         transform_mean: List,
         transform_std: List,
-        image_size: Tuple[int, int] = (1024, 1024),
+        image_size: Tuple[int, int] = (2048, 2048),
         use_dirty: bool = False,
         curriculum_mode: int = 0,
         split: Optional[Literal["train", "val"]] = None,
@@ -68,7 +68,7 @@ class PBRDataset(Dataset):
             raise FileNotFoundError(f"Dirty render directory not found: {self.dirty_dir}")
 
         self.transform = transforms.Compose([
-            transforms.Resize(image_size),
+            # transforms.Resize(image_size), # Removed for native 2048x2048 training
             transforms.ToTensor(),
             transforms.Normalize(
                 mean=transform_mean,
@@ -160,8 +160,21 @@ class PBRDataset(Dataset):
     def _load_image(self, path: Path):
         """Load and transform an image."""
         img = Image.open(path).convert('RGB')
+        
+        # Verify native resolution
+        if img.size != (2048, 2048):
+             # Only warn if not 2048, or assert if strict. 
+             # User requested: "Verify image dimensions are correct (assert shape)"
+             # But let's check if image_size is passed.
+             pass
+
         if self.transform:
             img = self.transform(img)
+            
+        # Verify tensor shape after transform (should be 2048x2048 if no resize)
+        if img.shape[1:] != (2048, 2048):
+             raise ValueError(f"Image at {path} has incorrect dimensions {img.shape[1:]}. Expected (2048, 2048).")
+
         return img
 
     def __getitem__(self, idx: int):
@@ -210,7 +223,7 @@ def get_dataloader(
         curriculum_mode: int = 0,
         split=None,  # "train" or "val" or None
         val_ratio=0.1,  # Validation split ratio
-        image_size=(1024, 1024),  # Input image size
+        image_size=(2048, 2048),  # Input image size
     seed=42,  # Seed for reproducible splits
         metadata_path: Optional[str] = None
 ):

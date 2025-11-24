@@ -4,6 +4,8 @@ from timm.models.vision_transformer import Block as ViTBlock # noqa
 from einops import rearrange
 from typing import Literal
 
+import torch.utils.checkpoint as checkpoint
+
 class ViTCrossViewFusion(nn.Module):
     def __init__(
             self,
@@ -47,7 +49,10 @@ class ViTCrossViewFusion(nn.Module):
         x = torch.cat(tokens, dim=1)  # [B, N*HW, C]
 
         for block in self.blocks:
-            x = block(x)
+            if self.training and x.requires_grad:
+                x = checkpoint.checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
 
         x = rearrange(x, 'b (v hw) c -> b hw (v c)', v=self.num_views)
         x = self.norm(self.fusion(x))

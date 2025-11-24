@@ -159,7 +159,7 @@ def copy_or_link(src: Path, dst: Path, link: bool, overwrite: bool) -> None:
         shutil.copy2(src, dst)
 
 
-def convert_to_png(src: Path, dst: Path, map_type: str, verbose: bool) -> bool:
+def convert_to_png(src: Path, dst: Path, map_type: str, verbose: bool, resize: Optional[int] = None) -> bool:
     """Convert an image file to PNG at the destination path.
 
     Returns True on success, False if conversion could not be performed.
@@ -169,6 +169,10 @@ def convert_to_png(src: Path, dst: Path, map_type: str, verbose: bool) -> bool:
         return False
     try:
         with Image.open(src) as im:
+            if resize is not None and (im.width != resize or im.height != resize):
+                resample = getattr(Image, "Resampling", Image).LANCZOS
+                im = im.resize((resize, resize), resample)
+
             # Normalize mode by map type: albedo/normal as RGB, roughness/metallic as L
             if map_type in ("albedo", "normal"):
                 if im.mode not in ("RGB", "RGBA"):
@@ -225,6 +229,12 @@ def build_cli() -> argparse.ArgumentParser:
         default=None,
         help="Optional path to write a manifest JSON of included materials",
     )
+    p.add_argument(
+        "--resize",
+        type=int,
+        default=2048,
+        help="Resize images to this dimension (square) if they don't match",
+    )
     return p
 
 
@@ -244,6 +254,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     allowed_exts: Set[str] = {e.lower() if e.startswith(
         ".") else f".{e.lower()}" for e in args.ext}
     manifest_path: Optional[Path] = args.manifest
+    resize: Optional[int] = args.resize
 
     if not src_dir.exists() or not src_dir.is_dir():
         print(f"ERROR: --src does not exist or is not a directory: {src_dir}")
@@ -306,7 +317,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 else:
                     # Try to convert; if conversion fails, fall back to copy with original ext
                     success = convert_to_png(
-                        src_path, dst_path, map_type, verbose)
+                        src_path, dst_path, map_type, verbose, resize=resize)
                     if not success:
                         # Fallback path retains original extension to avoid mismatch
                         fallback_dst = dst_path.with_suffix(ext)

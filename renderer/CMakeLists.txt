@@ -89,12 +89,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     CUDA::cublas
     CUDA::cufft
     CUDA::cusparse
-    $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
 )
 if(UNIX)
-  target_link_libraries(${PROJECT_NAME} PRIVATE
-    dl
-    m
+  target_link_options(${PROJECT_NAME} PRIVATE
+    $<HOST_LINK:SHELL:-ldl -lm -lpthread -lrt>
   )
 endif()
 

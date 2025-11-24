@@ -178,6 +178,8 @@ backbone:
 '''
 
 
+import torch.utils.checkpoint as checkpoint
+
 class UNetResNetEncoder(nn.Module):
     def __init__(
             self,
@@ -248,23 +250,47 @@ class UNetResNetEncoder(nn.Module):
     def forward(self, x):
         skips = None
 
-        x = self.encoder_stack[0:3](x)  # initial
+        # Use gradient checkpointing for the initial heavy layers if training
+        if self.training and x.requires_grad:
+             x = checkpoint.checkpoint(self.encoder_stack[0:3], x, use_reentrant=False)
+        else:
+             x = self.encoder_stack[0:3](x)  # initial
+             
         if self.skip:
             skips = [x]
 
-        x = self.encoder_stack[3:5](x)  # layer 1
+        # Layer 1
+        if self.training and x.requires_grad:
+            x = checkpoint.checkpoint(self.encoder_stack[3:5], x, use_reentrant=False)
+        else:
+            x = self.encoder_stack[3:5](x)
+            
         if self.skip:
             skips.append(x)
 
-        x = self.encoder_stack[5:6](x)  # layer 2
+        # Layer 2
+        if self.training and x.requires_grad:
+            x = checkpoint.checkpoint(self.encoder_stack[5:6], x, use_reentrant=False)
+        else:
+            x = self.encoder_stack[5:6](x)
+            
         if self.skip:
             skips.append(x)
 
-        x = self.encoder_stack[6:7](x)  # layer 3
+        # Layer 3
+        if self.training and x.requires_grad:
+            x = checkpoint.checkpoint(self.encoder_stack[6:7], x, use_reentrant=False)
+        else:
+            x = self.encoder_stack[6:7](x)
+            
         if self.skip:
             skips.append(x)
 
-        x = self.encoder_stack[7:](x)  # layer 4
+        # Layer 4
+        if self.training and x.requires_grad:
+            x = checkpoint.checkpoint(self.encoder_stack[7:], x, use_reentrant=False)
+        else:
+            x = self.encoder_stack[7:](x)
 
         return x, skips
 

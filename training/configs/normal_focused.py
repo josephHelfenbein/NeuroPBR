@@ -36,7 +36,7 @@ def get_config():
     config.training.use_amp = True
     
     # Data
-    config.data.batch_size = 4
+    config.data.batch_size = 1  # Reduced for 2048x2048
     
     # Optimizer
     config.optimizer.g_lr = 1.5e-4

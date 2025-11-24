@@ -142,7 +142,7 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
 
     int minShadeGrid = 0;
     int optimalShadeBlockSize = 0;
-    CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(&minShadeGrid, &optimalShadeBlockSize, shadeKernel, 0, 0));
+    CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(&minShadeGrid, &optimalShadeBlockSize, (void*)shadeKernel, 0, 0));
 
     auto choose2DBlock = [](int totalThreads) {
         if (totalThreads <= 0) {

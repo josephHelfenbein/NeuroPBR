@@ -14,14 +14,14 @@ class DataConfig:
     output_dir: Optional[str] = "./data/output"
     metadata_path: Optional[str] = None
     # Input size to encoder (what dataset loads/resizes to)
-    image_size: tuple = (1024, 1024)
+    image_size: tuple = (2048, 2048)
     # Output size from decoder (achieved via SR scale in decoder)
-    output_size: tuple = (1024, 1024)
-    batch_size: int = 2  # Per GPU (increase if GPU memory allows at 1024²)
+    output_size: tuple = (2048, 2048)
+    batch_size: int = 1  # Per GPU (reduced for 2048x2048)
     num_workers: int = 8
     pin_memory: bool = True
     persistent_workers: bool = True
-    prefetch_factor: int = 2
+    prefetch_factor: int = 4
 
     # Dataset options
     # If True, train on dirty renders; otherwise use clean renders (default)
@@ -238,11 +238,11 @@ class TrainConfig:
         if self.data.output_size is None:
             self.data.output_size = self.data.image_size
 
-        # Adjust decoder SR scale so default configs stay at 1024×1024
+        # Adjust decoder SR scale so default configs stay at 2048x2048
         if self.model.encoder_stride == 1:
-            self.model.decoder_sr_scale = 0  # Keep 1024 resolution
+            self.model.decoder_sr_scale = 0  # Keep 2048 resolution
         elif self.model.encoder_stride == 2:
-            self.model.decoder_sr_scale = 2  # Upsample 512 → 1024
+            self.model.decoder_sr_scale = 2  # Upsample 1024 → 2048
 
         # Update skip channels based on encoder type
         if self.model.encoder_type == "resnet":
@@ -280,6 +280,12 @@ def get_quick_test_config() -> TrainConfig:
 
     # Smaller model
     config.model.encoder_backbone = "resnet18"
+    # Correct skip channels for ResNet18 [layer3, layer2, layer1, initial]
+    # ResNet18 layers: init=64, l1=64, l2=128, l3=256, l4=512
+    # Encoder returns: [init, l1, l2, l3] -> [64, 64, 128, 256]
+    # Decoder expects reversed: [256, 128, 64, 64]
+    config.model.decoder_skip_channels = [256, 128, 64, 64]
+    
     config.model.transformer_depth = 2
     config.model.transformer_num_heads = 16
 
@@ -289,7 +295,7 @@ def get_quick_test_config() -> TrainConfig:
     config.training.save_every_n_epochs = 1
 
     # Smaller batch
-    config.data.batch_size = 2
+    config.data.batch_size = 1 # Force 1 for safety
     config.data.num_workers = 4
 
     config.optimizer.scheduler_warmup_epochs = 2

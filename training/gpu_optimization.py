@@ -33,6 +33,11 @@ def apply_global_optimizations():
     """
     Sets up global PyTorch settings to make things run faster based on your GPU.
     """
+    # Set allocator config to reduce fragmentation (must be done before CUDA init if possible)
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+         print("[GPU Optimization] Setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation")
+         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
     gpu_info = detect_gpu_capabilities()
     if not gpu_info["is_available"]:
         return
@@ -57,8 +62,14 @@ def apply_global_optimizations():
     # 2. Enable cuDNN Benchmark Mode
     # This tells PyTorch to spend a little time at the start to find the absolute fastest 
     # algorithm for your specific convolution layer sizes. Great if input sizes don't change!
-    print("[GPU Optimization] Enabling cuDNN benchmark mode")
-    torch.backends.cudnn.benchmark = True
+    # However, it can use extra memory. Disable if VRAM is tight.
+    gpu_info = detect_gpu_capabilities()
+    if gpu_info["is_available"] and gpu_info["total_memory_gb"] < 16:
+         print("[GPU Optimization] Low VRAM detected: Disabling cuDNN benchmark mode to save memory")
+         torch.backends.cudnn.benchmark = False
+    else:
+         print("[GPU Optimization] Enabling cuDNN benchmark mode")
+         torch.backends.cudnn.benchmark = True
 
 def get_amp_config():
     """
@@ -110,7 +121,7 @@ def optimize_model_memory_format(model, device):
         model = model.to(memory_format=torch.channels_last)
     return model
 
-def calculate_optimal_batch_size(model_config, input_shape=(3, 1024, 1024), safety_margin=0.8):
+def calculate_optimal_batch_size(model_config, input_shape=(3, 2048, 2048), safety_margin=0.8):
     """
     Tries to guess the best batch size that will fit in your VRAM.
     
@@ -133,16 +144,25 @@ def calculate_optimal_batch_size(model_config, input_shape=(3, 1024, 1024), safe
     
     # 2. Dynamic Memory: Activations & Gradients
     # This is the big one. Training requires storing intermediate values for backprop.
-    # A 1024x1024 float32 layer takes 4MB per channel.
-    # With 3 views and deep networks, this adds up fast.
+    # Memory usage scales linearly with pixel count.
     
-    # Based on experience, a standard ResNet50 training at 1024x1024 takes ~4-6GB per image.
-    # With 3 views, it could be ~12-15GB per sample!
-    # But Mixed Precision (AMP) cuts this down significantly.
+    # Baseline: 1 sample (3 views) @ 1024x1024 ~ 8 GB VRAM (with AMP enabled)
+    base_pixels = 1024 * 1024
+    current_pixels = input_shape[1] * input_shape[2]
+    scale_factor = current_pixels / base_pixels
     
-    # We'll use a conservative estimate:
-    # 1 sample (3 views) @ 1024x1024 ~ 8 GB VRAM (with AMP enabled)
-    gb_per_sample = 8.0 
+    # Estimate per-sample memory
+    # 8.0 GB base * scale_factor
+    # For 2048x2048 (scale=4), this would be 32GB!
+    # However, 8GB base was a very conservative estimate for ResNet50+ViT+Decoder.
+    # Let's refine:
+    # A 2048x2048 float16 layer (AMP) takes 2048*2048*2 bytes = 8MB per channel.
+    # ResNet50 has many layers but spatial dim reduces quickly.
+    # High-res layers (early ones) dominate memory.
+    # 3 views * (Input + Conv1 + Layer1) is heavy.
+    
+    # Adjusted base for 1024x1024: ~6 GB
+    gb_per_sample = 6.0 * scale_factor
     
     # Adjust based on model size (simple heuristic)
     if hasattr(model_config, 'encoder_backbone'):
@@ -150,6 +170,17 @@ def calculate_optimal_batch_size(model_config, input_shape=(3, 1024, 1024), safe
             gb_per_sample *= 1.2 # Bigger model = more memory
         elif 'resnet18' in model_config.encoder_backbone:
             gb_per_sample *= 0.6 # Smaller model = less memory
+
+    # Adjust for lower VRAM cards (e.g. 12GB or less) which are more prone to fragmentation
+    if total_vram_gb < 16:
+        print(f"[GPU Optimization] Low VRAM detected ({total_vram_gb:.1f}GB). Increasing memory safety margins.")
+        gb_per_sample *= 1.5  # Increased from 1.3 to 1.5
+        safety_margin = min(safety_margin, 0.6) # Reduced from 0.7 to 0.6
+        
+        # Check for huge images on small GPU
+        if input_shape[1] > 1024 or input_shape[2] > 1024:
+            print(f"[GPU Optimization] ⚠️  WARNING: Image size {input_shape[1]}x{input_shape[2]} is very large for {total_vram_gb:.1f}GB VRAM.")
+            print(f"[GPU Optimization]    Consider reducing config.data.image_size to (1024, 1024) or (512, 512).")
             
     available_mem = total_vram_gb * safety_margin - model_static_gb
     
@@ -305,6 +336,17 @@ def apply_torch_compile(model, model_name="model"):
         
         # H100/A100/RTX30/40 (Ampere+) - These are great candidates for compilation!
         if is_ampere_plus:
+            total_memory_gb = gpu_info["total_memory_gb"]
+            
+            # Disable compilation for < 16GB VRAM unless forced
+            if total_memory_gb < 16 and use_compile_env != 'true':
+                 return model, {
+                    "status": "uncompiled",
+                    "mode": None,
+                    "reason": f"VRAM ({total_memory_gb:.1f}GB) too low for torch.compile overhead. Disabled.",
+                    "warning": "Set USE_TORCH_COMPILE=true to force enable."
+                 }
+
             if is_spot_instance:
                 # Fast compile mode for short-lived instances
                 mode = "reduce-overhead"
@@ -313,9 +355,14 @@ def apply_torch_compile(model, model_name="model"):
             else:
                 # For long training runs on good hardware, 'max-autotune' squeezes out every drop of performance.
                 # But it takes longer to compile. We'll use it for the Generator (the heavy lifter).
-                if "generator" in model_name.lower():
+                # However, max-autotune can be memory hungry. We'll only use it if we have plenty of VRAM (>= 20GB).
+                
+                if "generator" in model_name.lower() and total_memory_gb >= 20:
                     mode = "max-autotune"
-                    reason = "High-end GPU detected, optimizing for max performance"
+                    reason = "High-end GPU with >20GB VRAM detected, optimizing for max performance"
+                elif "generator" in model_name.lower():
+                    mode = "default"
+                    reason = "Ampere+ GPU detected, but VRAM < 20GB. Using default compile mode to save memory."
                 else:
                     mode = "default"
         else:

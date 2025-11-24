@@ -30,6 +30,8 @@ class ConvBlock(nn.Module):
         x = self.relu(x)
         return x
 
+import torch.utils.checkpoint as checkpoint
+
 class DecoderBlock(nn.Module):
     def __init__(self, in_channel, skip_channel, out_channel):
         super().__init__()
@@ -44,6 +46,13 @@ class DecoderBlock(nn.Module):
         self.conv = ConvBlock(out_channel + skip_channel, out_channel)
 
     def forward(self, x, skip):
+        # Use checkpointing for the heavy upsampling and convolution
+        if self.training and x.requires_grad:
+             return checkpoint.checkpoint(self._forward_impl, x, skip, use_reentrant=False)
+        else:
+             return self._forward_impl(x, skip)
+
+    def _forward_impl(self, x, skip):
         x = self.upsample(x)
 
         if x.shape[2:] != skip.shape[2:]:
@@ -56,23 +65,28 @@ class DecoderBlock(nn.Module):
 
 def _build_sr_2x():
     return nn.Sequential(
-            # Increase capacity
-            nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-
-            # Prepare for PixelShuffle (4× channels)
-            nn.Conv2d(128, 64 * 4, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(64 * 4),
-            nn.ReLU(inplace=True),
-
-            # Super-resolve
-            nn.PixelShuffle(upscale_factor=2),
-
-            # Refine upsampled features
+            # Lighter SR Head for memory efficiency
+            # Reduce channels from 64->128 to 64->64
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
+
+            # PixelShuffle 2x requires 4x channels (64*4 = 256)
+            nn.Conv2d(64, 64 * 4, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+
+            # Super-resolve 1024 -> 2048
+            nn.PixelShuffle(upscale_factor=2),
+
+            # Final refinement at 2048x2048
+            # Keep it lightweight (32 channels instead of 64)
+            nn.Conv2d(64, 32, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            
+            # Project back to 64 for the final heads
+            nn.Conv2d(32, 64, kernel_size=1, bias=False)
         )
 
 
@@ -109,8 +123,11 @@ def _build_sr_4x():
 
 class UNetDecoder(nn.Module):
     """
-    sr_scale: 2 for stride=1 encoders (1024→2048)
-              4 for stride=2 encoders (512→2048)
+    sr_scale: 2 for stride=1 encoders (1024→2048) or stride=2 encoders (1024->2048)
+              Wait, logic update:
+              Input 2048:
+              stride=1 -> output 2048. sr_scale=0.
+              stride=2 -> output 1024. sr_scale=2 -> 2048.
     """
     def __init__(self, in_channel: int, skip_channels: List[int], out_channel: int, sr_scale: Literal[0, 2, 4] = 2):
         super().__init__()

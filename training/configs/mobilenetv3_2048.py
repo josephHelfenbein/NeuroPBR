@@ -27,7 +27,7 @@ def get_config() -> TrainConfig:
     config.model.encoder_type = "mobilenetv3"
     config.model.encoder_backbone = "mobilenet_v3_large"
     config.model.encoder_stride = 1  # 2048 → 2048 (no downsampling)
-    config.model.decoder_sr_scale = 2  # Restore 2048 resolution from 1024 features
+    config.model.decoder_sr_scale = 0  # Keep 2048 resolution (no SR needed)
     config.model.freeze_backbone = False  # Fine-tune the backbone
     config.model.freeze_bn = False
 

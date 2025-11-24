@@ -36,7 +36,7 @@ def get_config():
     config.training.save_every_n_epochs = 10
 
     # Data
-    config.data.batch_size = 2
+    config.data.batch_size = 1  # Reduced for 2048x2048
     config.data.num_workers = 4
     
     # Optimizer

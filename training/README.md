@@ -29,7 +29,7 @@ NeuroPBR trains a deep model that:
 1. Consumes **three rendered views** (clean or dirty) per material
 2. Encodes each with a shared ResNet/UNet backbone
 3. Fuses view features via a **Vision Transformer cross-view block**
-4. Decodes to **four 1024×1024 PBR maps** (albedo, roughness, metallic, normal)
+4. Decodes to **four 2048×2048 PBR maps** (albedo, roughness, metallic, normal)
 5. Improves realism with **optional GAN losses** plus reconstruction terms
 
 ```
@@ -158,7 +158,7 @@ config.training.seed = 42    # reproducible shuffling
 Samples are shuffled once per run and split deterministically with the seed.
 
 ### On-the-Fly Resizing
-Both inputs and targets are resized to `config.data.image_size` (default 1024×1024) via the dataset transform, so you can keep full-res files on disk.
+Both inputs and targets are loaded at native 2048×2048 resolution (default `config.data.image_size`). No downscaling is applied by default.
 
 ### Dataset Verification Snippet
 ```bash
@@ -270,7 +270,7 @@ cfg.loss.gan_loss_type = 'bce'
 ```python
 cfg.model.encoder_type = 'resnet'
 cfg.model.encoder_backbone = 'resnet50'  # 18 / 34 / 50 / 101 / 152
-cfg.model.encoder_stride = 1             # keep 1024 resolution
+cfg.model.encoder_stride = 1             # keep 2048 resolution
 
 cfg.model.encoder_type = 'unet'
 cfg.model.encoder_channels = [64,128,256,512,1024,2048]
@@ -475,9 +475,9 @@ training/
 
 ## FAQ
 
-**How much VRAM?** 8 GB handles 1024² batch 2 (ResNet50). 16–24 GB recommended for 2048² or larger batches.
+**How much VRAM?** 16 GB handles 2048² batch 1 (ResNet50). 24 GB+ recommended for larger batches or deeper models.
 
-**Training time?** ~8–10 h for 100 epochs @1024² on a single high-end GPU; 18–24 h for 2048² HQ runs.
+**Training time?** ~18–24 h for 100 epochs @2048² on a single high-end GPU.
 
 **CPU-only?** Possible but extremely slow; use a GPU.
 

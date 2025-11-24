@@ -22,7 +22,7 @@ End-to-end pipeline for generating synthetic physically based rendering (PBR) da
 
 **Linux / WSL2:**
 ```bash
-git clone https://github.com/YourUser/NeuroPBR.git
+git clone https://github.com/josephHelfenbein/NeuroPBR.git
 cd NeuroPBR
 git submodule update --init --recursive
 ```
@@ -108,7 +108,7 @@ Key options:
 
 - `--input-dir / --output-dir / --metadata-path` let you point to any folder layout.
 - `--render-curriculum {0|1|2}` picks clean-only, dataset-balanced clean+dirty, or dirty-only inputs (`--use-dirty` remains a shortcut for `2`).
-- The dataloader downsamples both renders and targets to 1024×1024 by default, so you can keep full-res assets on disk without preprocessing.
+- The dataloader loads images at native 2048×2048 resolution.
 - `--device {auto|cuda|cuda:0|cpu}` forces the accelerator if auto-detection doesn't pick the GPU you expect.
 - Preset configs like `--config quick_test` or `--config lightweight` adjust model/compute tradeoffs.
 
