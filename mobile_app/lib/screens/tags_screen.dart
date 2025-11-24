@@ -150,8 +150,8 @@ class TagsScreen extends StatefulWidget {
 class _TagsScreenState extends State<TagsScreen> {
   List<String> path = [];
 
-  // Static variable to preserve view mode across widget rebuilds
-  static String viewMode = 'cards';
+  // Local view mode state (not persisted) - null means use preference
+  String? _localViewModeOverride;
   final ScrollController _cardsScrollController = ScrollController();
 
   // Constants for card dimensions
@@ -164,6 +164,8 @@ class _TagsScreenState extends State<TagsScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      final prefs = Provider.of<PreferencesProvider>(context, listen: false);
+      final viewMode = _localViewModeOverride ?? prefs.tagsViewMode;
       // Calculate initial scroll offset to center card at index 0 (Misc)
       if (_cardsScrollController.hasClients && viewMode == 'cards') {
         final double initialOffset = 0.0;
@@ -197,29 +199,30 @@ class _TagsScreenState extends State<TagsScreen> {
   }
 
   void toggleViewMode() {
+    final prefs = Provider.of<PreferencesProvider>(context, listen: false);
+    final currentMode = _localViewModeOverride ?? prefs.tagsViewMode;
     setState(() {
-      viewMode = viewMode == 'cards' ? 'list' : 'cards';
+      _localViewModeOverride = currentMode == 'cards' ? 'list' : 'cards';
     });
   }
 
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
-    // 1. GET THE PROVIDER
     final prefs = Provider.of<PreferencesProvider>(context);
 
     final colors = themeProvider.colors;
 
-    // 2. DETERMINE MODE FROM PROVIDER
-    final isCards = prefs.tagsViewMode == 'cards';
+    // Use local override if set, otherwise use preference (this allows settings changes to affect tags screen)
+    final isCards = (_localViewModeOverride ?? prefs.tagsViewMode) == 'cards';
 
     return Scaffold(
       backgroundColor: colors.background,
       body: SafeArea(
         child: Column(
           children: [
-            // Pass prefs to header so the button works
-            _buildHeader(colors, prefs, isCards),
+            // Pass local toggle to header
+            _buildHeader(colors, isCards),
             // Pass the boolean to body
             Expanded(child: _buildBody(colors, isCards)),
           ],
@@ -228,7 +231,7 @@ class _TagsScreenState extends State<TagsScreen> {
     );
   }
 
-  Widget _buildHeader(dynamic colors, PreferencesProvider prefs, bool isCards){
+  Widget _buildHeader(dynamic colors, bool isCards){
     final showToggle = isRoot;
 
     return Container(
@@ -242,7 +245,7 @@ class _TagsScreenState extends State<TagsScreen> {
               icon: isCards
                   ? Icons.format_list_bulleted
                   : Icons.grid_view_rounded,
-              onTap: () => prefs.toggleViewMode(),
+              onTap: toggleViewMode,
               backgroundColor: colors.surface,
               hasBorder: true,
               borderColor: colors.border,
@@ -284,7 +287,7 @@ class _TagsScreenState extends State<TagsScreen> {
           _IconButton(
             icon: Icons.view_in_ar,
             onTap: () => debugPrint('View Renders'),
-            backgroundColor: const Color(0xFFEF4444),
+            backgroundColor: colors.accent,
             hasShadow: true,
             borderColor: colors.border,
           ),

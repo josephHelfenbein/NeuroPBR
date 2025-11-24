@@ -144,6 +144,9 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
   // (These methods are lengthy, keeping them abbreviated but noting the color arguments they use)
 
   Widget _buildTopBar(Color surface, Color backButtonSurface, Color iconColor, Color primaryText) {
+    final themeProvider = Provider.of<ThemeProvider>(context, listen: false);
+    final accent = themeProvider.colors.accent;
+
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
       child: Row(
@@ -182,18 +185,16 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
               width: 44,
               height: 44,
               decoration: BoxDecoration(
-                // Colors.red is fine here for an action/warning color
-                color: _selectedIndices.isNotEmpty ? Colors.red.withOpacity(0.2) : surface,
+                color: _selectedIndices.isNotEmpty ? accent.withOpacity(0.2) : surface,
                 shape: BoxShape.circle,
                 border: Border.all(
-                    color: _selectedIndices.isNotEmpty ? Colors.red : primaryText.withOpacity(0.1)
+                    color: _selectedIndices.isNotEmpty ? accent : primaryText.withOpacity(0.1)
                 ),
               ),
               child: Icon(
                   Icons.layers_clear,
                   size: 20,
-                  // Red for active clear, secondaryText color for inactive clear
-                  color: _selectedIndices.isNotEmpty ? Colors.red : Colors.grey
+                  color: _selectedIndices.isNotEmpty ? accent : Colors.grey
               ),
             ),
           ),

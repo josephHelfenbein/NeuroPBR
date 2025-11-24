@@ -518,24 +518,25 @@ class FlashToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Provider.of<ThemeProvider>(context).colors;
     return GestureDetector(
       onTap: onToggle,
       child: Container(
         width: 40,
         height: 40,
         decoration: BoxDecoration(
-          color: flashOn ? Colors.red : const Color(0xFF262626),
+          color: flashOn ? colors.accent : colors.surface,
           shape: BoxShape.circle,
           border: Border.all(
             color: flashOn
-                ? Colors.red.withOpacity(0.3)
+                ? colors.accent.withOpacity(0.3)
                 : Colors.white.withOpacity(0.05),
             width: 1,
           ),
           boxShadow: flashOn
               ? [
             BoxShadow(
-              color: Colors.red.withOpacity(0.5),
+              color: colors.accent.withOpacity(0.5),
               blurRadius: 15,
               spreadRadius: 2,
             ),
@@ -969,6 +970,7 @@ class CaptureControls extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Provider.of<ThemeProvider>(context).colors;
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: [
@@ -978,7 +980,7 @@ class CaptureControls extends StatelessWidget {
             width: 56,
             height: 56,
             decoration: BoxDecoration(
-              color: const Color(0xFF262626),
+              color: colors.surface,
               shape: BoxShape.circle,
               border: Border.all(color: Colors.white.withOpacity(0.1), width: 2),
             ),
@@ -991,12 +993,12 @@ class CaptureControls extends StatelessWidget {
             width: 72,
             height: 72,
             decoration: BoxDecoration(
-              color: Colors.red,
+              color: colors.accent,
               shape: BoxShape.circle,
               border: Border.all(color: Colors.white.withOpacity(0.2), width: 4),
               boxShadow: [
                 BoxShadow(
-                  color: Colors.red.withOpacity(0.5),
+                  color: colors.accent.withOpacity(0.5),
                   blurRadius: 20,
                   spreadRadius: 3,
                 ),
@@ -1011,7 +1013,7 @@ class CaptureControls extends StatelessWidget {
             width: 56,
             height: 56,
             decoration: BoxDecoration(
-              color: const Color(0xFF262626),
+              color: colors.surface,
               shape: BoxShape.circle,
               border: Border.all(color: Colors.white.withOpacity(0.1), width: 2),
             ),
@@ -1026,11 +1028,11 @@ class CaptureControls extends StatelessWidget {
                     child: Container(
                       padding: EdgeInsets.all(4),
                       decoration: BoxDecoration(
-                        color: Colors.red,
+                        color: colors.accent,
                         shape: BoxShape.circle,
                         boxShadow: [
                           BoxShadow(
-                            color: Colors.red.withOpacity(0.5),
+                            color: colors.accent.withOpacity(0.5),
                             blurRadius: 8,
                             spreadRadius: 1,
                           ),
@@ -1075,6 +1077,7 @@ class MaterialSelectorOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Provider.of<ThemeProvider>(context).colors;
     return GestureDetector(
       onTap: onClose,
       child: Container(
@@ -1086,7 +1089,7 @@ class MaterialSelectorOverlay extends StatelessWidget {
               margin: EdgeInsets.symmetric(horizontal: 32),
               padding: EdgeInsets.all(24),
               decoration: BoxDecoration(
-                color: const Color(0xFF262626),
+                color: colors.surface,
                 borderRadius: BorderRadius.circular(24),
                 border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
                 boxShadow: [
@@ -1144,12 +1147,12 @@ class MaterialSelectorOverlay extends StatelessWidget {
                               width: 8,
                               height: 8,
                               decoration: BoxDecoration(
-                                color: isSelected ? Colors.red : Colors.grey[700],
+                                color: isSelected ? colors.accent : Colors.grey[700],
                                 shape: BoxShape.circle,
                                 boxShadow: isSelected
                                     ? [
                                   BoxShadow(
-                                    color: Colors.red.withOpacity(0.5),
+                                    color: colors.accent.withOpacity(0.5),
                                     blurRadius: 8,
                                     spreadRadius: 1,
                                   ),

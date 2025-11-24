@@ -38,7 +38,7 @@ class SettingsScreen extends StatelessWidget {
                     'Default View Mode',
                     // Icon changes based on mode
                     prefs.tagsViewMode == 'cards' ? Icons.grid_view_rounded : Icons.format_list_bulleted,
-                    Colors.blueAccent,
+                    colors.accent,
                     // Text shows current mode
                     prefs.tagsViewMode == 'cards' ? 'CARDS' : 'LIST',
                     // Tap triggers the provider toggle
@@ -52,7 +52,7 @@ class SettingsScreen extends StatelessWidget {
                   // _buildToggleTile(
                   //   'Dark Mode',
                   //   Icons.dark_mode,
-                  //   Colors.blueAccent,
+                  //   colors.accent,
                   //   themeProvider.isDarkMode,
                   //       () => themeProvider.toggleTheme(),
                   //   colors,
@@ -63,7 +63,7 @@ class SettingsScreen extends StatelessWidget {
                   _buildToggleTile(
                     'Notifications',
                     Icons.notifications,
-                    Colors.purpleAccent,
+                    colors.accent,
                     true,
                         () {},
                     colors,
@@ -74,7 +74,7 @@ class SettingsScreen extends StatelessWidget {
                   _buildToggleTile(
                     'High Quality Previews',
                     Icons.bolt,
-                    Colors.orangeAccent,
+                    colors.accent,
                     false,
                         () {},
                     colors,
@@ -132,7 +132,7 @@ class SettingsScreen extends StatelessWidget {
           _IconButton(
             icon: Icons.view_in_ar,
             onTap: () => debugPrint('View Renders'),
-            backgroundColor: const Color(0xFFEF4444),
+            backgroundColor: colors.accent,
             hasShadow: true,
             borderColor: colors.border,
           ),

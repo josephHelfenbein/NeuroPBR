@@ -11,13 +11,13 @@ class AppTheme {
   static const Color lightBorder = Color(0xFFD1DDEB);     // Muted Blue-Grey Border
 
   // Shared colors
-  static const Color accentRed = Color(0xFFEF4444);
+  static const Color accent = Color(0xFF0077ff);
 
   static ThemeData darkTheme = ThemeData(
     brightness: Brightness.dark,
     scaffoldBackgroundColor: darkBackground,
     colorScheme: const ColorScheme.dark(
-      primary: accentRed,
+      primary: accent,
       surface: darkSurface,
       background: darkBackground,
     ),
@@ -27,7 +27,7 @@ class AppTheme {
     brightness: Brightness.light,
     scaffoldBackgroundColor: lightBackground,
     colorScheme: const ColorScheme.light(
-      primary: accentRed,
+      primary: accent,
       surface: lightSurface,
       background: lightBackground,
     ),
@@ -64,7 +64,7 @@ class AppColors {
     border: Color(0xFF3A3A3A),
     textPrimary: Colors.white,
     textSecondary: Color(0xFF9CA3AF),
-    accent: Color(0xFFEF4444),
+    accent: Color(0xFF0077ff),
     cardBackground: Color(0xFF262626),
     statusBarBrightness: Brightness.light,
   );
@@ -76,7 +76,7 @@ class AppColors {
     border: Color(0xFFD1DDEB),         // Muted Blue-Grey Border
     textPrimary: Color(0xFF1C2738),    // Dark, readable text
     textSecondary: Color(0xFF6A7E9A),  // Muted secondary text
-    accent: Color(0xFFEF4444),         // Red Accent
+    accent: Color(0xFF0077ff),         // Accent color
     cardBackground: Color(0xFFFAFBFF), // Cooler White Surface
     statusBarBrightness: Brightness.dark,
   );

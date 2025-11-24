@@ -75,7 +75,7 @@ class _StatsScreenState extends State<StatsScreen> {
           _IconButton(
             icon: Icons.view_in_ar,
             onTap: () => debugPrint('View Renders'),
-            backgroundColor: const Color(0xFFEF4444),
+            backgroundColor: colors.accent,
             hasShadow: true,
             borderColor: colors.border,
           ),
