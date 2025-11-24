@@ -54,6 +54,8 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
+import gpu_optimization
+
 try:
     from torch.amp import autocast as _autocast, GradScaler as _GradScaler
 except ImportError:  # Older PyTorch
@@ -276,6 +278,13 @@ class Trainer:
         
         # Build models
         self.generator = MultiViewPBRGenerator(config).to(self.device)
+        self.generator = gpu_optimization.optimize_model_memory_format(self.generator, self.device)
+        
+        # Apply torch.compile to Generator
+        self.generator, gen_compile_info = gpu_optimization.apply_torch_compile(
+            self.generator, 
+            model_name="generator"
+        )
         
         if config.model.use_gan:
             # Choose discriminator type based on config
@@ -291,8 +300,28 @@ class Trainer:
                     in_channels=config.model.discriminator_in_channels,
                     ndf=config.model.discriminator_ndf
                 ).to(self.device)
+            
+            if self.discriminator:
+                self.discriminator = gpu_optimization.optimize_model_memory_format(self.discriminator, self.device)
+                
+                # Apply torch.compile to Discriminator
+                self.discriminator, disc_compile_info = gpu_optimization.apply_torch_compile(
+                    self.discriminator,
+                    model_name="discriminator"
+                )
         else:
             self.discriminator = None
+            disc_compile_info = {"status": "disabled", "reason": "GAN disabled"}
+        
+        # Print compilation status
+        print(f"  Generator Compile: {gen_compile_info['status']} ({gen_compile_info.get('mode', 'N/A')})")
+        if gen_compile_info.get('warning'):
+            print(f"  ⚠️  Generator: {gen_compile_info['warning']}")
+            
+        if self.discriminator:
+            print(f"  Discriminator Compile: {disc_compile_info['status']} ({disc_compile_info.get('mode', 'N/A')})")
+            if disc_compile_info.get('warning'):
+                print(f"  ⚠️  Discriminator: {disc_compile_info['warning']}")
         
         # Build loss
         self.criterion = self._build_loss()
@@ -306,6 +335,11 @@ class Trainer:
         # AMP scaler
         self.use_amp = config.training.use_amp and self.device.type == "cuda"
         self.amp_device_type = "cuda" if self.device.type == "cuda" else "cpu"
+        
+        # Get optimized AMP config
+        self.amp_config = gpu_optimization.get_amp_config()
+        self.amp_dtype = self.amp_config["dtype"]
+        
         scaler_kwargs = {}
         if self.use_amp and GRADSCALER_SUPPORTS_DEVICE:
             scaler_kwargs["device_type"] = self.amp_device_type
@@ -364,19 +398,24 @@ class Trainer:
     
     def _build_optimizers(self):
         """Build optimizers for generator and discriminator."""
+        # Get optimizer extra params (e.g. fused=True)
+        opt_kwargs = gpu_optimization.get_optimizer_params(self.device.type)
+        
         # Generator optimizer
         if self.config.optimizer.g_optimizer == "adam":
             g_opt = torch.optim.Adam(
                 self.generator.parameters(),
                 lr=self.config.optimizer.g_lr,
-                betas=self.config.optimizer.g_betas
+                betas=self.config.optimizer.g_betas,
+                **opt_kwargs if 'fused' in inspect.signature(torch.optim.Adam).parameters else {}
             )
         elif self.config.optimizer.g_optimizer == "adamw":
             g_opt = torch.optim.AdamW(
                 self.generator.parameters(),
                 lr=self.config.optimizer.g_lr,
                 betas=self.config.optimizer.g_betas,
-                weight_decay=self.config.optimizer.g_weight_decay
+                weight_decay=self.config.optimizer.g_weight_decay,
+                **opt_kwargs
             )
         else:  # sgd
             g_opt = torch.optim.SGD(
@@ -393,14 +432,16 @@ class Trainer:
                 d_opt = torch.optim.Adam(
                     self.discriminator.parameters(),
                     lr=self.config.optimizer.d_lr,
-                    betas=self.config.optimizer.d_betas
+                    betas=self.config.optimizer.d_betas,
+                    **opt_kwargs if 'fused' in inspect.signature(torch.optim.Adam).parameters else {}
                 )
             elif self.config.optimizer.d_optimizer == "adamw":
                 d_opt = torch.optim.AdamW(
                     self.discriminator.parameters(),
                     lr=self.config.optimizer.d_lr,
                     betas=self.config.optimizer.d_betas,
-                    weight_decay=self.config.optimizer.d_weight_decay
+                    weight_decay=self.config.optimizer.d_weight_decay,
+                    **opt_kwargs
                 )
         
         return g_opt, d_opt
@@ -468,8 +509,8 @@ class Trainer:
         if not self.use_amp:
             return nullcontext()
         if AUTOCAST_SUPPORTS_DEVICE:
-            return autocast(device_type=self.amp_device_type)
-        return autocast()
+            return autocast(device_type=self.amp_device_type, dtype=self.amp_dtype)
+        return autocast(dtype=self.amp_dtype) if 'dtype' in inspect.signature(autocast).parameters else autocast()
     
     def train_epoch(self, train_loader: DataLoader, epoch: int):
         """Train for one epoch."""
@@ -936,6 +977,26 @@ def main(args):
     
     # Set seed
     set_seed(config.training.seed)
+    
+    # Apply GPU optimizations
+    gpu_optimization.apply_global_optimizations()
+    gpu_optimization.print_verification_commands()
+
+    # Auto-tune batch size if not specified via CLI
+    if args.batch_size is None:
+        optimal_bs = gpu_optimization.calculate_optimal_batch_size(
+            config.model, 
+            input_shape=(3, config.data.image_size[0], config.data.image_size[1])
+        )
+        if optimal_bs != config.data.batch_size:
+            print(f"  Adjusting batch size from {config.data.batch_size} to {optimal_bs} based on VRAM")
+            config.data.batch_size = optimal_bs
+            
+    # Auto-tune num_workers
+    optimal_workers = gpu_optimization.get_optimal_num_workers(config.data.batch_size)
+    if config.data.num_workers != optimal_workers:
+        print(f"  Adjusting num_workers from {config.data.num_workers} to {optimal_workers}")
+        config.data.num_workers = optimal_workers
     
     # Get dataloaders
     print("Loading datasets...")

@@ -123,6 +123,23 @@ Refer to `training/README.md` and `TRAINING_GUIDE.md` for the loss breakdown, ad
 
 ---
 
+## 4. GPU Optimization & Performance
+
+The training pipeline automatically detects your hardware and applies the best optimizations:
+
+- **Automatic `torch.compile`**: On PyTorch 2.0+ and modern GPUs (Ampere/Hopper), models are compiled for up to 30% faster training.
+- **Mixed Precision (AMP)**: Automatically selects BFloat16 (Ampere+) or Float16 (Volta/Turing).
+- **TensorFloat-32 (TF32)**: Enabled by default on RTX 30/40 series and A100/H100.
+- **Memory Layout**: Models are converted to `channels_last` format for better tensor core utilization.
+
+**Manual Controls (Environment Variables):**
+
+- `USE_TORCH_COMPILE=false`: Disable model compilation if you encounter bugs.
+- `USE_TORCH_COMPILE=true`: Force compilation on unsupported hardware.
+- `IS_SPOT_INSTANCE=true`: Use faster compilation mode (`reduce-overhead`) to save time on short-lived instances.
+
+---
+
 ## Additional Resources
 
 - `dataset/README.md` – Deep dive on exporters, cleaning heuristics, and CLI options.
