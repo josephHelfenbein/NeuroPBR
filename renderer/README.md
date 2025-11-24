@@ -21,22 +21,22 @@ git submodule update --init --recursive
 
 ## Build & Run
 
-### Visual Studio 2022 + NVCC (Windows)
+### Linux / WSL2 (Recommended)
 
-From a **Developer Command Prompt for VS 2022** (or Developer PowerShell), run:
+Ensure you have `cmake`, `build-essential` (GCC), and the NVIDIA CUDA Toolkit installed.
 
-```bat
+```bash
 cd renderer
-cmake -G "Visual Studio 17 2022" -A x64 -T host=x64 -S . -B build
-cmake --build build --config Release --parallel
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
 ```
 
-The binary will be written to `bin/Release/neuropbr_renderer.exe`. If you want a Debug build, replace the last line with `--config Debug`.
+The binary will be written to `bin/neuropbr_renderer`.
 
 ### Command-line usage
 
 ```bash
-neuropbr_renderer.exe <materials_dir> <num_samples>
+./bin/neuropbr_renderer <materials_dir> <num_samples>
 ```
 
 - `<materials_dir>` – Path to the cleaned material dataset (each folder must contain `albedo.png`, `normal.png`, `roughness.png`, `metallic.png`).
@@ -44,20 +44,18 @@ neuropbr_renderer.exe <materials_dir> <num_samples>
 
 Example (from `renderer/`):
 
-```powershell
-.\bin\Release\neuropbr_renderer.exe ..\\dataset\\matsynth_clean 2000
+```bash
+./bin/neuropbr_renderer ../dataset/matsynth_clean 2000
 ```
 
 Ensure `assets/hdris` contain the required textures before rendering.
 
-### Ninja / Make (optional)
+### Visual Studio (Windows Alternative)
 
-If you have the CUDA toolkit configured with a GCC/Clang host compiler, you can use a single-config generator instead:
+If you must build on Windows, use the Visual Studio generator:
 
-```bash
-cd renderer
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
+```bat
+cmake -G "Visual Studio 17 2022" -A x64 -T host=x64 -S . -B build
+cmake --build build --config Release --parallel
 ```
-
-The executable in this case is produced as `bin/neuropbr_renderer`.
+The binary will be at `bin/Release/neuropbr_renderer.exe`.

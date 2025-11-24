@@ -11,21 +11,16 @@ End-to-end pipeline for generating synthetic physically based rendering (PBR) da
 
 ## Prerequisites
 
-- Windows 10/11 or Linux with an NVIDIA GPU (CUDA-capable, 8 GB VRAM or more recommended).
-- CUDA Toolkit + CMake 3.18+ + Visual Studio 2022 (or clang/gcc + Ninja) for the renderer.
-- Python 3.8+ for dataset scripts and the training pipeline.
+- **Linux or WSL2 (Windows Subsystem for Linux)** is required for the training pipeline (due to `torch.compile` and `triton` dependencies).
+- NVIDIA GPU (CUDA-capable, 8 GB VRAM or more recommended).
+- CUDA Toolkit + CMake 3.18+ + GCC/Clang (for renderer).
+- Python 3.10+ for dataset scripts and the training pipeline.
 
 ---
 
 ## Cloning the NeuroPBR Repository
 
-**Linux / macOS:**
-```bash
-git clone https://github.com/YourUser/NeuroPBR.git
-cd NeuroPBR
-git submodule update --init --recursive
-```
-**Windows (PowerShell):**
+**Linux / WSL2:**
 ```bash
 git clone https://github.com/YourUser/NeuroPBR.git
 cd NeuroPBR
@@ -36,16 +31,16 @@ git submodule update --init --recursive
 
 1. **Create an isolated Python environment and install dependencies.**
 
-```powershell
+```bash
 cd dataset
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+python3 -m venv .venv
+source .venv/bin/activate
 pip install datasets pillow
 ```
 
 2. **Stream MatSynth via Hugging Face and cache it locally.**
 
-```powershell
+```bash
 python export_matsynth.py --dst matsynth_raw --split train --limit 500
 ```
 
@@ -53,11 +48,11 @@ Adjust `--split`, `--limit`, or `--save-metadata False` to control how much you 
 
 3. **Normalize map names and ensure every material has the required channels.**
 
-```powershell
-python clean_dataset.py `
-	--src matsynth_raw `
-	--dst matsynth_clean `
-	--require-all `
+```bash
+python clean_dataset.py \
+	--src matsynth_raw \
+	--dst matsynth_clean \
+	--require-all \
 	--manifest matsynth_clean/manifest.json
 ```
 
@@ -70,21 +65,19 @@ See `dataset/README.md` for detailed CLI descriptions and troubleshooting tips.
 
 ## 2. Build the Renderer (`renderer/`)
 
-1. **Configure + build (Visual Studio 2022 example).**
+1. **Configure + build (Linux/WSL2).**
 
-```powershell
+```bash
 cd renderer
-cmake -G "Visual Studio 17 2022" -A x64 -T host=x64 -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release --parallel
 ```
 
-Ninja/Make-based workflows are also supported (see `renderer/README.md`).
-
 2. **Generate synthetic renders.**
 
-```powershell
+```bash
 cd renderer
-.\bin\Release\neuropbr_renderer.exe ..\dataset\matsynth_clean 2000
+./bin/neuropbr_renderer ../dataset/matsynth_clean 2000
 ```
 
 Arguments: `<textures_dir> <num_samples>`. The renderer automatically creates `output/clean`, `output/dirty`, and `output/render_metadata.json`, writing three views per sample with randomized lighting and artifacts.
@@ -95,19 +88,19 @@ Arguments: `<textures_dir> <num_samples>`. The renderer automatically creates `o
 
 1. **Install training dependencies.**
 
-```powershell
+```bash
 cd training
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
 2. **Launch training using the renderer outputs.**
 
-```powershell
-python train.py `
-	--input-dir ..\renderer\output `
-	--output-dir ..\dataset\matsynth_clean `
+```bash
+python train.py \
+	--input-dir ../renderer/output \
+	--output-dir ../dataset/matsynth_clean \
 	--batch-size 2
 ```
 

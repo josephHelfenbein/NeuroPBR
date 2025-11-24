@@ -51,9 +51,15 @@ Renders (3 × RGB) → Shared Encoder → Cross-View ViT → Multi-head Decoder 
 
 ## Quick Start
 
+### 0. System Requirements
+**Linux or WSL2 is required.**
+The training pipeline uses `torch.compile` and `triton`, which are not fully supported on Windows. Please run this in a WSL2 environment (Ubuntu recommended) with the NVIDIA Container Toolkit or proper CUDA driver forwarding.
+
 ### 1. Install Dependencies
 ```bash
 cd training
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 Optional extras (uncomment in `requirements.txt`): `wandb`, `opencv-python`, `matplotlib`.

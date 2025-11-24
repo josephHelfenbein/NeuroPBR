@@ -48,9 +48,9 @@ Use `--keep-ext` if you prefer to preserve original file extensions and skip PNG
 ```bash
 cd dataset
 
-# Create & activate a virtual environment (Windows PowerShell shown)
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+# Create & activate a virtual environment (Linux/WSL2)
+python3 -m venv .venv
+source .venv/bin/activate
 pip install datasets pillow
 
 # 1) Export MatSynth locally (see section above)
