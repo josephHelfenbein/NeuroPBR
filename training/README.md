@@ -457,14 +457,17 @@ with torch.no_grad():
 training/
 ├── README.md
 ├── train.py
+├── teacher_infer.py
 ├── run_inference.py
 ├── train_config.py
 ├── requirements.txt
 ├── configs/
 ├── models/
 ├── losses/
-├── utils/
-└── Test/
+├── student/
+│   ├── train.py
+│   └── run_inference.py
+└── utils/
 ```
 
 ---
