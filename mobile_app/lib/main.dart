@@ -1,10 +1,23 @@
 // lib/main.dart
 
 import 'package:flutter/material.dart';
-import 'screens/start_screen.dart';
+import 'package:neuro_pbr/screens/main_tab_screen.dart';
+import 'package:neuro_pbr/screens/animated_splash_screen.dart';
+import 'package:neuro_pbr/providers/preferences_provider.dart';
+import 'package:provider/provider.dart';
+import 'screens/carousel_screen.dart';
+import 'theme/theme_provider.dart';
 
 void main() {
-  runApp(const NeuroPBRApp());
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => PreferencesProvider()),
+      ],
+        child: const NeuroPBRApp(),
+    ),
+  );
 }
 
 class NeuroPBRApp extends StatelessWidget {
@@ -12,15 +25,15 @@ class NeuroPBRApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final themeProvider = Provider.of<ThemeProvider>(context);
+
     return MaterialApp(
-      title: 'NeuroPBR',
+      title: 'Neuro PBR',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        scaffoldBackgroundColor: Colors.white,
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blueAccent),
-        useMaterial3: true,
+      theme: themeProvider.themeData,
+      home: AnimatedSplashScreen(
+        nextScreen: const MainTabScreen(),
       ),
-      home: const StartScreen(),
     );
   }
 }
