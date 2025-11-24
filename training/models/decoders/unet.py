@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from typing import List, Literal
 
 '''
-decoders are based off outputting 1024x1024 images
+decoders are based off outputting 2048x2048 images
 based on the fact that encoders are 1024x1024
 '''
 
@@ -87,7 +87,7 @@ def _build_sr_4x():
         nn.BatchNorm2d(64 * 4),
         nn.ReLU(inplace=True),
 
-        nn.PixelShuffle(upscale_factor=2), # 256→512
+        nn.PixelShuffle(upscale_factor=2), # 512→1024
 
         # 2x
         nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
@@ -98,7 +98,7 @@ def _build_sr_4x():
         nn.BatchNorm2d(64 * 4),
         nn.ReLU(inplace=True),
 
-        nn.PixelShuffle(upscale_factor=2),  # 512→1024
+        nn.PixelShuffle(upscale_factor=2),  # 1024→2048
 
         # Refine
         nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
@@ -109,8 +109,8 @@ def _build_sr_4x():
 
 class UNetDecoder(nn.Module):
     """
-    sr_scale: 2 for stride=2 encoders (512→1024)
-              0 for stride=1 encoders (1024→1024)
+    sr_scale: 2 for stride=1 encoders (1024→2048)
+              4 for stride=2 encoders (512→2048)
     """
     def __init__(self, in_channel: int, skip_channels: List[int], out_channel: int, sr_scale: Literal[0, 2, 4] = 2):
         super().__init__()
@@ -132,11 +132,11 @@ class UNetDecoder(nn.Module):
             )
 
         if sr_scale == 2:
-            # SR head (512→1024)
+            # SR head (1024→2048)
             self.sr_head = _build_sr_2x()
 
         elif sr_scale == 4:
-            # SR head (256→1024) - kept for flexibility
+            # SR head (512→2048)
             self.sr_head = _build_sr_4x()
 
         else:
@@ -150,7 +150,7 @@ class UNetDecoder(nn.Module):
         for dec, skip in zip(self.decoders, reversed_skips):
             x = dec(x, skip)
 
-        # Super-resolve to 1024×1024
+        # Super-resolve to 2048×2048
         x = self.sr_head(x)
 
         # Generate outputs
@@ -178,11 +178,11 @@ class UNetDecoderHeads(nn.Module):
             )
 
         if sr_scale == 2:
-            # SR head (512→1024)
+            # SR head (1024→2048)
             self.sr_head = _build_sr_2x()
 
         elif sr_scale == 4:
-            # SR head (256→1024)
+            # SR head (512→2048)
             self.sr_head = _build_sr_4x()
 
         else:
@@ -201,7 +201,7 @@ class UNetDecoderHeads(nn.Module):
         for dec, skip in zip(self.decoders, reversed_skips):
             x = dec(x, skip)
 
-        # Super-resolve to 1024×1024
+        # Super-resolve to 2048×2048
         x = self.sr_head(x)
 
         outputs = [head(x) for head in self.heads]

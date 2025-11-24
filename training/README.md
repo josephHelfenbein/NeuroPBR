@@ -292,7 +292,7 @@ cfg.model.discriminator_n_layers = 6
 cfg.model.discriminator_ndf = 64
 cfg.model.discriminator_use_sigmoid = False
 ```
-4 layers ≈ 142×142 receptive field; 6 layers ≈ 574×574 (best for 1024²).
+4 layers ≈ 142×142 receptive field; 6 layers ≈ 574×574 (best for 2048²).
 
 ### Freezing Backbones
 ```python
@@ -475,9 +475,9 @@ training/
 
 ## FAQ
 
-**How much VRAM?** 8 GB handles 1024² batch 2 (ResNet50). 16–24 GB recommended for larger batches.
+**How much VRAM?** 8 GB handles 1024² batch 2 (ResNet50). 16–24 GB recommended for 2048² or larger batches.
 
-**Training time?** ~8–10 h for 100 epochs @1024² on a single high-end GPU.
+**Training time?** ~8–10 h for 100 epochs @1024² on a single high-end GPU; 18–24 h for 2048² HQ runs.
 
 **CPU-only?** Possible but extremely slow; use a GPU.
 

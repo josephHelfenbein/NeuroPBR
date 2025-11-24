@@ -1,11 +1,11 @@
 """
-Configuration for MobileNetV3-Large backbone at 1024×1024 resolution.
+Configuration for MobileNetV3-Large backbone at 2048×2048 resolution.
 
 Optimized for mobile deployment on 4GB iPhone.
 Based on memory profiling showing ~100 MB usage on Mac (FP32).
 
 Usage:
-    python train.py --config configs/mobilenetv3_1024.py \
+    python train.py --config configs/mobilenetv3_2048.py \
         --input-dir /path/to/data/input \
         --output-dir /path/to/data/output
 """
@@ -14,20 +14,20 @@ from train_config import TrainConfig
 
 
 def get_config() -> TrainConfig:
-    """Configuration for MobileNetV3-Large training at 1024×1024."""
+    """Configuration for MobileNetV3-Large training at 2048×2048."""
     config = TrainConfig()
 
-    # Data: 1024×1024 images
-    config.data.image_size = (1024, 1024)
-    config.data.output_size = (1024, 1024)
+    # Data: 2048×2048 images
+    config.data.image_size = (2048, 2048)
+    config.data.output_size = (2048, 2048)
     config.data.batch_size = 2  # Reduced for high resolution
     config.data.num_workers = 8
 
     # Model: MobileNetV3-Large encoder
     config.model.encoder_type = "mobilenetv3"
     config.model.encoder_backbone = "mobilenet_v3_large"
-    config.model.encoder_stride = 1  # 1024 → 1024 (no downsampling)
-    config.model.decoder_sr_scale = 0  # Keep 1024 resolution
+    config.model.encoder_stride = 1  # 2048 → 2048 (no downsampling)
+    config.model.decoder_sr_scale = 2  # Restore 2048 resolution from 1024 features
     config.model.freeze_backbone = False  # Fine-tune the backbone
     config.model.freeze_bn = False
 
@@ -66,7 +66,7 @@ def get_config() -> TrainConfig:
 if __name__ == "__main__":
     # Print config for verification
     config = get_config()
-    print("MobileNetV3-Large 1024×1024 Config:")
+    print("MobileNetV3-Large 2048×2048 Config:")
     print(f"  Image size: {config.data.image_size}")
     print(f"  Batch size: {config.data.batch_size}")
     print(

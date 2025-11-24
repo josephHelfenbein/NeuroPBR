@@ -183,10 +183,6 @@ def convert_to_png(src: Path, dst: Path, map_type: str, verbose: bool) -> bool:
                     im = im.convert("L")
             # Ensure parent exists
             dst.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Resize to 1024x1024
-            im = im.resize((1024, 1024), Image.LANCZOS)
-            
             im.save(dst, format="PNG", optimize=True)
         return True
     except Exception as e:  # pragma: no cover - best-effort conversion

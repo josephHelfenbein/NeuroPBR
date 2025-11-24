@@ -72,10 +72,6 @@ int main(int argc, char** argv) {
             W = dAlbedo.width;
             H = dAlbedo.height;
 
-            if (W != 1024 || H != 1024) {
-                throw std::runtime_error("Input textures must be 1024x1024. Found: " + std::to_string(W) + "x" + std::to_string(H));
-            }
-
             std::array<std::vector<float4>, 3> frameRGBAs;
             std::string sampleName = "sample_" + std::to_string(frameIndex);
 
