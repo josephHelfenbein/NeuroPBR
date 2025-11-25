@@ -7,7 +7,7 @@ End-to-end pipeline for generating synthetic physically based rendering (PBR) da
 - `dataset/` – Hugging Face powered exporters, cleaners, and docs for preparing PBR materials.
 - `renderer/` – CUDA/C++ renderer that produces paired dirty/clean views + metadata for training.
 - `training/` – PyTorch training stack (multi-view encoder, ViT fusion, UNet decoder, GAN losses).
-- `mobile_app/` – Experimental mobile front-ends (not covered here).
+- `mobile_app/` – Flutter iOS app for capture, on-device inference (Core ML), and Metal-based PBR preview.
 
 ## Prerequisites
 
@@ -116,7 +116,19 @@ Refer to `training/README.md` for the loss breakdown, advanced configs, and trou
 
 ---
 
-## 4. GPU Optimization & Performance
+## 4. Mobile App (`mobile_app/`)
+
+The mobile application brings the reconstruction pipeline to the edge:
+
+1.  **Capture**: Guides users to take 3 specific photos of a surface.
+2.  **Inference**: Runs a distilled "Student" model via Core ML directly on the device.
+3.  **Preview**: Visualizes the material using a custom C++/Metal renderer (ported from the main CUDA renderer).
+
+See `mobile_app/README.md` for setup and build instructions.
+
+---
+
+## 5. GPU Optimization & Performance
 
 The training pipeline automatically detects your hardware and applies the best optimizations:
 
@@ -138,3 +150,4 @@ The training pipeline automatically detects your hardware and applies the best o
 - `dataset/README.md` – Deep dive on exporters, cleaning heuristics, and CLI options.
 - `renderer/README.md` – Detailed build instructions and asset requirements.
 - `training/README.md` – Model architecture, configs, and evaluation metrics.
+- `mobile_app/README.md` – iOS app setup, architecture, and usage.

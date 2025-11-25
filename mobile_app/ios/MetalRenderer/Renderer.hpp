@@ -70,6 +70,7 @@ struct PreviewControls {
     bool showWireframe = false;
     PreviewChannel channel = PreviewChannel::Final;
     ToneMapping toneMapping = ToneMapping::ACES;
+    float zoom = 1.0f;
 };
 
 struct EnvironmentControls {
@@ -87,9 +88,10 @@ struct RendererConfig {
 };
 
 struct FrameUniforms {
-    std::array<float, 16> viewProjection{};
-    std::array<float, 16> invView{};
-    std::array<float, 4> cameraPosTime{};
+    std::array<float, 16> cameraToWorld{};
+    std::array<float, 16> worldToCamera{};
+    std::array<float, 16> projection{};
+    std::array<float, 4> cameraPosFov{};
     std::array<float, 4> resolutionExposure{};
     std::array<float, 4> iblParams{};
     std::array<float, 4> toneMapping{};

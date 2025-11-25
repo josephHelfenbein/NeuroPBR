@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 enum NeuropbrToneMapping { aces, filmic }
+enum NeuropbrModelType { sphere, cube, plane }
 
 /// High-level controller wrapping the native Metal renderer bridge.
 class NeuropbrRenderer {
@@ -111,6 +112,10 @@ class NeuropbrRenderer {
         break;
     }
   }
+
+  Future<void> setModelType(NeuropbrModelType type) async {
+    await _channel.invokeMethod<void>('setModelType', {'type': type.index});
+  }
 }
 
 class NeuropbrCamera {
@@ -168,6 +173,8 @@ class NeuropbrPreviewControls {
     this.showWireframe = false,
     this.channel = 0,
     this.toneMapping = NeuropbrToneMapping.aces,
+    this.modelType = NeuropbrModelType.sphere,
+    this.zoom = 1.0,
   });
 
   final List<double> tint;
@@ -178,6 +185,8 @@ class NeuropbrPreviewControls {
   final bool showWireframe;
   final int channel;
   final NeuropbrToneMapping toneMapping;
+  final NeuropbrModelType modelType;
+  final double zoom;
 
   Map<String, dynamic> toMap() => {
         'tint': tint,
@@ -188,7 +197,10 @@ class NeuropbrPreviewControls {
         'showWireframe': showWireframe,
         'channel': channel,
         'toneMapping': toneMapping.index,
+        'modelType': modelType.index,
+        'zoom': zoom,
       };
+}
 
 class NeuropbrTexturePayload {
   const NeuropbrTexturePayload({

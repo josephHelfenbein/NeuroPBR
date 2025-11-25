@@ -91,18 +91,32 @@ bool Renderer::buildFrameDescriptor(uint32_t materialId, FrameDescriptor &outDes
                                              preview_.showNormals ? 1.0f : 0.0f,
                                              preview_.showWireframe ? 1.0f : 0.0f};
 
-    outDescriptor.frame.iblParams = {lighting_.intensity, lighting_.rotation, environment_.lodCount, 0.0f};
+    outDescriptor.frame.iblParams = {lighting_.intensity, 0.0f, environment_.lodCount, 0.0f};
     outDescriptor.frame.toneMapping = {static_cast<float>(preview_.toneMapping), lighting_.exposure, 0.0f, 0.0f};
 
     return true;
 }
 
 void Renderer::computeMatrices(FrameUniforms &uniforms) const {
-    identity(uniforms.viewProjection);
-    identity(uniforms.invView);
+    identity(uniforms.cameraToWorld);
+    identity(uniforms.worldToCamera);
+
+    // Calculate effective position based on zoom
+    float diff[3];
+    subtract(camera_.position, camera_.target, diff);
+    
+    float scale = 1.0f / std::max(0.001f, preview_.zoom);
+    diff[0] *= scale;
+    diff[1] *= scale;
+    diff[2] *= scale;
+
+    float effectivePos[3];
+    effectivePos[0] = camera_.target[0] + diff[0];
+    effectivePos[1] = camera_.target[1] + diff[1];
+    effectivePos[2] = camera_.target[2] + diff[2];
 
     float forward[3];
-    subtract(camera_.target, camera_.position, forward);
+    subtract(camera_.target, effectivePos, forward);
     normalize3(forward);
 
     float up[3] = {camera_.up[0], camera_.up[1], camera_.up[2]};
@@ -115,7 +129,8 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     float trueUp[3];
     cross(side, forward, trueUp);
 
-    auto &view = uniforms.invView; // store inverse for shader
+    // World To Camera (View Matrix)
+    auto &view = uniforms.worldToCamera;
     view[0] = side[0];
     view[1] = trueUp[0];
     view[2] = -forward[0];
@@ -131,18 +146,41 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     view[10] = -forward[2];
     view[11] = 0.0f;
 
-    view[12] = -(side[0] * camera_.position[0] + side[1] * camera_.position[1] + side[2] * camera_.position[2]);
-    view[13] = -(trueUp[0] * camera_.position[0] + trueUp[1] * camera_.position[1] + trueUp[2] * camera_.position[2]);
-    view[14] = forward[0] * camera_.position[0] + forward[1] * camera_.position[1] + forward[2] * camera_.position[2];
+    view[12] = -(side[0] * effectivePos[0] + side[1] * effectivePos[1] + side[2] * effectivePos[2]);
+    view[13] = -(trueUp[0] * effectivePos[0] + trueUp[1] * effectivePos[1] + trueUp[2] * effectivePos[2]);
+    view[14] = forward[0] * effectivePos[0] + forward[1] * effectivePos[1] + forward[2] * effectivePos[2];
     view[15] = 1.0f;
 
+    // Camera To World (Inverse View Matrix)
+    auto &invView = uniforms.cameraToWorld;
+    invView[0] = side[0];
+    invView[1] = side[1];
+    invView[2] = side[2];
+    invView[3] = 0.0f;
+
+    invView[4] = trueUp[0];
+    invView[5] = trueUp[1];
+    invView[6] = trueUp[2];
+    invView[7] = 0.0f;
+
+    invView[8] = -forward[0];
+    invView[9] = -forward[1];
+    invView[10] = -forward[2];
+    invView[11] = 0.0f;
+
+    invView[12] = effectivePos[0];
+    invView[13] = effectivePos[1];
+    invView[14] = effectivePos[2];
+    invView[15] = 1.0f;
+
+    // Projection Matrix
     const float aspect = config_.height == 0 ? 1.0f : static_cast<float>(config_.width) / static_cast<float>(config_.height);
     const float fovRad = camera_.fovY * (kPi / 180.0f);
     const float f = 1.0f / std::tan(fovRad * 0.5f);
     const float nearZ = camera_.nearZ;
     const float farZ = camera_.farZ;
 
-    auto &proj = uniforms.viewProjection;
+    auto &proj = uniforms.projection;
     proj[0] = f / aspect;
     proj[1] = 0.0f;
     proj[2] = 0.0f;
@@ -163,7 +201,7 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     proj[14] = (2.0f * farZ * nearZ) / (nearZ - farZ);
     proj[15] = 0.0f;
 
-    uniforms.cameraPosTime = {camera_.position[0], camera_.position[1], camera_.position[2], 0.0f};
+    uniforms.cameraPosFov = {effectivePos[0], effectivePos[1], effectivePos[2], fovRad};
     uniforms.resolutionExposure = {static_cast<float>(config_.width), static_cast<float>(config_.height), 0.0f, 0.0f};
 }
 

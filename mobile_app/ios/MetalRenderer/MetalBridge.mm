@@ -23,9 +23,10 @@ using namespace neuropbr;
 namespace {
 
 struct GPUFrameUniforms {
-    float viewProjection[16];
-    float invView[16];
-    float cameraPosTime[4];
+    float cameraToWorld[16];
+    float worldToCamera[16];
+    float projection[16];
+    float cameraPosFov[4];
     float resolutionExposure[4];
     float iblParams[4];
     float toneMapping[4];
@@ -197,6 +198,8 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
 - (void)setFrameCallback:(void (^)(uint64_t textureHandle))callback;
 - (void)setErrorCallback:(void (^)(NSError *error))callback;
 
+- (void)setModelType:(int)type;
+
 @end
 
 @implementation NPBRMetalRendererBridge {
@@ -206,13 +209,30 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     id<MTLDevice> _device;
     id<MTLCommandQueue> _commandQueue;
     id<MTLLibrary> _library;
-    id<MTLRenderPipelineState> _pipeline;
+    id<MTLRenderPipelineState> _spherePipeline;
+    id<MTLRenderPipelineState> _backgroundPipeline;
+    id<MTLDepthStencilState> _depthState;
 
     id<MTLTexture> _colorTarget;
+    id<MTLTexture> _depthTarget;
     CVPixelBufferRef _pixelBuffer;
 
     id<MTLBuffer> _frameUniforms;
     id<MTLBuffer> _materialUniforms;
+    
+    id<MTLBuffer> _sphereVertexBuffer;
+    id<MTLBuffer> _sphereIndexBuffer;
+    NSUInteger _sphereIndexCount;
+
+    id<MTLBuffer> _cubeVertexBuffer;
+    id<MTLBuffer> _cubeIndexBuffer;
+    NSUInteger _cubeIndexCount;
+
+    id<MTLBuffer> _planeVertexBuffer;
+    id<MTLBuffer> _planeIndexBuffer;
+    NSUInteger _planeIndexCount;
+
+    int _currentModelType; // 0=sphere, 1=cube, 2=plane
 
     Renderer *_renderer;
 
@@ -251,7 +271,7 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     return self;
 }
 
-- (void)dealloc {
+- (dealloc {
     [self shutdown];
 }
 
@@ -282,21 +302,46 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
 
     _prefilter = [[NPBREnvironmentPrefilter alloc] initWithDevice:_device library:_library commandQueue:_commandQueue];
 
-    MTLRenderPipelineDescriptor *pipelineDescriptor = [[MTLRenderPipelineDescriptor alloc] init];
-    pipelineDescriptor.label = @"NeuropbrPipeline";
-    pipelineDescriptor.vertexFunction = [_library newFunctionWithName:@"fullscreen_vertex"];
-    pipelineDescriptor.fragmentFunction = [_library newFunctionWithName:@"pbr_fragment"];
-    pipelineDescriptor.colorAttachments[0].pixelFormat = kColorFormat;
-    pipelineDescriptor.sampleCount = 1;
-
+    // Sphere Pipeline
+    MTLRenderPipelineDescriptor *sphereDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    sphereDesc.label = @"NeuropbrSpherePipeline";
+    sphereDesc.vertexFunction = [_library newFunctionWithName:@"standard_vertex"];
+    sphereDesc.fragmentFunction = [_library newFunctionWithName:@"pbr_fragment"];
+    sphereDesc.colorAttachments[0].pixelFormat = kColorFormat;
+    sphereDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    sphereDesc.sampleCount = 1;
+    
     NSError *pipelineError = nil;
-    _pipeline = [_device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&pipelineError];
-    if (!_pipeline) {
-        if (error) {
-            *error = pipelineError ?: [NSError errorWithDomain:@"NPBRMetal" code:-3 userInfo:@{NSLocalizedDescriptionKey : @"Failed to create pipeline"}];
-        }
+    _spherePipeline = [_device newRenderPipelineStateWithDescriptor:sphereDesc error:&pipelineError];
+    if (!_spherePipeline) {
+        if (error) *error = pipelineError;
         return NO;
     }
+
+    // Background Pipeline
+    MTLRenderPipelineDescriptor *bgDesc = [[MTLRenderPipelineDescriptor alloc] init];
+    bgDesc.label = @"NeuropbrBackgroundPipeline";
+    bgDesc.vertexFunction = [_library newFunctionWithName:@"fullscreen_vertex"];
+    bgDesc.fragmentFunction = [_library newFunctionWithName:@"background_fragment"];
+    bgDesc.colorAttachments[0].pixelFormat = kColorFormat;
+    bgDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    bgDesc.sampleCount = 1;
+    
+    _backgroundPipeline = [_device newRenderPipelineStateWithDescriptor:bgDesc error:&pipelineError];
+    if (!_backgroundPipeline) {
+        if (error) *error = pipelineError;
+        return NO;
+    }
+    
+    MTLDepthStencilDescriptor *depthDesc = [[MTLDepthStencilDescriptor alloc] init];
+    depthDesc.depthCompareFunction = MTLCompareFunctionLess;
+    depthDesc.depthWriteEnabled = YES;
+    _depthState = [_device newDepthStencilStateWithDescriptor:depthDesc];
+
+    [self createSphereMesh];
+    [self createCubeMesh];
+    [self createPlaneMesh];
+    _currentModelType = 0;
 
     NSDictionary *cvOptions = @{
         (__bridge NSString *)kCVPixelBufferMetalCompatibilityKey : @YES,
@@ -325,6 +370,11 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     colorDesc.iosurfacePlane = 0;
     _colorTarget = [_device newTextureWithDescriptor:colorDesc];
     _colorTarget.label = @"NeuropbrRenderTarget";
+    
+    MTLTextureDescriptor *depthTexDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:(NSUInteger)size.width height:(NSUInteger)size.height mipmapped:NO];
+    depthTexDesc.usage = MTLTextureUsageRenderTarget;
+    depthTexDesc.storageMode = MTLStorageModePrivate;
+    _depthTarget = [_device newTextureWithDescriptor:depthTexDesc];
 
     RendererConfig config{};
     config.width = static_cast<uint32_t>(size.width);
@@ -353,7 +403,16 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
         _pixelBuffer = nullptr;
     }
     _colorTarget = nil;
-    _pipeline = nil;
+    _depthTarget = nil;
+    _spherePipeline = nil;
+    _backgroundPipeline = nil;
+    _depthState = nil;
+    _sphereVertexBuffer = nil;
+    _sphereIndexBuffer = nil;
+    _cubeVertexBuffer = nil;
+    _cubeIndexBuffer = nil;
+    _planeVertexBuffer = nil;
+    _planeIndexBuffer = nil;
     _library = nil;
     _commandQueue = nil;
     _device = nil;
@@ -417,14 +476,48 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
         pass.colorAttachments[0].storeAction = MTLStoreActionStore;
         pass.colorAttachments[0].clearColor = MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
+        
+        pass.depthAttachment.texture = _depthTarget;
+        pass.depthAttachment.loadAction = MTLLoadActionClear;
+        pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+        pass.depthAttachment.clearDepth = 1.0;
 
         id<MTLRenderCommandEncoder> encoder = [commandBuffer renderCommandEncoderWithDescriptor:pass];
         encoder.label = @"NeuropbrEncoder";
-        [encoder setRenderPipelineState:_pipeline];
+        
+        // Draw Background
+        [encoder setRenderPipelineState:_backgroundPipeline];
+        [encoder setFragmentBuffer:_frameUniforms offset:0 atIndex:0];
+        id<MTLTexture> env = [self textureForHandle:descriptor.environment.environmentHandle fallback:_fallbackEnv];
+        [encoder setFragmentTexture:env atIndex:0];
+        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        
+        // Draw Model
+        [encoder setRenderPipelineState:_spherePipeline];
+        [encoder setDepthStencilState:_depthState];
+        [encoder setCullMode:MTLCullModeBack];
+        
+        id<MTLBuffer> vertexBuffer = _sphereVertexBuffer;
+        id<MTLBuffer> indexBuffer = _sphereIndexBuffer;
+        NSUInteger indexCount = _sphereIndexCount;
+        
+        if (_currentModelType == 1) { // Cube
+            vertexBuffer = _cubeVertexBuffer;
+            indexBuffer = _cubeIndexBuffer;
+            indexCount = _cubeIndexCount;
+        } else if (_currentModelType == 2) { // Plane
+            vertexBuffer = _planeVertexBuffer;
+            indexBuffer = _planeIndexBuffer;
+            indexCount = _planeIndexCount;
+            [encoder setCullMode:MTLCullModeNone]; // Plane is double sided
+        }
+        
+        [encoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
+        [encoder setVertexBuffer:_frameUniforms offset:0 atIndex:1];
+        
         [encoder setFragmentBuffer:_frameUniforms offset:0 atIndex:0];
         [encoder setFragmentBuffer:_materialUniforms offset:0 atIndex:1];
 
-        id<MTLTexture> env = [self textureForHandle:descriptor.environment.environmentHandle fallback:_fallbackEnv];
         id<MTLTexture> irradiance = [self textureForHandle:descriptor.environment.irradianceHandle fallback:_fallbackIrradiance];
         id<MTLTexture> prefiltered = [self textureForHandle:descriptor.environment.prefilteredHandle fallback:_fallbackPrefilter];
         id<MTLTexture> brdf = [self textureForHandle:descriptor.environment.brdfHandle fallback:_fallbackBRDF];
@@ -444,7 +537,7 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
         [encoder setFragmentTexture:roughness atIndex:6];
         [encoder setFragmentTexture:metallic atIndex:7];
 
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:indexCount indexType:MTLIndexTypeUInt16 indexBuffer:indexBuffer indexBufferOffset:0];
         [encoder endEncoding];
 
         __weak typeof(self) weakSelf = self;
@@ -519,6 +612,10 @@ destinationBytesPerImage:bytesPerRow * height];
 - (void)setFrameCallback:(void (^)(uint64_t))callback { _frameCallback = [callback copy]; }
 
 - (void)setErrorCallback:(void (^)(NSError *))callback { _errorCallback = [callback copy]; }
+
+- (void)setModelType:(int)type {
+    _currentModelType = type;
+}
 
 #pragma mark - FlutterTexture
 
@@ -930,74 +1027,137 @@ destinationBytesPerImage:bytesPerRow * height];
     return YES;
 }
 
-    NSData *bytes = payload[@"bytes"];
-    NSNumber *widthValue = payload[@"width"];
-    NSNumber *heightValue = payload[@"height"];
-    NSNumber *handleValue = payload[@"metalHandle"];
-    NSString *formatString = payload[@"format"];
-
-    id<MTLTexture> texture = nil;
-    if (handleValue) {
-        texture = [self textureForHandle:{handleValue.unsignedLongLongValue} fallback:nil];
-    }
-
-    BOOL isHDR = NO;
-    uint32_t channels = 4;
-
-    if (!texture && path.length) {
-        NSURL *url = [NSURL fileURLWithPath:path];
-        NSError *loadError = nil;
-        texture = [_textureLoader newTextureWithContentsOfURL:url
-                                                     options:@{ MTKTextureLoaderOptionSRGB : @NO,
-                                                                MTKTextureLoaderOptionTextureUsage : @(MTLTextureUsageShaderRead)
-                                                     }
-                                                       error:&loadError];
-        if (!texture) {
-            NSLog(@"[Neuropbr] Failed to load texture %@: %@", path, loadError.localizedDescription);
-            return _defaultBindings[static_cast<size_t>(slot)];
+- (void)createSphereMesh {
+    const int rings = 64;
+    const int sectors = 64;
+    const float radius = 1.0f;
+    
+    struct Vertex {
+        vector_float3 position;
+        vector_float3 normal;
+        vector_float2 uv;
+    };
+    
+    std::vector<Vertex> vertices;
+    std::vector<uint16_t> indices;
+    
+    for (int r = 0; r <= rings; ++r) {
+        float v = (float)r / (float)rings;
+        float phi = v * M_PI;
+        
+        for (int s = 0; s <= sectors; ++s) {
+            float u = (float)s / (float)sectors;
+            float theta = u * 2.0f * M_PI;
+            
+            float x = cos(theta) * sin(phi);
+            float y = cos(phi);
+            float z = sin(theta) * sin(phi);
+            
+            Vertex vert;
+            vert.position = {x * radius, y * radius, z * radius};
+            vert.normal = {x, y, z};
+            vert.uv = {u, v};
+            vertices.push_back(vert);
         }
-        channels = ChannelsFromFormat(texture.pixelFormat, payload[@"channels"]);
-        isHDR = IsHDRFormat(texture.pixelFormat);
-    } else if (!texture && bytes && widthValue && heightValue) {
-        MTLPixelFormat format = PixelFormatFromString(formatString, MTLPixelFormatRGBA32Float);
-        channels = ChannelsFromFormat(format, payload[@"channels"]);
-        isHDR = IsHDRFormat(format);
-        texture = [self textureFromBytes:bytes width:widthValue.unsignedIntegerValue height:heightValue.unsignedIntegerValue format:format];
     }
-
-    if (!texture) {
-        return _defaultBindings[static_cast<size_t>(slot)];
+    
+    for (int r = 0; r < rings; ++r) {
+        for (int s = 0; s < sectors; ++s) {
+            uint16_t i1 = r * (sectors + 1) + s;
+            uint16_t i2 = i1 + sectors + 1;
+            
+            indices.push_back(i1);
+            indices.push_back(i2);
+            indices.push_back(i1 + 1);
+            
+            indices.push_back(i1 + 1);
+            indices.push_back(i2);
+            indices.push_back(i2 + 1);
+        }
     }
-
-    return [self bindingForTexture:texture channels:channels hdr:isHDR];
+    
+    _sphereIndexCount = indices.size();
+    _sphereVertexBuffer = [_device newBufferWithBytes:vertices.data() length:vertices.size() * sizeof(Vertex) options:MTLResourceStorageModeShared];
+    _sphereIndexBuffer = [_device newBufferWithBytes:indices.data() length:indices.size() * sizeof(uint16_t) options:MTLResourceStorageModeShared];
 }
 
-- (id<MTLTexture>)textureFromBytes:(NSData *)data width:(NSUInteger)width height:(NSUInteger)height format:(MTLPixelFormat)format {
-    MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
-    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-    id<MTLTexture> texture = [_device newTextureWithDescriptor:descriptor];
-    NSUInteger bytesPerRow = BytesPerPixel(format) * width;
-    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:data.bytes bytesPerRow:bytesPerRow];
-    return texture;
+- (void)createCubeMesh {
+    struct Vertex {
+        vector_float3 position;
+        vector_float3 normal;
+        vector_float2 uv;
+    };
+    
+    // 24 vertices (4 per face * 6 faces)
+    Vertex vertices[] = {
+        // Front face
+        {{-1.0, -1.0,  1.0}, {0.0, 0.0, 1.0}, {0.0, 1.0}},
+        {{ 1.0, -1.0,  1.0}, {0.0, 0.0, 1.0}, {1.0, 1.0}},
+        {{ 1.0,  1.0,  1.0}, {0.0, 0.0, 1.0}, {1.0, 0.0}},
+        {{-1.0,  1.0,  1.0}, {0.0, 0.0, 1.0}, {0.0, 0.0}},
+        // Back face
+        {{-1.0, -1.0, -1.0}, {0.0, 0.0, -1.0}, {1.0, 1.0}},
+        {{-1.0,  1.0, -1.0}, {0.0, 0.0, -1.0}, {1.0, 0.0}},
+        {{ 1.0,  1.0, -1.0}, {0.0, 0.0, -1.0}, {0.0, 0.0}},
+        {{ 1.0, -1.0, -1.0}, {0.0, 0.0, -1.0}, {0.0, 1.0}},
+        // Top face
+        {{-1.0,  1.0, -1.0}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
+        {{-1.0,  1.0,  1.0}, {0.0, 1.0, 0.0}, {0.0, 1.0}},
+        {{ 1.0,  1.0,  1.0}, {0.0, 1.0, 0.0}, {1.0, 1.0}},
+        {{ 1.0,  1.0, -1.0}, {0.0, 1.0, 0.0}, {1.0, 0.0}},
+        // Bottom face
+        {{-1.0, -1.0, -1.0}, {0.0, -1.0, 0.0}, {0.0, 1.0}},
+        {{ 1.0, -1.0, -1.0}, {0.0, -1.0, 0.0}, {1.0, 1.0}},
+        {{ 1.0, -1.0,  1.0}, {0.0, -1.0, 0.0}, {1.0, 0.0}},
+        {{-1.0, -1.0,  1.0}, {0.0, -1.0, 0.0}, {0.0, 0.0}},
+        // Right face
+        {{ 1.0, -1.0, -1.0}, {1.0, 0.0, 0.0}, {1.0, 1.0}},
+        {{ 1.0,  1.0, -1.0}, {1.0, 0.0, 0.0}, {1.0, 0.0}},
+        {{ 1.0,  1.0,  1.0}, {1.0, 0.0, 0.0}, {0.0, 0.0}},
+        {{ 1.0, -1.0,  1.0}, {1.0, 0.0, 0.0}, {0.0, 1.0}},
+        // Left face
+        {{-1.0, -1.0, -1.0}, {-1.0, 0.0, 0.0}, {0.0, 1.0}},
+        {{-1.0, -1.0,  1.0}, {-1.0, 0.0, 0.0}, {1.0, 1.0}},
+        {{-1.0,  1.0,  1.0}, {-1.0, 0.0, 0.0}, {1.0, 0.0}},
+        {{-1.0,  1.0, -1.0}, {-1.0, 0.0, 0.0}, {0.0, 0.0}},
+    };
+    
+    uint16_t indices[] = {
+        0, 1, 2, 0, 2, 3,       // Front
+        4, 5, 6, 4, 6, 7,       // Back
+        8, 9, 10, 8, 10, 11,    // Top
+        12, 13, 14, 12, 14, 15, // Bottom
+        16, 17, 18, 16, 18, 19, // Right
+        20, 21, 22, 20, 22, 23  // Left
+    };
+    
+    _cubeIndexCount = sizeof(indices) / sizeof(uint16_t);
+    _cubeVertexBuffer = [_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    _cubeIndexBuffer = [_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
 }
 
-- (void)writeUniforms:(const FrameDescriptor &)descriptor {
-    GPUFrameUniforms frame{};
-    memcpy(frame.viewProjection, descriptor.frame.viewProjection.data(), sizeof(float) * 16);
-    memcpy(frame.invView, descriptor.frame.invView.data(), sizeof(float) * 16);
-    memcpy(frame.cameraPosTime, descriptor.frame.cameraPosTime.data(), sizeof(float) * 4);
-    memcpy(frame.resolutionExposure, descriptor.frame.resolutionExposure.data(), sizeof(float) * 4);
-    memcpy(frame.iblParams, descriptor.frame.iblParams.data(), sizeof(float) * 4);
-    memcpy(frame.toneMapping, descriptor.frame.toneMapping.data(), sizeof(float) * 4);
-    memcpy(_frameUniforms.contents, &frame, sizeof(GPUFrameUniforms));
-
-    GPUMaterialUniforms material{};
-    memcpy(material.baseTint, descriptor.material.baseTint.data(), sizeof(float) * 4);
-    memcpy(material.scalars, descriptor.material.scalars.data(), sizeof(float) * 4);
-    memcpy(material.featureToggles, descriptor.material.featureToggles.data(), sizeof(float) * 4);
-    memcpy(_materialUniforms.contents, &material, sizeof(GPUMaterialUniforms));
+- (void)createPlaneMesh {
+    struct Vertex {
+        vector_float3 position;
+        vector_float3 normal;
+        vector_float2 uv;
+    };
+    
+    Vertex vertices[] = {
+        {{-1.5, 0.0,  1.5}, {0.0, 1.0, 0.0}, {0.0, 1.0}},
+        {{ 1.5, 0.0,  1.5}, {0.0, 1.0, 0.0}, {1.0, 1.0}},
+        {{ 1.5, 0.0, -1.5}, {0.0, 1.0, 0.0}, {1.0, 0.0}},
+        {{-1.5, 0.0, -1.5}, {0.0, 1.0, 0.0}, {0.0, 0.0}},
+    };
+    
+    uint16_t indices[] = {
+        0, 1, 2, 0, 2, 3
+    };
+    
+    _planeIndexCount = sizeof(indices) / sizeof(uint16_t);
+    _planeVertexBuffer = [_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
+    _planeIndexBuffer = [_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
 }
-
 @end
 
 @interface NeuropbrMetalRendererPlugin : NSObject <FlutterPlugin>
@@ -1058,6 +1218,12 @@ destinationBytesPerImage:bytesPerRow * height];
     } else if ([call.method isEqualToString:@"exportFrame"]) {
         NSData *png = [_bridge snapshotPNG];
         result(png ? png : [FlutterError errorWithCode:@"snapshot_failed" message:@"Snapshot unavailable" details:nil]);
+    } else if ([call.method isEqualToString:@"setModelType"]) {
+        NSNumber *type = args[@"type"];
+        if (type) {
+            [_bridge setModelType:type.intValue];
+        }
+        result(nil);
     } else {
         result(FlutterMethodNotImplemented);
     }
@@ -1120,6 +1286,11 @@ destinationBytesPerImage:bytesPerRow * height];
         controls.toneMapping = tone.unsignedIntegerValue == static_cast<uint32_t>(ToneMapping::Filmic) ? ToneMapping::Filmic
                                                                                                          : ToneMapping::ACES;
     }
+    NSNumber *modelType = args[@"modelType"];
+    if (modelType) {
+        [_bridge setModelType:modelType.intValue];
+    }
+    controls.zoom = args[@"zoom"] ? args[@"zoom"].floatValue : 1.0f;
     [_bridge setPreview:controls];
     result(nil);
 }
