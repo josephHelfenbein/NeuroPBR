@@ -31,7 +31,10 @@ dependencies:
   flutter:
     sdk: flutter
   camera: ^0.11.1+1
-
+  google_fonts: ^6.2.1
+  image_picker: ^1.1.2
+  provider: ^6.1.1
+  shared_preferences: ^2.2.2
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
@@ -47,6 +50,8 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.13.1
+  flutter_native_splash: ^2.3.10
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -60,6 +65,10 @@ flutter:
   uses-material-design: true
   assets:
     - assets/logo.png
+    - assets/text.png
+    - assets/app_icon.png
+    - assets/initial.png
+    - assets/native_splash.png
 
 
 
@@ -93,3 +102,33 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+# Flutter Launcher Icons configuration
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/app_icon.png"
+  # Optional: customize per platform
+  # android: "launcher_icon"
+  # ios: true
+  # min_sdk_android: 21
+  # remove_alpha_ios: true
+
+# Flutter Native Splash configuration
+flutter_native_splash:
+  color: "#FFFFFF"
+  image: assets/native_splash.png
+
+  # Android: center the image without cropping
+  image_android: assets/native_splash.png
+  android_gravity: center
+  android: true
+
+  # iOS: fit the entire image within bounds (like contain)
+  ios_content_mode: scaleAspectFit
+  ios: true
+
+  # Android 12+
+  android_12:
+    color: "#FFFFFF"
+    image: assets/native_splash.png
