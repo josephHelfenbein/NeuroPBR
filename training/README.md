@@ -4,24 +4,6 @@ Complete guide for training the multi-view fusion GAN that reconstructs PBR text
 
 ---
 
-## Table of Contents
-1. [Overview](#overview)
-2. [Quick Start](#quick-start)
-3. [Dataset Setup](#dataset-setup)
-4. [Configuration System](#configuration-system)
-5. [Loss Configuration](#loss-configuration)
-6. [Model Architecture](#model-architecture)
-7. [Training Features](#training-features)
-8. [Run Inference](#run-inference)
-9. [Monitoring & Logging](#monitoring--logging)
-10. [Troubleshooting](#troubleshooting)
-11. [Advanced Usage](#advanced-usage)
-12. [Implementation Details](#implementation-details)
-13. [File Structure](#file-structure)
-14. [FAQ](#faq)
-
----
-
 ## Overview
 
 NeuroPBR trains a deep model that:
@@ -32,10 +14,6 @@ NeuroPBR trains a deep model that:
 4. Decodes to **four 2048×2048 PBR maps** (albedo, roughness, metallic, normal)
 5. Improves realism with **optional GAN losses** plus reconstruction terms
 
-```
-Renders (3 × RGB) → Shared Encoder → Cross-View ViT → Multi-head Decoder → {Albedo, Roughness, Metallic, Normal}
-                                                           ↘ PatchGAN Discriminator (optional)
-```
 
 ### Key Features
 
@@ -137,9 +115,8 @@ config.data.render_curriculum = 0  # default clean-only curriculum
 config.data.render_curriculum = 1  # Match on-disk clean/dirty mix each epoch
 config.data.render_curriculum = 2  # dirty-only curriculum
 ```
-Use `--render-curriculum {0|1|2}` on the CLI to override per run. The legacy
-`--use-dirty` flag still works and simply maps to curriculum `2` for backwards
-compatibility.
+Use `--render-curriculum {0|1|2}` on the CLI to override per run. 
+The legacy `--use-dirty` flag still works and simply maps to curriculum `2` for backwards compatibility.
 
 | Curriculum | Clean Renders | Dirty Renders | Notes |
 | --- | --- | --- | --- |
@@ -198,7 +175,7 @@ PY
 | Name | Highlights | Use Case |
 | --- | --- | --- |
 | `default` | ResNet50 encoder, ViT depth 4, GAN starts epoch 5 | Production training |
-| `quick_test` | ResNet18, ViT depth 2, 10 epochs | Debug / smoke tests |
+| `quick_test` | ResNet18, ViT depth 2, 20 epochs | Debug / smoke tests |
 | `lightweight` | ResNet50, no GAN | Fast baseline |
 | `configs/high_quality.py` | ResNet101, deeper ViT | Highest fidelity |
 | `configs/fast_iteration.py` | ResNet18, fewer epochs | Rapid experimentation |
@@ -339,9 +316,6 @@ cfg.training.log_images_every_n_epochs = 5
 cfg.training.use_wandb = False
 ```
 
-### Multi-GPU (Planned)
-Skeleton is ready for `torchrun`, pending DDP wiring.
-
 ---
 
 ## Run Inference
@@ -431,59 +405,3 @@ model.load_state_dict(ckpt['model_state_dict'])
 with torch.no_grad():
     outputs = model(inputs)
 ```
-
----
-
-## Implementation Details
-
-### Implemented
-- Full training pipeline (multi-view generator, PatchGAN discriminator)
-- Loss stack (L1, SSIM, normal, GAN)
-- Mixed precision, gradient clipping, LR scheduling with warmup
-- Automatic train/val split, checkpointing, resume
-- TensorBoard + optional WandB logging
-- Dataset + metrics helpers
-- `run_inference.py` utility
-
-### Planned
-- Distributed multi-GPU training (DDP)
-- Richer data augmentation
-- ONNX/TorchScript export helpers
-
----
-
-## File Structure
-```
-training/
-├── README.md
-├── train.py
-├── teacher_infer.py
-├── run_inference.py
-├── train_config.py
-├── requirements.txt
-├── configs/
-├── models/
-├── losses/
-├── student/
-│   ├── train.py
-│   └── run_inference.py
-└── utils/
-```
-
----
-
-## FAQ
-
-**How much VRAM?** 16 GB handles 2048² batch 1 (ResNet50). 24 GB+ recommended for larger batches or deeper models.
-
-**Training time?** ~18–24 h for 100 epochs @2048² on a single high-end GPU.
-
-**CPU-only?** Possible but extremely slow; use a GPU.
-
-**Need clean renders?** No, dirty renders alone work; clean renders are optional.
-
-**Different number of views?** Not currently supported; dataset + ViT assume three.
-
-**Different PBR resolutions?** Files are resized automatically; keep consistent aspect ratios.
-
-**How to confirm training works?** Monitor TensorBoard: decreasing generator loss, better PSNR/SSIM, normal angle < 20°.

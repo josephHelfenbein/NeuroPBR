@@ -28,7 +28,7 @@ class NeuroPBRApp extends StatelessWidget {
     final themeProvider = Provider.of<ThemeProvider>(context);
 
     return MaterialApp(
-      title: 'Neuro PBR',
+      title: 'NeuroPBR',
       debugShowCheckedModeBanner: false,
       theme: themeProvider.themeData,
       home: AnimatedSplashScreen(

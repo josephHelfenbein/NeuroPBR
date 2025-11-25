@@ -6,6 +6,39 @@ C++/CUDA renderer for generating synthetic training data using image-based light
 - Renders 3 randomized HDRI-lit views per material.
 - Outputs paired (input renders + ground-truth PBR maps) for model training.
 
+## Implementation Details
+
+The renderer is built using **C++17** and **CUDA**, implementing a standard PBR pipeline optimized for high-throughput data generation.
+
+### Shading Model
+It uses the **Cook-Torrance** microfacet specular shading model, which is the industry standard for PBR:
+- **Distribution (D):** Trowbridge-Reitz (GGX)
+- **Geometry (G):** Smith (Schlick-GGX)
+- **Fresnel (F):** Schlick approximation
+
+### Image-Based Lighting (IBL)
+Lighting is purely image-based, using the **Split-Sum Approximation** to efficiently evaluate the lighting integral:
+1.  **Irradiance Map:** A diffuse convolution of the environment map.
+2.  **Prefiltered Environment Map:** Specular reflection pre-calculated at different roughness levels (stored in mipmaps).
+3.  **BRDF Integration LUT:** A precomputed 2D texture storing the scale and bias for the Fresnel term.
+
+### Data Augmentation
+To make the neural network robust to real-world imperfections, the renderer generates two types of data:
+- **Clean:** Perfect PBR rendering.
+- **Dirty:** Adds randomized synthetic degradations:
+    -   **Shadows:** Procedurally simulated occlusion to mimic uneven lighting.
+    -   **Camera Artifacts:** Procedurally simulated lens smudges and scratches.
+
+### CUDA Kernels
+
+The rendering logic is distributed across several optimized CUDA kernels:
+
+-   `shadeKernel`: The primary ray-casting kernel. It computes the camera ray for each pixel, intersects it with the material plane, and evaluates the PBR shading model. It also handles the procedural generation of shadows and camera artifacts on the fly.
+-   `equirectangularToCubemap`: Converts input HDRI images (equirectangular projection) into cubemaps for efficient sampling.
+-   `convolveDiffuseIrradiance`: Computes the diffuse irradiance map by convolving the environment map with a cosine-weighted hemisphere.
+-   `prefilterSpecularCubemap`: Generates the pre-filtered environment map for specular reflections, using importance sampling (GGX) at varying roughness levels.
+-   `computeEnvironmentBrightness`: Analyzes the HDRI to determine horizon and zenith brightness, which drives the procedural shadow intensity.
+-   `precomputeBRDF`: Generates the 2D LUT for the Split-Sum approximation.
 
 ## Prerequisites
 
@@ -39,7 +72,7 @@ The binary will be written to `bin/neuropbr_renderer`.
 ./bin/neuropbr_renderer <materials_dir> <num_samples>
 ```
 
-- `<materials_dir>` – Path to the cleaned material dataset (each folder must contain `albedo.png`, `normal.png`, `roughness.png`, `metallic.png`).
+- `<materials_dir>` – Path to the cleaned material dataset (each material folder must contain `albedo.png`, `normal.png`, `roughness.png`, `metallic.png` and be uniquely named).
 - `<num_samples>` – Number of samples to render; each sample produces three views and writes to `output/clean` or `output/dirty` plus `output/render_metadata.json`.
 
 Example (from `renderer/`):

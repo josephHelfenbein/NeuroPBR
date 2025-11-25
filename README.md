@@ -1,6 +1,50 @@
-# NeuroPBR
+[![Contributors][contributors-shield]][contributors-url]
+[![Forks][forks-shield]][forks-url]
+[![Stargazers][stars-shield]][stars-url]
+[![Issues][issues-shield]][issues-url]
+[![MIT License][license-shield]][license-url]
 
-End-to-end pipeline for generating synthetic physically based rendering (PBR) datasets and training a multi-view GAN to reconstruct material properties from rendered images.
+
+[contributors-shield]: https://img.shields.io/github/contributors/josephHelfenbein/NeuroPBR.svg?style=for-the-badge
+[contributors-url]: https://github.com/josephHelfenbein/NeuroPBR/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/josephHelfenbein/NeuroPBR.svg?style=for-the-badge
+[forks-url]: https://github.com/josephHelfenbein/NeuroPBR/network/members
+[stars-shield]: https://img.shields.io/github/stars/josephHelfenbein/NeuroPBR.svg?style=for-the-badge
+[stars-url]: https://github.com/josephHelfenbein/NeuroPBR/stargazers
+[issues-shield]: https://img.shields.io/github/issues/josephHelfenbein/NeuroPBR.svg?style=for-the-badge
+[issues-url]: https://github.com/josephHelfenbein/NeuroPBR/issues
+[license-shield]: https://img.shields.io/github/license/josephHelfenbein/NeuroPBR.svg?style=for-the-badge
+[license-url]: https://github.com/josephHelfenbein/NeuroPBR/blob/master/LICENSE.txt
+
+<!-- PROJECT LOGO -->
+<br />
+<div align="center">
+
+<a href="https://github.com/josephHelfenbein/NeuroPBR">
+    <img src="mobile_app/assets/logo.png" alt="Logo" width="80" height="80">
+  </a>
+
+<h3 align="center">NeuroPBR</h3>
+
+<p align="center">
+    An end-to-end system for reconstructing PBR materials from handheld photos. Features a custom synthetic data renderer, a multi-view deep learning model, and a mobile app for on-device inference.
+	<br />
+    <br />
+    <a href="https://github.com/josephHelfenbein/NeuroPBR/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
+    ·
+    <a href="https://github.com/josephHelfenbein/NeuroPBR/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
+  </p>
+</div>
+
+## About the Project
+
+NeuroPBR is an end-to-end system for digitizing real-world materials into high-quality PBR (Physically Based Rendering) textures using an iPhone. It enables developers and artists to create professional-quality 3D materials using just an iPhone by combining:
+
+1.  **Synthetic Data Generation**: A custom C++/CUDA renderer that produces photorealistic training pairs (clean PBR maps vs. artifact-heavy renders) from the MatSynth dataset.
+2.  **Deep Learning Pipeline**: A multi-view fusion network (ResNet/UNet + Vision Transformer) trained to reconstruct albedo, normal, roughness, and metallic maps from just three imperfect photos.
+3.  **Mobile Deployment**: An iOS app that runs a distilled "Student" model on-device via Core ML, featuring a real-time Metal-based PBR previewer for instant feedback.
+
+This repository contains the complete stack: from dataset preparation and rendering to model training and mobile deployment.
 
 ## Repository Layout
 
@@ -12,7 +56,7 @@ End-to-end pipeline for generating synthetic physically based rendering (PBR) da
 ## Prerequisites
 
 - **Linux or WSL2 (Windows Subsystem for Linux)** is required for the training pipeline (due to `torch.compile` and `triton` dependencies).
-- NVIDIA GPU (CUDA-capable, 8 GB VRAM or more recommended).
+- NVIDIA GPU (CUDA-capable, 16 GB VRAM or more recommended).
 - CUDA Toolkit + CMake 3.18+ + GCC/Clang (for renderer).
 - Python 3.10+ for dataset scripts and the training pipeline.
 

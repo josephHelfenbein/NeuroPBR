@@ -20,6 +20,9 @@ Future<void> runNeuropbrPreviewDemo() async {
     tint: [1.0, 1.0, 1.0],
     roughnessMultiplier: 1.0,
     metallicMultiplier: 1.0,
+    toneMapping: NeuropbrToneMapping.aces,
+    modelType: NeuropbrModelType.sphere,
+    zoom: 1.0,
   ));
 
   // Mock data, swap in Core ML output bytes/paths.

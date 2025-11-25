@@ -213,19 +213,25 @@ class NeuropbrTexturePayload {
     this.isCube = false,
   }) : assert(bytes != null || path != null, 'Provide either raw bytes or a file path.');
 
-    this.metallic,
+  NeuropbrTexturePayload.fromBytes(
+    Uint8List data, {
+    required int width,
     required int height,
     String format = 'rgba32float',
     int? channels,
   }) : this(bytes: data, width: width, height: height, format: format, channels: channels);
 
   NeuropbrTexturePayload.fromFile(
+    String filePath, {
+    required int width,
     required int height,
     String format = 'rgba16float',
     int? channels,
     bool isCube = false,
   }) : this(path: filePath, width: width, height: height, format: format, channels: channels, isCube: isCube);
 
+  final Uint8List? bytes;
+  final String? path;
   final int width;
   final int height;
   final String format;

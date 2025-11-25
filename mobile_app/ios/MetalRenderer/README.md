@@ -5,7 +5,7 @@ C++ and Metal-based renderer for real-time visualization inside the iOS app.
 ## Architecture snapshot
 
 - **C++ Core (`Renderer.hpp/.cpp`)** – scene graph, material slots, camera, and toggle/state management. Emits compact uniform blocks that stay platform agnostic and exposes a flat C API the mobile layers can call from Objective-C++.
-- **Metal shaders (`MetalShaders.metal`)** – fullscreen PBR shading with GGX, Smith geometry, Schlick Fresnel, split-sum specular IBL, irradiance, and toggles (channel view, wireframe overlay, etc.).
+- **Metal shaders (`MetalShaders.metal`)** – PBR shading with GGX, Smith geometry, Schlick Fresnel, split-sum specular IBL, irradiance. Supports multiple geometry types (Sphere, Cube, Plane) and tone mapping operators (ACES, Filmic).
 - **Compute prefilter (`EnvironmentPrefilter.metal/.mm`)** – Metal compute kernels that convert equirectangular HDRIs into cubemaps and precompute irradiance, specular prefilter mip chains, and the BRDF LUT so mobile builds no longer need the CUDA preprocessing step.
 - **Objective-C++ bridge (`MetalBridge.mm`)** – owns Metal objects (device, queue, heaps, textures), translates Core ML outputs into `MTLTexture` updates, caches prefiltered HDRIs, and publishes rendered textures through callbacks to Flutter.
 - **Flutter plugin (`neuropbr_plugin.dart`)** – wraps a `MethodChannel` to control renderer lifecycle, environment selection, toggles, and to bind the native texture into Flutter’s `Texture` widget.
@@ -59,7 +59,8 @@ flutter run
 | `updateMaterial`      | `materialId`, `slot`, `payload`                                               | Updates a single texture in-place. |
 | `setCamera`           | `position`, `target`, `up`, `fov`, `near`, `far`                              | Defaults to look-at origin if omitted. |
 | `setLighting`         | `exposure`, `intensity`, `rotation`                                           | Rotation turns the env map around +Y. |
-| `setPreview`          | Tint, multipliers, toggles, preview channel index                             | Matches the Flutter `NeuropbrPreviewControls`. |
+| `setPreview`          | Tint, multipliers, toggles, channel, `toneMapping`, `zoom`, `modelType`       | Matches `NeuropbrPreviewControls`. Tone mapping: 0=ACES, 1=Filmic. |
+| `setModelType`        | `type` (0=Sphere, 1=Cube, 2=Plane)                                            | Switches the geometry used for preview. |
 | `setEnvironment`      | `environmentId`, file paths for env/irradiance/prefilter/brdf **or** `hdr` + optional sampling overrides | Provide cubemaps directly, or pass `hdr` (path/payload) to trigger on-device prefiltering. |
 | `renderFrame`         | `materialId`                                                                  | Emits `onFrameRendered` via the same channel when finished. |
 | `exportFrame`         | `format` (currently `png`)                                                    | Returns raw PNG bytes. |
