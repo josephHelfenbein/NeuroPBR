@@ -8,6 +8,7 @@ import UIKit
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
+    NeuropbrMetalRendererPlugin.register(with: self.registrar(forPlugin: "NeuropbrMetalRendererPlugin")!)
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 }

@@ -2,6 +2,8 @@
 .vscode
 .idea/
 
+.DS_Store
+
 #python
 .pytest_cache
 __pycache__/

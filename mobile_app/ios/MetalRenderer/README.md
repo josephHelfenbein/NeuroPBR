@@ -19,11 +19,13 @@ C++ and Metal-based renderer for real-time visualization inside the iOS app.
 
 Additional details – build steps, Flutter integration, and CLI/automation snippets – live further down once implementation lands.
 
-## Build & integration checklist
+## Integration (Reference)
+
+> **Note:** The `mobile_app` in this repository is already configured using a local CocoaPod. These steps are provided for reference if you need to integrate the renderer into a new project manually.
 
 1. **Wire files into the Xcode target**
-	- Add `Renderer.hpp/.cpp`, `MetalBridge.mm`, and `MetalShaders.metal` to the `Runner` (or host app) target.
-	- Ensure `MetalShaders.metal` is compiled into the default Metal library.
+	- Add `Renderer.hpp/.cpp`, `MetalBridge.mm`, `NeuropbrMetalRendererPlugin.h`, `EnvironmentPrefilter.h/.mm`, `EnvironmentPrefilter.metal`, and `MetalShaders.metal` to the `Runner` (or host app) target.
+	- Ensure `MetalShaders.metal` and `EnvironmentPrefilter.metal` are compiled into the default Metal library.
 	- Enable the *Metal API Validation* option in the scheme only for debug builds to keep release builds lean.
 
 2. **Objective-C++ bridge registration**

@@ -39,6 +39,7 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
@@ -69,8 +70,8 @@ flutter:
     - assets/app_icon.png
     - assets/initial.png
     - assets/native_splash.png
-
-
+    - assets/hdris/
+    - assets/default_tex/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

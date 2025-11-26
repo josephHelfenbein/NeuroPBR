@@ -10,13 +10,18 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <fstream>
+#include <iostream>
 #include <mutex>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 #import "Renderer.hpp"
 #import "EnvironmentPrefilter.h"
+#import "NeuropbrMetalRendererPlugin.h"
 
 using namespace neuropbr;
 
@@ -172,11 +177,163 @@ NSUInteger BytesPerPixel(MTLPixelFormat format) {
 
 float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0f); }
 
+struct HDRPixel {
+    float r, g, b, a;
+};
+
+struct HDRImage {
+    int width = 0;
+    int height = 0;
+    std::vector<HDRPixel> pixels;
+};
+
+HDRImage LoadHDR(const char* path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        throw std::runtime_error("Failed to open HDRI file");
+    }
+
+    auto readLine = [&file]() {
+        std::string line;
+        std::getline(file, line);
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        return line;
+    };
+
+    std::string header = readLine();
+    if (header.rfind("#?", 0) != 0) {
+        throw std::runtime_error("Invalid HDRI header (missing #?)");
+    }
+
+    for (;;) {
+        if (!file) {
+            throw std::runtime_error("Unexpected EOF while reading HDRI header");
+        }
+        std::streampos pos = file.tellg();
+        std::string line = readLine();
+        if (line.empty()) {
+            break;
+        }
+    }
+
+    std::string resolution = readLine();
+    if (resolution.empty()) {
+        throw std::runtime_error("Missing resolution line in HDRI");
+    }
+
+    int width = 0;
+    int height = 0;
+    char axis1 = 0, axis2 = 0;
+    char sign1 = 0, sign2 = 0;
+    if (sscanf(resolution.c_str(), "%c%c %d %c%c %d", &sign1, &axis1, &height, &sign2, &axis2, &width) != 6) {
+        throw std::runtime_error("Failed to parse HDRI resolution string");
+    }
+    if ((axis1 != 'Y' && axis1 != 'y') || (axis2 != 'X' && axis2 != 'x')) {
+        throw std::runtime_error("Only -Y +X orientation is supported");
+    }
+    if (sign1 != '-' || sign2 != '+') {
+        throw std::runtime_error("Unsupported HDRI orientation");
+    }
+    if (width <= 0 || height <= 0) {
+        throw std::runtime_error("HDRI has invalid dimensions");
+    }
+
+    HDRImage image;
+    image.width = width;
+    image.height = height;
+    image.pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
+
+    std::vector<unsigned char> scanline(static_cast<size_t>(width) * 4u);
+
+    for (int y = 0; y < height; ++y) {
+        unsigned char scanlineHeader[4];
+        if (!file.read(reinterpret_cast<char*>(scanlineHeader), 4)) {
+            throw std::runtime_error("Unexpected EOF reading HDRI scanline header");
+        }
+
+        bool rle = false;
+        if (scanlineHeader[0] == 2 && scanlineHeader[1] == 2) {
+            int scanlineWidth = (int(scanlineHeader[2]) << 8) | int(scanlineHeader[3]);
+            if (scanlineWidth == width) {
+                rle = true;
+            }
+        }
+
+        if (!rle) {
+            scanline[0] = scanlineHeader[0];
+            scanline[width] = scanlineHeader[1];
+            scanline[2 * width] = scanlineHeader[2];
+            scanline[3 * width] = scanlineHeader[3];
+            size_t remaining = static_cast<size_t>(width - 1) * 4u;
+            if (!file.read(reinterpret_cast<char*>(scanline.data() + 4), static_cast<std::streamsize>(remaining))) {
+                throw std::runtime_error("Unexpected EOF reading legacy HDRI scanline");
+            }
+            for (size_t i = 0; i < remaining / 4u; ++i) {
+                scanline[(i + 1) + 0 * width] = scanline[4 + i * 4 + 0];
+                scanline[(i + 1) + 1 * width] = scanline[4 + i * 4 + 1];
+                scanline[(i + 1) + 2 * width] = scanline[4 + i * 4 + 2];
+                scanline[(i + 1) + 3 * width] = scanline[4 + i * 4 + 3];
+            }
+        } else {
+            for (int channel = 0; channel < 4; ++channel) {
+                int index = 0;
+                while (index < width) {
+                    unsigned char code;
+                    file.read(reinterpret_cast<char*>(&code), 1);
+                    if (!file) {
+                        throw std::runtime_error("Unexpected EOF while decoding HDRI RLE");
+                    }
+                    if (code > 128) {
+                        int count = code - 128;
+                        unsigned char value;
+                        file.read(reinterpret_cast<char*>(&value), 1);
+                        if (!file) {
+                            throw std::runtime_error("Unexpected EOF in HDRI RLE run");
+                        }
+                        for (int i = 0; i < count; ++i) {
+                            scanline[channel * width + index++] = value;
+                        }
+                    } else {
+                        int count = code;
+                        if (!file.read(reinterpret_cast<char*>(scanline.data() + channel * width + index), count)) {
+                            throw std::runtime_error("Unexpected EOF in HDRI RLE literal");
+                        }
+                        index += count;
+                    }
+                }
+            }
+        }
+
+        for (int x = 0; x < width; ++x) {
+            unsigned char r = scanline[x + 0 * width];
+            unsigned char g = scanline[x + 1 * width];
+            unsigned char b = scanline[x + 2 * width];
+            unsigned char e = scanline[x + 3 * width];
+
+            HDRPixel& dst = image.pixels[static_cast<size_t>(y) * width + x];
+            if (e) {
+                float f = std::ldexp(1.0f, int(e) - (128 + 8));
+                dst.r = r * f;
+                dst.g = g * f;
+                dst.b = b * f;
+                dst.a = 1.0f;
+            } else {
+                dst.r = dst.g = dst.b = 0.0f;
+                dst.a = 1.0f;
+            }
+        }
+    }
+
+    return image;
+}
+
 } // namespace
 
 @interface NPBRMetalRendererBridge : NSObject <FlutterTexture>
 
-- (instancetype)initWithRegistrar:(id<FlutterTextureRegistrar>)registrar;
+- (instancetype)initWithRegistrar:(id<FlutterTextureRegistry>)registrar;
 - (BOOL)initializeWithSize:(CGSize)size error:(NSError **)error;
 - (void)shutdown;
 
@@ -192,7 +349,7 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
 - (void)loadMaterial:(uint32_t)materialId payloads:(NSDictionary<NSString *, NSDictionary *> *)payloads;
 - (void)updateMaterial:(uint32_t)materialId slot:(MaterialSlot)slot payload:(NSDictionary *)payload;
 
-- (BOOL)renderMaterial:(uint32_t)materialId;
+- (BOOL)renderMaterial:(uint32_t)materialId error:(NSError **)error;
 - (NSData *)snapshotPNG;
 
 - (void)setFrameCallback:(void (^)(uint64_t textureHandle))callback;
@@ -203,7 +360,7 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
 @end
 
 @implementation NPBRMetalRendererBridge {
-    id<FlutterTextureRegistrar> _registrar;
+    id<FlutterTextureRegistry> _registrar;
     int64_t _textureId;
 
     id<MTLDevice> _device;
@@ -261,7 +418,7 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     NPBREnvironmentPrefilter *_prefilter;
 }
 
-- (instancetype)initWithRegistrar:(id<FlutterTextureRegistrar>)registrar {
+- (instancetype)initWithRegistrar:(id<FlutterTextureRegistry>)registrar {
     if ((self = [super init])) {
         _registrar = registrar;
         _textureId = -1;
@@ -271,7 +428,7 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     return self;
 }
 
-- (dealloc {
+- (void)dealloc {
     [self shutdown];
 }
 
@@ -291,7 +448,28 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     _deviceName = _device.name;
     _textureLoader = [[MTKTextureLoader alloc] initWithDevice:_device];
     _commandQueue = [_device newCommandQueue];
+    
     _library = [_device newDefaultLibrary];
+
+    if (!_library) {
+        NSBundle *bundle = [NSBundle bundleForClass:[self class]];
+        NSError *libError = nil;
+        
+        if (@available(iOS 10.0, *)) {
+            _library = [_device newDefaultLibraryWithBundle:bundle error:&libError];
+        }
+        
+        if (!_library) {
+            NSString *path = [bundle pathForResource:@"default" ofType:@"metallib"];
+            if (path) {
+                _library = [_device newLibraryWithFile:path error:&libError];
+            }
+        }
+        
+        if (libError) {
+            NSLog(@"[Neuropbr] Metal library load error: %@", libError);
+        }
+    }
 
     if (!_library) {
         if (error) {
@@ -310,6 +488,30 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     sphereDesc.colorAttachments[0].pixelFormat = kColorFormat;
     sphereDesc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     sphereDesc.sampleCount = 1;
+    
+    MTLVertexDescriptor *vertexDescriptor = [[MTLVertexDescriptor alloc] init];
+    
+    // Position
+    vertexDescriptor.attributes[0].format = MTLVertexFormatFloat3;
+    vertexDescriptor.attributes[0].offset = 0;
+    vertexDescriptor.attributes[0].bufferIndex = 0;
+    
+    // Normal
+    vertexDescriptor.attributes[1].format = MTLVertexFormatFloat3;
+    vertexDescriptor.attributes[1].offset = 12; // 3 * 4 bytes
+    vertexDescriptor.attributes[1].bufferIndex = 0;
+    
+    // UV
+    vertexDescriptor.attributes[2].format = MTLVertexFormatFloat2;
+    vertexDescriptor.attributes[2].offset = 24; // 12 + 12 bytes
+    vertexDescriptor.attributes[2].bufferIndex = 0;
+    
+    // Layout
+    vertexDescriptor.layouts[0].stride = 32; // 12 + 12 + 8 bytes
+    vertexDescriptor.layouts[0].stepRate = 1;
+    vertexDescriptor.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
+    
+    sphereDesc.vertexDescriptor = vertexDescriptor;
     
     NSError *pipelineError = nil;
     _spherePipeline = [_device newRenderPipelineStateWithDescriptor:sphereDesc error:&pipelineError];
@@ -366,9 +568,7 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
     colorDesc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     colorDesc.storageMode = MTLStorageModeShared;
     colorDesc.resourceOptions = MTLResourceStorageModeShared;
-    colorDesc.iosurface = surface;
-    colorDesc.iosurfacePlane = 0;
-    _colorTarget = [_device newTextureWithDescriptor:colorDesc];
+    _colorTarget = [_device newTextureWithDescriptor:colorDesc iosurface:surface plane:0];
     _colorTarget.label = @"NeuropbrRenderTarget";
     
     MTLTextureDescriptor *depthTexDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:(NSUInteger)size.width height:(NSUInteger)size.height mipmapped:NO];
@@ -430,41 +630,78 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
 
 - (NSString *)deviceName { return _deviceName ?: @"Unknown"; }
 
-- (void)setCamera:(const CameraParameters &)camera { npbrSetCamera(_renderer, camera); }
+- (void)setCamera:(const CameraParameters &)camera {
+    dispatch_sync(_renderQueue, ^{
+        npbrSetCamera(_renderer, camera);
+    });
+}
 
-- (void)setLighting:(const LightingControls &)lighting { npbrSetLighting(_renderer, lighting); }
+- (void)setLighting:(const LightingControls &)lighting {
+    dispatch_sync(_renderQueue, ^{
+        npbrSetLighting(_renderer, lighting);
+    });
+}
 
-- (void)setPreview:(const PreviewControls &)preview { npbrSetPreview(_renderer, preview); }
+- (void)setPreview:(const PreviewControls &)preview {
+    dispatch_sync(_renderQueue, ^{
+        npbrSetPreview(_renderer, preview);
+    });
+}
 
-- (void)setEnvironment:(const EnvironmentControls &)environment { npbrSetEnvironment(_renderer, environment); }
+- (void)setEnvironment:(const EnvironmentControls &)environment {
+    dispatch_sync(_renderQueue, ^{
+        npbrSetEnvironment(_renderer, environment);
+    });
+}
 
 - (void)loadMaterial:(uint32_t)materialId payloads:(NSDictionary<NSString *, NSDictionary *> *)payloads {
-    std::array<TextureBinding, static_cast<size_t>(MaterialSlot::COUNT)> bindings = _defaultBindings;
-    [payloads enumerateKeysAndObjectsUsingBlock:^(NSString *key, NSDictionary *payload, BOOL *stop) {
-        MaterialSlot slot = MaterialSlotFromString(key);
-        TextureBinding binding = [self bindingFromPayload:payload slot:slot];
-        if (binding.handle) {
-            bindings[static_cast<size_t>(slot)] = binding;
+    dispatch_sync(_renderQueue, ^{
+        if (!_renderer) {
+            NSLog(@"[Neuropbr] Error: Renderer is null during loadMaterial %u", materialId);
+            return;
         }
-    }];
-    npbrUpsertMaterial(_renderer, materialId, bindings);
+
+        std::array<TextureBinding, static_cast<size_t>(MaterialSlot::COUNT)> bindings;
+        for (size_t i = 0; i < bindings.size(); ++i) {
+            bindings[i] = _defaultBindings[i];
+        }
+        
+        for (NSString *key in payloads) {
+            NSDictionary *payload = payloads[key];
+            MaterialSlot slot = MaterialSlotFromString(key);
+            TextureBinding binding = [self bindingFromPayload:payload slot:slot];
+            if (binding.handle) {
+                bindings[static_cast<size_t>(slot)] = binding;
+            }
+        }
+        
+        NSLog(@"[Neuropbr] Upserting material %u", materialId);
+        npbrUpsertMaterial(_renderer, materialId, bindings);
+    });
 }
 
 - (void)updateMaterial:(uint32_t)materialId slot:(MaterialSlot)slot payload:(NSDictionary *)payload {
     TextureBinding binding = [self bindingFromPayload:payload slot:slot];
     if (binding.handle) {
-        npbrUpdateMaterialTexture(_renderer, materialId, slot, binding);
+        dispatch_sync(_renderQueue, ^{
+            npbrUpdateMaterialTexture(_renderer, materialId, slot, binding);
+        });
     }
 }
 
-- (BOOL)renderMaterial:(uint32_t)materialId {
+- (BOOL)renderMaterial:(uint32_t)materialId error:(NSError **)error {
     __block BOOL success = NO;
+    __block NSError *localError = nil;
+    
     dispatch_sync(_renderQueue, ^{
         if (!_renderer) {
+            localError = [NSError errorWithDomain:@"NPBRMetal" code:-1 userInfo:@{NSLocalizedDescriptionKey : @"Renderer is null"}];
             return;
         }
         FrameDescriptor descriptor{};
         if (!npbrBuildFrame(_renderer, materialId, descriptor)) {
+            NSLog(@"[Neuropbr] Failed to build frame for material %u. Available materials might be missing.", materialId);
+            localError = [NSError errorWithDomain:@"NPBRMetal" code:-2 userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"Material %u not found", materialId]}];
             return;
         }
         [self writeUniforms:descriptor];
@@ -540,9 +777,9 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
         [encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:indexCount indexType:MTLIndexTypeUInt16 indexBuffer:indexBuffer indexBufferOffset:0];
         [encoder endEncoding];
 
-        __weak typeof(self) weakSelf = self;
+        __weak NPBRMetalRendererBridge *weakSelf = self;
         [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
-            __strong typeof(self) strongSelf = weakSelf;
+            __strong NPBRMetalRendererBridge *strongSelf = weakSelf;
             if (!strongSelf) {
                 return;
             }
@@ -562,6 +799,9 @@ float DegreesToRadians(float degrees) { return degrees * (3.14159265359f / 180.0
         [commandBuffer commit];
         success = YES;
     });
+    if (!success && error) {
+        *error = localError;
+    }
     return success;
 }
 
@@ -614,7 +854,9 @@ destinationBytesPerImage:bytesPerRow * height];
 - (void)setErrorCallback:(void (^)(NSError *))callback { _errorCallback = [callback copy]; }
 
 - (void)setModelType:(int)type {
-    _currentModelType = type;
+    dispatch_sync(_renderQueue, ^{
+        _currentModelType = type;
+    });
 }
 
 #pragma mark - FlutterTexture
@@ -657,8 +899,6 @@ destinationBytesPerImage:bytesPerRow * height];
     _defaultBindings[static_cast<size_t>(MaterialSlot::Roughness)] = [self bindingForTexture:_fallbackRoughness channels:4 hdr:NO];
     _defaultBindings[static_cast<size_t>(MaterialSlot::Metallic)] = [self bindingForTexture:_fallbackMetallic channels:4 hdr:NO];
 }
-
-- (id<MTLTexture>)solidColorCube:(MTLPixelFormat)format value:(vector_float4)value {
 
 - (id<MTLTexture>)solidColor2D:(MTLPixelFormat)format value:(vector_float4)value width:(NSUInteger)width height:(NSUInteger)height {
     MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
@@ -750,7 +990,13 @@ destinationBytesPerImage:bytesPerRow * height];
     }
 
     NSString *path = payload[@"path"];
-    NSData *bytes = payload[@"bytes"];
+    id bytesObj = payload[@"bytes"];
+    NSData *bytes = nil;
+    if ([bytesObj isKindOfClass:[FlutterStandardTypedData class]]) {
+        bytes = [(FlutterStandardTypedData *)bytesObj data];
+    } else if ([bytesObj isKindOfClass:[NSData class]]) {
+        bytes = (NSData *)bytesObj;
+    }
     NSNumber *widthValue = payload[@"width"];
     NSNumber *heightValue = payload[@"height"];
     NSNumber *handleValue = payload[@"metalHandle"];
@@ -846,6 +1092,26 @@ destinationBytesPerImage:bytesPerRow * height];
         if (!path.length) {
             return nil;
         }
+
+        if ([path.pathExtension.lowercaseString isEqualToString:@"hdr"]) {
+            try {
+                HDRImage image = LoadHDR(path.UTF8String);
+                MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
+                                                                                                width:image.width
+                                                                                               height:image.height
+                                                                                            mipmapped:NO];
+                desc.usage = MTLTextureUsageShaderRead;
+                id<MTLTexture> texture = [_device newTextureWithDescriptor:desc];
+                [texture replaceRegion:MTLRegionMake2D(0, 0, image.width, image.height)
+                           mipmapLevel:0
+                             withBytes:image.pixels.data()
+                           bytesPerRow:image.width * sizeof(HDRPixel)];
+                return texture;
+            } catch (const std::exception& e) {
+                NSLog(@"[Neuropbr] Manual HDR load failed: %s. Falling back to MTKTextureLoader.", e.what());
+            }
+        }
+
         NSDictionary *options = @{ MTKTextureLoaderOptionSRGB : @NO,
                                     MTKTextureLoaderOptionTextureUsage : @(MTLTextureUsageShaderRead),
                                     MTKTextureLoaderOptionTextureStorageMode : @(MTLStorageModePrivate) };
@@ -870,7 +1136,13 @@ destinationBytesPerImage:bytesPerRow * height];
         if (path.length) {
             return [self loadHDRTextureFromValue:path error:error];
         }
-        NSData *bytes = payload[@"bytes"];
+        id bytesObj = payload[@"bytes"];
+        NSData *bytes = nil;
+        if ([bytesObj isKindOfClass:[FlutterStandardTypedData class]]) {
+            bytes = [(FlutterStandardTypedData *)bytesObj data];
+        } else if ([bytesObj isKindOfClass:[NSData class]]) {
+            bytes = (NSData *)bytesObj;
+        }
         NSNumber *widthValue = payload[@"width"];
         NSNumber *heightValue = payload[@"height"];
         NSString *formatString = payload[@"format"];
@@ -1033,9 +1305,9 @@ destinationBytesPerImage:bytesPerRow * height];
     const float radius = 1.0f;
     
     struct Vertex {
-        vector_float3 position;
-        vector_float3 normal;
-        vector_float2 uv;
+        float position[3];
+        float normal[3];
+        float uv[2];
     };
     
     std::vector<Vertex> vertices;
@@ -1054,9 +1326,9 @@ destinationBytesPerImage:bytesPerRow * height];
             float z = sin(theta) * sin(phi);
             
             Vertex vert;
-            vert.position = {x * radius, y * radius, z * radius};
-            vert.normal = {x, y, z};
-            vert.uv = {u, v};
+            vert.position[0] = x * radius; vert.position[1] = y * radius; vert.position[2] = z * radius;
+            vert.normal[0] = x; vert.normal[1] = y; vert.normal[2] = z;
+            vert.uv[0] = u; vert.uv[1] = v;
             vertices.push_back(vert);
         }
     }
@@ -1083,9 +1355,9 @@ destinationBytesPerImage:bytesPerRow * height];
 
 - (void)createCubeMesh {
     struct Vertex {
-        vector_float3 position;
-        vector_float3 normal;
-        vector_float2 uv;
+        float position[3];
+        float normal[3];
+        float uv[2];
     };
     
     // 24 vertices (4 per face * 6 faces)
@@ -1123,12 +1395,12 @@ destinationBytesPerImage:bytesPerRow * height];
     };
     
     uint16_t indices[] = {
-        0, 1, 2, 0, 2, 3,       // Front
-        4, 5, 6, 4, 6, 7,       // Back
-        8, 9, 10, 8, 10, 11,    // Top
-        12, 13, 14, 12, 14, 15, // Bottom
-        16, 17, 18, 16, 18, 19, // Right
-        20, 21, 22, 20, 22, 23  // Left
+        0, 2, 1, 0, 3, 2,       // Front
+        4, 6, 5, 4, 7, 6,       // Back
+        8, 10, 9, 8, 11, 10,    // Top
+        12, 14, 13, 12, 15, 14, // Bottom
+        16, 18, 17, 16, 19, 18, // Right
+        20, 22, 21, 20, 23, 22  // Left
     };
     
     _cubeIndexCount = sizeof(indices) / sizeof(uint16_t);
@@ -1138,9 +1410,9 @@ destinationBytesPerImage:bytesPerRow * height];
 
 - (void)createPlaneMesh {
     struct Vertex {
-        vector_float3 position;
-        vector_float3 normal;
-        vector_float2 uv;
+        float position[3];
+        float normal[3];
+        float uv[2];
     };
     
     Vertex vertices[] = {
@@ -1158,9 +1430,39 @@ destinationBytesPerImage:bytesPerRow * height];
     _planeVertexBuffer = [_device newBufferWithBytes:vertices length:sizeof(vertices) options:MTLResourceStorageModeShared];
     _planeIndexBuffer = [_device newBufferWithBytes:indices length:sizeof(indices) options:MTLResourceStorageModeShared];
 }
-@end
 
-@interface NeuropbrMetalRendererPlugin : NSObject <FlutterPlugin>
+- (void)writeUniforms:(const FrameDescriptor &)descriptor {
+    GPUFrameUniforms *frameDst = (GPUFrameUniforms *)_frameUniforms.contents;
+    std::memcpy(frameDst->cameraToWorld, descriptor.frame.cameraToWorld.data(), sizeof(frameDst->cameraToWorld));
+    std::memcpy(frameDst->worldToCamera, descriptor.frame.worldToCamera.data(), sizeof(frameDst->worldToCamera));
+    std::memcpy(frameDst->projection, descriptor.frame.projection.data(), sizeof(frameDst->projection));
+    std::memcpy(frameDst->cameraPosFov, descriptor.frame.cameraPosFov.data(), sizeof(frameDst->cameraPosFov));
+    std::memcpy(frameDst->resolutionExposure, descriptor.frame.resolutionExposure.data(), sizeof(frameDst->resolutionExposure));
+    std::memcpy(frameDst->iblParams, descriptor.frame.iblParams.data(), sizeof(frameDst->iblParams));
+    std::memcpy(frameDst->toneMapping, descriptor.frame.toneMapping.data(), sizeof(frameDst->toneMapping));
+
+    GPUMaterialUniforms *matDst = (GPUMaterialUniforms *)_materialUniforms.contents;
+    std::memcpy(matDst->baseTint, descriptor.material.baseTint.data(), sizeof(matDst->baseTint));
+    std::memcpy(matDst->scalars, descriptor.material.scalars.data(), sizeof(matDst->scalars));
+    std::memcpy(matDst->featureToggles, descriptor.material.featureToggles.data(), sizeof(matDst->featureToggles));
+    
+#if !TARGET_OS_IPHONE
+    [_frameUniforms didModifyRange:NSMakeRange(0, sizeof(GPUFrameUniforms))];
+    [_materialUniforms didModifyRange:NSMakeRange(0, sizeof(GPUMaterialUniforms))];
+#endif
+}
+
+- (id<MTLTexture>)textureFromBytes:(NSData *)bytes width:(NSUInteger)width height:(NSUInteger)height format:(MTLPixelFormat)format {
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [_device newTextureWithDescriptor:desc];
+    
+    NSUInteger bytesPerPixel = BytesPerPixel(format);
+    NSUInteger bytesPerRow = width * bytesPerPixel;
+    
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:bytes.bytes bytesPerRow:bytesPerRow];
+    return texture;
+}
 @end
 
 @implementation NeuropbrMetalRendererPlugin {
@@ -1178,16 +1480,16 @@ destinationBytesPerImage:bytesPerRow * height];
     if ((self = [super init])) {
         _channel = channel;
         _bridge = [[NPBRMetalRendererBridge alloc] initWithRegistrar:[registrar textures]];
-        __weak typeof(self) weakSelf = self;
+        __weak NeuropbrMetalRendererPlugin *weakSelf = self;
         [_bridge setFrameCallback:^(uint64_t textureHandle) {
-            __strong typeof(self) strongSelf = weakSelf;
+            __strong NeuropbrMetalRendererPlugin *strongSelf = weakSelf;
             if (!strongSelf) {
                 return;
             }
             [strongSelf->_channel invokeMethod:@"onFrameRendered" arguments:@{ @"textureId" : @(strongSelf->_bridge.textureId) }];
         }];
         [_bridge setErrorCallback:^(NSError *error) {
-            __strong typeof(self) strongSelf = weakSelf;
+            __strong NeuropbrMetalRendererPlugin *strongSelf = weakSelf;
             if (!strongSelf) {
                 return;
             }
@@ -1256,18 +1558,18 @@ destinationBytesPerImage:bytesPerRow * height];
         camera.up[1] = 1.0f;
         camera.up[2] = 0.0f;
     }
-    camera.fovY = args[@"fov"] ? args[@"fov"].floatValue : 45.0f;
-    camera.nearZ = args[@"near"] ? args[@"near"].floatValue : 0.01f;
-    camera.farZ = args[@"far"] ? args[@"far"].floatValue : 100.0f;
+    camera.fovY = args[@"fov"] ? [args[@"fov"] floatValue] : 45.0f;
+    camera.nearZ = args[@"near"] ? [args[@"near"] floatValue] : 0.01f;
+    camera.farZ = args[@"far"] ? [args[@"far"] floatValue] : 100.0f;
     [_bridge setCamera:camera];
     result(nil);
 }
 
 - (void)handleSetLighting:(NSDictionary *)args result:(FlutterResult)result {
     LightingControls lighting{};
-    lighting.exposure = args[@"exposure"] ? args[@"exposure"].floatValue : 0.0f;
-    lighting.intensity = args[@"intensity"] ? args[@"intensity"].floatValue : 1.0f;
-    lighting.rotation = args[@"rotation"] ? args[@"rotation"].floatValue : 0.0f;
+    lighting.exposure = args[@"exposure"] ? [args[@"exposure"] floatValue] : 0.0f;
+    lighting.intensity = args[@"intensity"] ? [args[@"intensity"] floatValue] : 1.0f;
+    lighting.rotation = args[@"rotation"] ? [args[@"rotation"] floatValue] : 0.0f;
     [_bridge setLighting:lighting];
     result(nil);
 }
@@ -1275,11 +1577,11 @@ destinationBytesPerImage:bytesPerRow * height];
 - (void)handleSetPreview:(NSDictionary *)args result:(FlutterResult)result {
     PreviewControls controls{};
     [self fillFloat3:args[@"tint"] target:controls.baseColorTint defaultValue:1.0f];
-    controls.roughnessMultiplier = args[@"roughnessMultiplier"] ? args[@"roughnessMultiplier"].floatValue : 1.0f;
-    controls.metallicMultiplier = args[@"metallicMultiplier"] ? args[@"metallicMultiplier"].floatValue : 1.0f;
-    controls.enableNormalMap = args[@"enableNormal"] ? args[@"enableNormal"].boolValue : true;
-    controls.showNormals = args[@"showNormals"] ? args[@"showNormals"].boolValue : false;
-    controls.showWireframe = args[@"showWireframe"] ? args[@"showWireframe"].boolValue : false;
+    controls.roughnessMultiplier = args[@"roughnessMultiplier"] ? [args[@"roughnessMultiplier"] floatValue] : 1.0f;
+    controls.metallicMultiplier = args[@"metallicMultiplier"] ? [args[@"metallicMultiplier"] floatValue] : 1.0f;
+    controls.enableNormalMap = args[@"enableNormal"] ? [args[@"enableNormal"] boolValue] : true;
+    controls.showNormals = args[@"showNormals"] ? [args[@"showNormals"] boolValue] : false;
+    controls.showWireframe = args[@"showWireframe"] ? [args[@"showWireframe"] boolValue] : false;
     controls.channel = PreviewChannelFromNumber(args[@"channel"]);
     NSNumber *tone = args[@"toneMapping"];
     if (tone) {
@@ -1290,7 +1592,7 @@ destinationBytesPerImage:bytesPerRow * height];
     if (modelType) {
         [_bridge setModelType:modelType.intValue];
     }
-    controls.zoom = args[@"zoom"] ? args[@"zoom"].floatValue : 1.0f;
+    controls.zoom = args[@"zoom"] ? [args[@"zoom"] floatValue] : 1.0f;
     [_bridge setPreview:controls];
     result(nil);
 }
@@ -1319,12 +1621,18 @@ destinationBytesPerImage:bytesPerRow * height];
 }
 
 - (void)handleSetEnvironment:(NSDictionary *)args result:(FlutterResult)result {
-    NSError *error = nil;
-    if (![_bridge applyEnvironmentDictionary:args error:&error]) {
-        result([FlutterError errorWithCode:@"environment_failed" message:error.localizedDescription ?: @"Environment error" details:nil]);
-        return;
-    }
-    result(nil);
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSError *error = nil;
+        if (![_bridge applyEnvironmentDictionary:args error:&error]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                result([FlutterError errorWithCode:@"environment_failed" message:error.localizedDescription ?: @"Environment error" details:nil]);
+            });
+            return;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            result(nil);
+        });
+    });
 }
 
 - (void)handleRender:(NSDictionary *)args result:(FlutterResult)result {
@@ -1333,8 +1641,12 @@ destinationBytesPerImage:bytesPerRow * height];
         result([FlutterError errorWithCode:@"invalid_material" message:@"materialId required" details:nil]);
         return;
     }
-    BOOL ok = [_bridge renderMaterial:materialId.unsignedIntValue];
-    result(ok ? @YES : [FlutterError errorWithCode:@"render_failed" message:@"Renderer unavailable" details:nil]);
+    NSError *error = nil;
+    if ([_bridge renderMaterial:materialId.unsignedIntValue error:&error]) {
+        result(@YES);
+    } else {
+        result([FlutterError errorWithCode:@"render_failed" message:error.localizedDescription ?: @"Renderer unavailable" details:nil]);
+    }
 }
 
 - (void)fillFloat3:(NSArray *)source target:(float[3])target defaultValue:(float)value {

@@ -3,6 +3,7 @@ import 'package:neuro_pbr/providers/preferences_provider.dart';
 import 'dart:math' as math;
 import 'package:provider/provider.dart';
 import 'scan_screen_new.dart';
+import 'renderer_screen.dart';
 import '../theme/theme_provider.dart';
 
 // --- Data Models ---
@@ -286,7 +287,12 @@ class _TagsScreenState extends State<TagsScreen> {
           ),
           _IconButton(
             icon: Icons.view_in_ar,
-            onTap: () => debugPrint('View Renders'),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const RendererScreen()),
+              );
+            },
             backgroundColor: colors.accent,
             hasShadow: true,
             borderColor: colors.border,

@@ -1,6 +1,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+constant float kPi = 3.14159265358979323846264338327950288;
+#define M_PI kPi
+
 namespace {
 
 float3 normalizeSafe(float3 v) {
@@ -10,12 +13,12 @@ float3 normalizeSafe(float3 v) {
 
 float3 faceUvToDir(uint face, float u, float v) {
     switch (face) {
-        case 0: return normalizeSafe(float3(1.0f, v, -u));
-        case 1: return normalizeSafe(float3(-1.0f, v, u));
-        case 2: return normalizeSafe(float3(u, 1.0f, -v));
-        case 3: return normalizeSafe(float3(u, -1.0f, v));
-        case 4: return normalizeSafe(float3(u, v, 1.0f));
-        default: return normalizeSafe(float3(-u, v, -1.0f));
+        case 0: return normalizeSafe(float3(1.0f, -v, -u));
+        case 1: return normalizeSafe(float3(-1.0f, -v, u));
+        case 2: return normalizeSafe(float3(u, 1.0f, v));
+        case 3: return normalizeSafe(float3(u, -1.0f, -v));
+        case 4: return normalizeSafe(float3(u, -v, 1.0f));
+        default: return normalizeSafe(float3(-u, -v, -1.0f));
     }
 }
 
@@ -41,10 +44,16 @@ float2 hammersley(uint i, uint N) {
     return float2(float(i) / float(N), radicalInverseVdC(i));
 }
 
+float random(float2 co) {
+    return fract(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453);
+}
+
 void buildTangentBasis(float3 N, thread float3 &T, thread float3 &B) {
-    float3 up = fabs(N.z) < 0.999f ? float3(0.0f, 0.0f, 1.0f) : float3(1.0f, 0.0f, 0.0f);
-    T = normalizeSafe(cross(up, N));
-    B = cross(N, T);
+    float sign = N.z >= 0.0f ? 1.0f : -1.0f;
+    float a = -1.0f / (sign + N.z);
+    float b = N.x * N.y * a;
+    T = float3(1.0f + sign * N.x * N.x * a, sign * b, -sign * N.x);
+    B = float3(b, sign + N.y * N.y * a, -N.y);
 }
 
 float3 importanceSampleGGX(float2 Xi, float3 N, float roughness) {
@@ -93,13 +102,30 @@ kernel void equirectangularToCubemapKernel(texture2d<float, access::sample> hdrT
     if (gid.x >= faceSize || gid.y >= faceSize || gid.z >= cubeFaces.get_array_size()) {
         return;
     }
+    
+    constexpr sampler hdrSampler(coord::normalized, s_address::repeat, t_address::clamp_to_edge, filter::linear);
+    
     float2 uv = (float2(gid.xy) + 0.5f) / float(faceSize);
     float2 uvRemapped = float2(uv * 2.0f - 1.0f);
     float3 dir = faceUvToDir(gid.z, uvRemapped.x, uvRemapped.y);
     float2 latlong = dirToLatLong(dir);
-    constexpr sampler hdrSampler(coord::normalized, address::repeat, filter::linear);
     float4 color = hdrTexture.sample(hdrSampler, latlong);
+    
+    // Sanitize input to avoid blue pixels/NaNs
+    if (isnan(color.x) || isinf(color.x)) color.x = 0.0f;
+    if (isnan(color.y) || isinf(color.y)) color.y = 0.0f;
+    if (isnan(color.z) || isinf(color.z)) color.z = 0.0f;
+    
+    color.w = 1.0f; // Force alpha to 1.0
     cubeFaces.write(color, uint2(gid.xy), gid.z);
+}
+
+float distributionGGX(float NdotH, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH2 = NdotH * NdotH;
+    float denom = (NdotH2 * (a2 - 1.0f) + 1.0f);
+    return a2 / (M_PI * denom * denom);
 }
 
 kernel void prefilterSpecularKernel(texturecube<float, access::sample> envMap [[texture(0)]],
@@ -115,7 +141,7 @@ kernel void prefilterSpecularKernel(texturecube<float, access::sample> envMap [[
     float3 R = N;
     float3 V = R;
 
-    constexpr sampler cubeSampler(coord::cube, filter::linear);
+    constexpr sampler cubeSampler(filter::linear, mip_filter::linear);
     float3 prefiltered = float3(0.0f);
     float totalWeight = 0.0f;
     for (uint i = 0; i < uniforms.sampleCount; ++i) {
@@ -124,7 +150,23 @@ kernel void prefilterSpecularKernel(texturecube<float, access::sample> envMap [[
         float3 L = normalizeSafe(2.0f * dot(V, H) * H - V);
         float NdotL = clamp(dot(N, L), 0.0f, 1.0f);
         if (NdotL > 0.0f) {
-            float3 sampleColor = envMap.sample(cubeSampler, L).xyz;
+            // PDF based mip level selection to reduce fireflies
+            float NdotH = clamp(dot(N, H), 0.0f, 1.0f);
+            float HdotV = clamp(dot(H, V), 0.0f, 1.0f);
+            float D = distributionGGX(NdotH, uniforms.roughness);
+            float pdf = (D * NdotH) / (4.0f * HdotV) + 0.0001f;
+            
+            float resolution = float(uniforms.faceSize);
+            float saTexel = 4.0f * M_PI / (6.0f * resolution * resolution);
+            float saSample = 1.0f / (float(uniforms.sampleCount) * pdf + 0.0001f);
+            float mipLevel = uniforms.roughness == 0.0f ? 0.0f : 0.5f * log2(saSample / saTexel);
+
+            float3 sampleColor = envMap.sample(cubeSampler, L, level(mipLevel)).xyz;
+            // Sanitize
+            if (isnan(sampleColor.x) || isinf(sampleColor.x)) sampleColor.x = 0.0f;
+            if (isnan(sampleColor.y) || isinf(sampleColor.y)) sampleColor.y = 0.0f;
+            if (isnan(sampleColor.z) || isinf(sampleColor.z)) sampleColor.z = 0.0f;
+
             prefiltered += sampleColor * NdotL;
             totalWeight += NdotL;
         }
@@ -145,14 +187,27 @@ kernel void convolveDiffuseKernel(texturecube<float, access::sample> envMap [[te
     float2 uvRemapped = float2(uv * 2.0f - 1.0f);
     float3 N = faceUvToDir(gid.z, uvRemapped.x, uvRemapped.y);
 
-    constexpr sampler cubeSampler(coord::cube, filter::linear);
+    constexpr sampler cubeSampler(filter::linear, mip_filter::linear);
+    
+    float envWidth = float(envMap.get_width());
+    float targetWidth = sqrt(max(1.0f, float(uniforms.sampleCount)));
+    float mipLevel = max(0.0f, log2(envWidth / targetWidth));
+
     float3 irradiance = float3(0.0f);
+    float rand = random(uv);
     for (uint i = 0; i < uniforms.sampleCount; ++i) {
         float2 Xi = hammersley(i, uniforms.sampleCount);
+        Xi.y = fract(Xi.y + rand);
         float3 L = cosineSampleHemisphere(Xi, N);
         float NdotL = clamp(dot(N, L), 0.0f, 1.0f);
         if (NdotL > 0.0f) {
-            float3 sampleColor = envMap.sample(cubeSampler, L).xyz;
+            // Use calculated mip level
+            float3 sampleColor = envMap.sample(cubeSampler, L, level(mipLevel)).xyz;
+            // Sanitize
+            if (isnan(sampleColor.x) || isinf(sampleColor.x)) sampleColor.x = 0.0f;
+            if (isnan(sampleColor.y) || isinf(sampleColor.y)) sampleColor.y = 0.0f;
+            if (isnan(sampleColor.z) || isinf(sampleColor.z)) sampleColor.z = 0.0f;
+
             irradiance += sampleColor;
         }
     }

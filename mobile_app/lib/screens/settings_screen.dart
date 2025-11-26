@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'scan_screen_new.dart';
+import 'renderer_screen.dart';
 import '../theme/theme_provider.dart';
 import '../providers/preferences_provider.dart';
 
@@ -131,7 +132,12 @@ class SettingsScreen extends StatelessWidget {
           ),
           _IconButton(
             icon: Icons.view_in_ar,
-            onTap: () => debugPrint('View Renders'),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const RendererScreen()),
+              );
+            },
             backgroundColor: colors.accent,
             hasShadow: true,
             borderColor: colors.border,

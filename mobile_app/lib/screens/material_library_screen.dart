@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'dart:math' as math;
 import 'package:provider/provider.dart';
 import 'scan_screen_new.dart';
+import 'renderer_screen.dart';
 import '../theme/theme_provider.dart';
 
 // --- Data Models ---
@@ -273,7 +274,12 @@ class _MaterialLibraryScreenState extends State<MaterialLibraryScreen> {
           // Right Button
           _buildIconButton(
             icon: Icons.view_in_ar,
-            onPressed: () => debugPrint('View Renders'),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const RendererScreen()),
+              );
+            },
             backgroundColor: Colors.red,
             shadow: BoxShadow(
               color: Colors.red.withOpacity(0.5),

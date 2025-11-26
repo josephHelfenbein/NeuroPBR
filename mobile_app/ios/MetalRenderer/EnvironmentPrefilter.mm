@@ -2,7 +2,7 @@
 #import <MetalKit/MetalKit.h>
 
 static const NSUInteger kDefaultFaceSize = 512;
-static const NSUInteger kDefaultIrradianceSize = 32;
+static const NSUInteger kDefaultIrradianceSize = 512;
 static const NSUInteger kDefaultSpecularSamples = 1024;
 static const NSUInteger kDefaultDiffuseSamples = 512;
 static const NSUInteger kBRDFLUTSize = 512;
@@ -79,8 +79,13 @@ static const NSUInteger kBRDFLUTSize = 512;
     id<MTLCommandBuffer> commandBuffer = [_commandQueue commandBuffer];
     commandBuffer.label = @"EnvironmentPrefilter";
 
-    id<MTLTexture> envCubemap = [self cubeTextureWithSize:faceSize mipmapped:NO format:hdrTexture.pixelFormat];
+    id<MTLTexture> envCubemap = [self cubeTextureWithSize:faceSize mipmapped:YES format:hdrTexture.pixelFormat];
     [self encodeEquirectangularHDR:hdrTexture toCubemap:envCubemap commandBuffer:commandBuffer];
+
+    id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+    blit.label = @"GenerateEnvMips";
+    [blit generateMipmapsForTexture:envCubemap];
+    [blit endEncoding];
 
     NSUInteger mipLevels = (NSUInteger)floor(log2((double)faceSize)) + 1;
     id<MTLTexture> specularCubemap = [self cubeTextureWithSize:faceSize mipmapped:YES format:hdrTexture.pixelFormat mipLevels:mipLevels];
@@ -124,7 +129,7 @@ static const NSUInteger kBRDFLUTSize = 512;
 - (id<MTLTexture>)cubeTextureWithSize:(NSUInteger)size mipmapped:(BOOL)mipmapped format:(MTLPixelFormat)format mipLevels:(NSUInteger)mipLevels {
     MTLTextureDescriptor *desc = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:format size:size mipmapped:mipmapped];
     desc.mipmapLevelCount = mipLevels;
-    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+    desc.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
     desc.storageMode = MTLStorageModePrivate;
     return [_device newTextureWithDescriptor:desc];
 }
@@ -136,7 +141,7 @@ static const NSUInteger kBRDFLUTSize = 512;
     NSRange levelRange = NSMakeRange(mipLevel, MIN(levelCount, texture.mipmapLevelCount - mipLevel));
     NSRange sliceRange = NSMakeRange(0, 6);
     return [texture newTextureViewWithPixelFormat:texture.pixelFormat
-                                      textureType:MTLTextureTypeCubeArray
+                                      textureType:MTLTextureType2DArray
                                            levels:levelRange
                                            slices:sliceRange];
 }
@@ -160,6 +165,24 @@ static const NSUInteger kBRDFLUTSize = 512;
 
 - (void)encodePrefilterSpecularFrom:(id<MTLTexture>)envCube toTarget:(id<MTLTexture>)prefilteredCube samples:(NSUInteger)samples commandBuffer:(id<MTLCommandBuffer>)commandBuffer {
     for (NSUInteger level = 0; level < prefilteredCube.mipmapLevelCount; ++level) {
+        if (level == 0) {
+            id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+            blit.label = @"CopyLevel0";
+            for (int slice = 0; slice < 6; ++slice) {
+                [blit copyFromTexture:envCube
+                          sourceSlice:slice
+                          sourceLevel:0
+                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                           sourceSize:MTLSizeMake(envCube.width, envCube.height, 1)
+                            toTexture:prefilteredCube
+                     destinationSlice:slice
+                     destinationLevel:0
+                    destinationOrigin:MTLOriginMake(0, 0, 0)];
+            }
+            [blit endEncoding];
+            continue;
+        }
+
         id<MTLTexture> mipView = [self cubeArrayViewForTexture:prefilteredCube mipLevel:level levelCount:1];
         if (!mipView) {
             continue;
@@ -176,7 +199,7 @@ static const NSUInteger kBRDFLUTSize = 512;
             float roughness;
             uint32_t mipLevel;
         } uniforms;
-        NSUInteger mipFace = MAX((NSUInteger)1, mipView.width);
+        NSUInteger mipFace = MAX((NSUInteger)1, prefilteredCube.width >> level);
         uniforms.faceSize = (uint32_t)mipFace;
         uniforms.sampleCount = (uint32_t)samples;
         uniforms.roughness = prefilteredCube.mipmapLevelCount > 1 ? (float)level / (float)(prefilteredCube.mipmapLevelCount - 1) : 0.0f;
