@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:neuro_pbr/providers/preferences_provider.dart';
 import 'dart:math' as math;
+import 'dart:io';
+import 'dart:convert';
+import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 import 'scan_screen_new.dart';
 import 'renderer_screen.dart';
@@ -19,6 +23,8 @@ class FileSystemItem {
   final List<FileSystemItem> items;
   final String? tag;
   final Color? tagColor;
+  final String? path; // Path to the material folder (asset or filesystem)
+  final bool isAsset; // True if it's a bundled asset
 
   const FileSystemItem({
     required this.id,
@@ -30,6 +36,8 @@ class FileSystemItem {
     this.items = const [],
     this.tag,
     this.tagColor,
+    this.path,
+    this.isAsset = false,
   });
 
   FileSystemItem copyWith({
@@ -42,6 +50,8 @@ class FileSystemItem {
     List<FileSystemItem>? items,
     String? tag,
     Color? tagColor,
+    String? path,
+    bool? isAsset,
   }) {
     return FileSystemItem(
       id: id ?? this.id,
@@ -53,114 +63,26 @@ class FileSystemItem {
       items: items ?? this.items,
       tag: tag ?? this.tag,
       tagColor: tagColor ?? this.tagColor,
+      path: path ?? this.path,
+      isAsset: isAsset ?? this.isAsset,
     );
   }
 }
 
 // --- Mock Data ---
-final List<FileSystemItem> initialFilesystem = [
-  const FileSystemItem(
-    id: '1',
-    name: 'Misc',
-    type: ItemType.folder,
-    mainColor: Color(0xFFF4A261),
-    iconShape: Icons.circle,
-    previewImages: [
-      'https://placehold.co/400x500/E76F51/FFFFFF/png?text=Misc+1',
-      'https://placehold.co/400x500/2A9D8F/FFFFFF/png?text=Misc+2'
-    ],
-    items: [
-      FileSystemItem(id: '1-1', name: 'Random Asset 01', type: ItemType.file),
-      FileSystemItem(id: '1-2', name: 'Scratch Pad', type: ItemType.file),
-      FileSystemItem(id: '1-3', name: 'Reference', type: ItemType.file),
-    ],
-  ),
-  const FileSystemItem(
-    id: '2',
-    name: 'Wood',
-    type: ItemType.folder,
-    mainColor: Color(0xFFA67C52),
-    iconShape: Icons.square,
-    previewImages: [
-      'https://placehold.co/400x500/8B4513/FFFFFF/png?text=Oak+Texture',
-      'https://placehold.co/400x500/DEB887/FFFFFF/png?text=Pine+Grain'
-    ],
-    items: [
-      FileSystemItem(id: '2-1', name: 'Oak_Albedo.png', type: ItemType.file),
-    ],
-  ),
-  const FileSystemItem(
-    id: '3',
-    name: 'Metal',
-    type: ItemType.folder,
-    mainColor: Color(0xFF94A3B8),
-    iconShape: Icons.hexagon_outlined,
-    previewImages: [
-      'https://placehold.co/400x500/475569/FFFFFF/png?text=Brushed+Steel',
-      'https://placehold.co/400x500/CBD5E1/FFFFFF/png?text=Gold+Leaf'
-    ],
-    items: [
-      FileSystemItem(id: '3-1', name: 'Rust Map', type: ItemType.file),
-      FileSystemItem(id: '3-2', name: 'Scratches', type: ItemType.file),
-      FileSystemItem(id: '3-3', name: 'Iron.obj', type: ItemType.file),
-      FileSystemItem(id: '3-4', name: 'Copper.mat', type: ItemType.file),
-    ],
-  ),
-  const FileSystemItem(
-    id: '4',
-    name: 'Fabric',
-    type: ItemType.folder,
-    mainColor: Color(0xFFE63946),
-    iconShape: Icons.change_history,
-    items: [
-      FileSystemItem(id: '4-1', name: 'Silk Pattern', type: ItemType.file),
-      FileSystemItem(id: '4-2', name: 'Wool.norm', type: ItemType.file),
-      FileSystemItem(id: '4-3', name: 'Denim.diff', type: ItemType.file),
-    ],
-  ),
-  const FileSystemItem(
-    id: '5',
-    name: 'Stone',
-    type: ItemType.folder,
-    mainColor: Color(0xFF6C757D),
-    iconShape: Icons.album,
-    items: [
-      FileSystemItem(id: '5-1', name: 'Marble Tile', type: ItemType.file),
-      FileSystemItem(id: '5-2', name: 'Granite.rough', type: ItemType.file),
-      FileSystemItem(id: '5-3', name: 'Pavement.disp', type: ItemType.file),
-      FileSystemItem(id: '5-4', name: 'Slate.norm', type: ItemType.file),
-    ],
-  ),
-  const FileSystemItem(
-    id: '6',
-    name: 'Plastic',
-    type: ItemType.folder,
-    mainColor: Color(0xFF457B9D),
-    iconShape: Icons.square_outlined,
-    items: [
-      FileSystemItem(id: '6-1', name: 'Shiny Red', type: ItemType.file),
-      FileSystemItem(id: '6-2', name: 'Matte Black', type: ItemType.file),
-      FileSystemItem(id: '6-3', name: 'Clearcoat', type: ItemType.file),
-      FileSystemItem(id: '6-4', name: 'PVC Pipe', type: ItemType.file),
-    ],
-  ),
-];
+// (Replaced by dynamic loading)
 
 // --- Utility Functions ---
 // (None currently)
 
-List<FileSystemItem> getCurrentContent(List<String> pathIds) {
-  List<FileSystemItem> current = initialFilesystem;
-  for (final id in pathIds) {
-    final folder = current.firstWhere(
-          (item) => item.id == id && item.type == ItemType.folder,
-      orElse: () =>
-          FileSystemItem(id: 'null', name: 'null', type: ItemType.folder),
-    );
-    if (folder.id == 'null') return [];
-    current = folder.items;
-  }
-  return current;
+List<FileSystemItem> getCurrentContent(List<String> pathIds, List<FileSystemItem> rootItems) {
+  // For now, since we are flattening everything, we might not need deep folder navigation 
+  // unless we re-implement folder structure. 
+  // But let's keep it simple and just return the root items if path is empty.
+  if (pathIds.isEmpty) return rootItems;
+  
+  // If we had nested folders, we would traverse here.
+  return [];
 }
 
 // --- Tags Screen ---
@@ -179,25 +101,101 @@ class _TagsScreenState extends State<TagsScreen> {
   String _selectedTag = 'All';
 
   bool get isRoot => path.isEmpty;
-  List<FileSystemItem> get currentContent => getCurrentContent(path);
+  List<FileSystemItem> get currentContent => getCurrentContent(path, _allMaterials);
 
   @override
   void initState() {
     super.initState();
-    _flattenMaterials();
+    _loadMaterials();
   }
   
-  void _flattenMaterials() {
-    _allMaterials = [];
-    for (var folder in initialFilesystem) {
-      if (folder.type == ItemType.folder) {
-        for (var item in folder.items) {
-          _allMaterials.add(item.copyWith(
-            tag: folder.name,
-            tagColor: folder.mainColor,
-          ));
+  Future<void> _loadMaterials() async {
+    List<FileSystemItem> materials = [];
+
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final materialsDir = Directory('${directory.path}/Materials');
+
+      if (!await materialsDir.exists()) {
+        await materialsDir.create(recursive: true);
+        debugPrint('Created Materials directory at ${materialsDir.path}');
+      }
+
+      // Check and create Example Material if needed
+      final exampleDir = Directory('${materialsDir.path}/Example Material');
+      if (!await exampleDir.exists()) {
+        await exampleDir.create();
+        
+        // Copy assets
+        final textures = ['albedo.png', 'metallic.png', 'normal.png', 'roughness.png'];
+        for (final tex in textures) {
+          try {
+            final data = await rootBundle.load('assets/default_tex/$tex');
+            final file = File('${exampleDir.path}/$tex');
+            await file.writeAsBytes(data.buffer.asUint8List());
+          } catch (e) {
+            debugPrint('Error copying asset $tex: $e');
+          }
+        }
+
+        // Create info.json
+        final infoFile = File('${exampleDir.path}/info.json');
+        await infoFile.writeAsString(jsonEncode({
+          'name': 'Example Material',
+          'tag': 'Stone'
+        }));
+        
+        debugPrint('Created Example Material at ${exampleDir.path}');
+      }
+
+      // Load all materials from filesystem
+      final entities = materialsDir.listSync();
+      for (var entity in entities) {
+        if (entity is Directory) {
+          // Check for info.json
+          final infoFile = File('${entity.path}/info.json');
+          if (await infoFile.exists()) {
+            try {
+              final infoContent = await infoFile.readAsString();
+              final info = jsonDecode(infoContent);
+              
+              final name = info['name'] as String? ?? 'Unknown Material';
+              final tag = info['tag'] as String? ?? 'Misc';
+              
+              materials.add(FileSystemItem(
+                id: entity.path, // Use path as ID
+                name: name,
+                type: ItemType.file,
+                tag: tag,
+                tagColor: _getColorForTag(tag),
+                path: entity.path,
+                isAsset: false,
+              ));
+            } catch (e) {
+              debugPrint('Error parsing info.json for ${entity.path}: $e');
+            }
+          }
         }
       }
+    } catch (e) {
+      debugPrint('Error loading user materials: $e');
+    }
+
+    if (mounted) {
+      setState(() {
+        _allMaterials = materials;
+      });
+    }
+  }
+
+  Color _getColorForTag(String tag) {
+    switch (tag.toLowerCase()) {
+      case 'wood': return const Color(0xFFA67C52);
+      case 'metal': return const Color(0xFF94A3B8);
+      case 'fabric': return const Color(0xFFE63946);
+      case 'stone': return const Color(0xFF6C757D);
+      case 'plastic': return const Color(0xFF457B9D);
+      default: return const Color(0xFFF4A261); // Misc color
     }
   }
 
@@ -212,10 +210,13 @@ class _TagsScreenState extends State<TagsScreen> {
         path.add(item.id);
       });
     } else {
-      debugPrint('Opening file: ${item.name}');
+      debugPrint('Opening file: ${item.name} at ${item.path}');
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (context) => const RendererScreen()),
+        MaterialPageRoute(builder: (context) => RendererScreen(
+          materialPath: item.path,
+          isAsset: item.isAsset,
+        )),
       );
     }
   }
@@ -226,6 +227,172 @@ class _TagsScreenState extends State<TagsScreen> {
         path.removeLast();
       });
     }
+  }
+
+  Future<void> _renameMaterial(FileSystemItem item, String newName) async {
+    if (item.path == null) return;
+    try {
+      final infoFile = File('${item.path}/info.json');
+      if (await infoFile.exists()) {
+        final content = await infoFile.readAsString();
+        final Map<String, dynamic> info = jsonDecode(content);
+        info['name'] = newName;
+        await infoFile.writeAsString(jsonEncode(info));
+        
+        if (mounted) {
+          setState(() {
+            final index = _allMaterials.indexWhere((m) => m.id == item.id);
+            if (index != -1) {
+              _allMaterials[index] = item.copyWith(name: newName);
+            }
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error renaming material: $e');
+    }
+  }
+
+  Future<void> _deleteMaterial(FileSystemItem item) async {
+    if (item.path == null) return;
+    
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Delete Material'),
+        content: Text('Are you sure you want to delete "${item.name}"?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        final dir = Directory(item.path!);
+        if (await dir.exists()) {
+          await dir.delete(recursive: true);
+          
+          if (mounted) {
+            setState(() {
+              _allMaterials.removeWhere((m) => m.id == item.id);
+            });
+          }
+        }
+      } catch (e) {
+        debugPrint('Error deleting material: $e');
+      }
+    }
+  }
+
+  Future<void> _showRenameDialog(BuildContext context, FileSystemItem item) async {
+    final TextEditingController controller = TextEditingController(text: item.name);
+    return showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Rename Material'),
+          content: TextField(
+            controller: controller,
+            decoration: const InputDecoration(hintText: "Enter new name"),
+            autofocus: true,
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(context);
+                if (controller.text.isNotEmpty && controller.text != item.name) {
+                  _renameMaterial(item, controller.text);
+                }
+              },
+              child: const Text('Rename'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _changeTag(FileSystemItem item, String newTag) async {
+    if (item.path == null) return;
+    try {
+      final infoFile = File('${item.path}/info.json');
+      if (await infoFile.exists()) {
+        final content = await infoFile.readAsString();
+        final Map<String, dynamic> info = jsonDecode(content);
+        info['tag'] = newTag;
+        await infoFile.writeAsString(jsonEncode(info));
+        
+        if (mounted) {
+          setState(() {
+            final index = _allMaterials.indexWhere((m) => m.id == item.id);
+            if (index != -1) {
+              _allMaterials[index] = item.copyWith(
+                tag: newTag,
+                tagColor: _getColorForTag(newTag),
+              );
+            }
+          });
+        }
+      }
+    } catch (e) {
+      debugPrint('Error changing tag: $e');
+    }
+  }
+
+  Future<void> _showChangeTagDialog(BuildContext context, FileSystemItem item) async {
+    final predefinedTags = ['Wood', 'Metal', 'Fabric', 'Stone', 'Plastic', 'Misc'];
+    
+    return showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Change Tag'),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: predefinedTags.length,
+              itemBuilder: (context, index) {
+                final tag = predefinedTags[index];
+                final isSelected = item.tag == tag;
+                return ListTile(
+                  title: Text(tag),
+                  leading: CircleAvatar(
+                    backgroundColor: _getColorForTag(tag),
+                    radius: 8,
+                  ),
+                  trailing: isSelected ? const Icon(Icons.check, color: Colors.blue) : null,
+                  onTap: () {
+                    Navigator.pop(context);
+                    if (tag != item.tag) {
+                      _changeTag(item, tag);
+                    }
+                  },
+                );
+              },
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -350,8 +517,8 @@ class _TagsScreenState extends State<TagsScreen> {
       );
     }
 
-    // Get unique tags from initialFilesystem
-    final tags = ['All', ...initialFilesystem.where((e) => e.type == ItemType.folder).map((e) => e.name)];
+    // Get unique tags from _allMaterials
+    final tags = ['All', ..._allMaterials.map((e) => e.tag).where((t) => t != null).toSet().cast<String>().toList()];
     
     // Filter materials
     final filteredMaterials = _selectedTag == 'All' 
@@ -395,13 +562,17 @@ class _TagsScreenState extends State<TagsScreen> {
 
         // List View
         Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            itemCount: filteredMaterials.length,
-            itemBuilder: (context, index) {
-              final item = filteredMaterials[index];
-              return _buildMaterialListItem(item, colors);
-            },
+          child: RefreshIndicator(
+            onRefresh: _loadMaterials,
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.symmetric(horizontal: 24),
+              itemCount: filteredMaterials.length,
+              itemBuilder: (context, index) {
+                final item = filteredMaterials[index];
+                return _buildMaterialListItem(item, colors);
+              },
+            ),
           ),
         ),
       ],
@@ -485,9 +656,31 @@ class _TagsScreenState extends State<TagsScreen> {
             ),
             
             // Action Button
-            IconButton(
+            PopupMenuButton<String>(
               icon: Icon(Icons.more_vert, color: colors.textSecondary),
-              onPressed: () {},
+              onSelected: (value) {
+                if (value == 'rename') {
+                  _showRenameDialog(context, item);
+                } else if (value == 'change_tag') {
+                  _showChangeTagDialog(context, item);
+                } else if (value == 'delete') {
+                  _deleteMaterial(item);
+                }
+              },
+              itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                const PopupMenuItem<String>(
+                  value: 'rename',
+                  child: Text('Rename'),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'change_tag',
+                  child: Text('Change Tag'),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'delete',
+                  child: Text('Delete', style: TextStyle(color: Colors.red)),
+                ),
+              ],
             ),
           ],
         ),

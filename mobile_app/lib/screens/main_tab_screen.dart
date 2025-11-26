@@ -14,17 +14,26 @@ class MainTabScreen extends StatefulWidget {
 
 class _MainTabScreenState extends State<MainTabScreen> {
   int _currentIndex = 1;
+  final GlobalKey<StatsScreenState> _statsKey = GlobalKey();
+  late final List<Widget> _screens;
 
-  final List<Widget> _screens = [
-    const StatsScreen(),
-    const TagsScreen(),
-    const SettingsScreen(),
-  ];
+  @override
+  void initState() {
+    super.initState();
+    _screens = [
+      StatsScreen(key: _statsKey),
+      const TagsScreen(),
+      const SettingsScreen(),
+    ];
+  }
 
   void _onTabTapped(int index) {
     setState(() {
       _currentIndex = index;
     });
+    if (index == 0) {
+      _statsKey.currentState?.refresh();
+    }
   }
 
   @override

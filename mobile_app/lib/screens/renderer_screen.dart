@@ -10,7 +10,14 @@ import 'package:path_provider/path_provider.dart';
 import '../neuropbr_plugin.dart';
 
 class RendererScreen extends StatefulWidget {
-  const RendererScreen({super.key});
+  final String? materialPath;
+  final bool isAsset;
+
+  const RendererScreen({
+    super.key,
+    this.materialPath,
+    this.isAsset = false,
+  });
 
   @override
   State<RendererScreen> createState() => _RendererScreenState();
@@ -87,8 +94,12 @@ class _RendererScreenState extends State<RendererScreen> {
         zoom: 1.0,
       ));
 
-      // 4. Load Default Material (Mock Data)
-      await _loadDefaultMaterial();
+      // 4. Load Material
+      if (widget.materialPath != null) {
+        await _loadMaterialFromPath(widget.materialPath!, widget.isAsset);
+      } else {
+        await _loadDefaultMaterial();
+      }
 
       // 5. Prepare and Load Initial Environment
       await _prepareHdris();
@@ -126,12 +137,82 @@ class _RendererScreenState extends State<RendererScreen> {
     }
   }
 
-  Future<Size> _getImageSize(String path) async {
-    final file = File(path);
-    final bytes = await file.readAsBytes();
-    final codec = await ui.instantiateImageCodec(bytes);
-    final frameInfo = await codec.getNextFrame();
-    return Size(frameInfo.image.width.toDouble(), frameInfo.image.height.toDouble());
+  Future<void> _loadMaterialFromPath(String path, bool isAsset) async {
+    try {
+      // Helper to find file with allowed extensions
+      String? findFile(String basePath, String name) {
+        const extensions = ['png', 'PNG', 'jpg', 'JPG', 'jpeg', 'JPEG'];
+        for (final ext in extensions) {
+          final filePath = '$basePath/$name.$ext';
+          if (File(filePath).existsSync()) {
+            return filePath;
+          }
+        }
+        return null;
+      }
+
+      String? albedoPath, normalPath, roughnessPath, metallicPath;
+
+      if (isAsset) {
+        if (path.contains('default_tex')) {
+          await _prepareDefaultTextures();
+          albedoPath = _texturePaths['albedo.png'];
+          normalPath = _texturePaths['normal.png'];
+          roughnessPath = _texturePaths['roughness.png'];
+          metallicPath = _texturePaths['metallic.png'];
+        } else {
+          // Handle other assets if needed
+          debugPrint('Unsupported asset path: $path');
+          return;
+        }
+      } else {
+        // Filesystem path - search for files with allowed extensions
+        albedoPath = findFile(path, 'albedo');
+        normalPath = findFile(path, 'normal');
+        roughnessPath = findFile(path, 'roughness');
+        metallicPath = findFile(path, 'metallic');
+      }
+
+      // Helper to create payload if path is valid
+      NeuropbrTexturePayload? createPayload(String? filePath, {int channels = 4}) {
+        if (filePath == null) return null;
+        
+        // We don't need actual dimensions for file paths, the native loader handles it.
+        // Passing 1x1 to satisfy the constructor.
+        return NeuropbrTexturePayload.fromFile(
+          filePath,
+          width: 1,
+          height: 1,
+          format: 'rgba8unorm',
+          channels: channels,
+        );
+      }
+
+      final albedoPayload = createPayload(albedoPath);
+      final normalPayload = createPayload(normalPath);
+      final roughnessPayload = createPayload(roughnessPath, channels: 1);
+      final metallicPayload = createPayload(metallicPath, channels: 1);
+
+      // If no textures found at all, fallback to default
+      if (albedoPayload == null && normalPayload == null && 
+          roughnessPayload == null && metallicPayload == null) {
+        debugPrint('No textures found in $path, loading default material');
+        await _loadDefaultMaterial();
+        return;
+      }
+
+      await _renderer.loadMaterial('default_mat', NeuropbrMaterialTextures(
+        albedo: albedoPayload,
+        normal: normalPayload,
+        roughness: roughnessPayload,
+        metallic: metallicPayload,
+      ));
+
+    } catch (e) {
+      debugPrint('Error loading material from path $path: $e');
+      // Fallback to default
+      await _loadDefaultMaterial();
+    }
   }
 
   Future<void> _loadDefaultMaterial() async {
@@ -145,35 +226,30 @@ class _RendererScreenState extends State<RendererScreen> {
       final metallicPath = _texturePaths['metallic.png'];
 
       if (albedoPath != null && normalPath != null && roughnessPath != null && metallicPath != null) {
-        final albedoSize = await _getImageSize(albedoPath);
-        final normalSize = await _getImageSize(normalPath);
-        final roughnessSize = await _getImageSize(roughnessPath);
-        final metallicSize = await _getImageSize(metallicPath);
-
         await _renderer.loadMaterial('default_mat', NeuropbrMaterialTextures(
           albedo: NeuropbrTexturePayload.fromFile(
             albedoPath,
-            width: albedoSize.width.toInt(),
-            height: albedoSize.height.toInt(),
+            width: 1,
+            height: 1,
             format: 'rgba8unorm',
           ),
           normal: NeuropbrTexturePayload.fromFile(
             normalPath,
-            width: normalSize.width.toInt(),
-            height: normalSize.height.toInt(),
+            width: 1,
+            height: 1,
             format: 'rgba8unorm',
           ),
           roughness: NeuropbrTexturePayload.fromFile(
             roughnessPath,
-            width: roughnessSize.width.toInt(),
-            height: roughnessSize.height.toInt(),
+            width: 1,
+            height: 1,
             format: 'rgba8unorm',
             channels: 1,
           ),
           metallic: NeuropbrTexturePayload.fromFile(
             metallicPath,
-            width: metallicSize.width.toInt(),
-            height: metallicSize.height.toInt(),
+            width: 1,
+            height: 1,
             format: 'rgba8unorm',
             channels: 1,
           ),
