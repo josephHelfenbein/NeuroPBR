@@ -14,6 +14,8 @@ class MaterialItem {
   final IconData? iconShape;
   final List<String> previewImages;
   final List<MaterialItem> items;
+  final String? tag;
+  final Color? tagColor;
 
   MaterialItem({
     required this.id,
@@ -23,7 +25,33 @@ class MaterialItem {
     this.iconShape,
     this.previewImages = const [],
     this.items = const [],
+    this.tag,
+    this.tagColor,
   });
+  
+  MaterialItem copyWith({
+    String? id,
+    String? name,
+    String? type,
+    Color? mainColor,
+    IconData? iconShape,
+    List<String>? previewImages,
+    List<MaterialItem>? items,
+    String? tag,
+    Color? tagColor,
+  }) {
+    return MaterialItem(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      type: type ?? this.type,
+      mainColor: mainColor ?? this.mainColor,
+      iconShape: iconShape ?? this.iconShape,
+      previewImages: previewImages ?? this.previewImages,
+      items: items ?? this.items,
+      tag: tag ?? this.tag,
+      tagColor: tagColor ?? this.tagColor,
+    );
+  }
 }
 
 // --- Initial Data ---
@@ -116,25 +144,7 @@ final List<MaterialItem> initialFilesystem = [
 ];
 
 // --- Utility Functions ---
-Color getDarkerColor(Color color) {
-  final r = math.max(0, color.red - 40);
-  final g = math.max(0, color.green - 40);
-  final b = math.max(0, color.blue - 40);
-  return Color.fromARGB(color.alpha, r, g, b);
-}
-
-List<MaterialItem> getCurrentContent(List<String> pathIds) {
-  List<MaterialItem> current = initialFilesystem;
-  for (final id in pathIds) {
-    final folder = current.firstWhere(
-      (item) => item.id == id && item.type == 'folder',
-      orElse: () => MaterialItem(id: '', name: '', type: ''),
-    );
-    if (folder.id.isEmpty) return [];
-    current = folder.items;
-  }
-  return current;
-}
+// (None currently)
 
 // --- Main Screen ---
 class MaterialLibraryScreen extends StatefulWidget {
@@ -145,41 +155,46 @@ class MaterialLibraryScreen extends StatefulWidget {
 }
 
 class _MaterialLibraryScreenState extends State<MaterialLibraryScreen> {
-  List<String> _path = [];
   String _activeTab = 'Tags';
-  String _viewMode = 'list';
-
-  List<MaterialItem> get currentContent => getCurrentContent(_path);
-  bool get isRoot => _path.isEmpty;
-
-  void _handleOpen(MaterialItem item) {
-    if (item.type == 'folder') {
-      setState(() {
-        _path = [..._path, item.id];
-      });
-    } else {
-      debugPrint('Opening file: ${item.name}');
+  
+  // Flattened list of all materials
+  List<MaterialItem> _allMaterials = [];
+  String _selectedTag = 'All';
+  
+  @override
+  void initState() {
+    super.initState();
+    _flattenMaterials();
+  }
+  
+  void _flattenMaterials() {
+    _allMaterials = [];
+    for (var folder in initialFilesystem) {
+      if (folder.type == 'folder') {
+        for (var item in folder.items) {
+          _allMaterials.add(item.copyWith(
+            tag: folder.name,
+            tagColor: folder.mainColor,
+          ));
+        }
+      }
     }
   }
 
-  void _handleBack() {
-    setState(() {
-      _path = _path.sublist(0, _path.length - 1);
-    });
+  void _handleOpen(MaterialItem item) {
+    debugPrint('Opening file: ${item.name}');
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const RendererScreen()),
+    );
   }
 
   void _handleTabChange(String tab) {
     setState(() {
       _activeTab = tab;
-      _path = [];
     });
   }
 
-  void _toggleViewMode() {
-    setState(() {
-      _viewMode = _viewMode == 'cards' ? 'list' : 'cards';
-    });
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -226,16 +241,8 @@ class _MaterialLibraryScreenState extends State<MaterialLibraryScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Left Button
-          if (_activeTab == 'Tags' && isRoot)
-            _buildIconButton(
-              icon: _viewMode == 'cards' ? Icons.view_list : Icons.grid_view,
-              onPressed: _toggleViewMode,
-              backgroundColor: colors.surface,
-              colors: colors,
-            )
-          else
-            const SizedBox(width: 40),
+          // Left Button (Placeholder for balance or other action)
+          const SizedBox(width: 40),
 
           // Center Label
           GestureDetector(
@@ -790,142 +797,148 @@ class _MaterialLibraryScreenState extends State<MaterialLibraryScreen> {
     );
   }
 
-  Widget _buildTagsView() {
-    if (isRoot) {
-      return Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            child: Text(
-              _viewMode == 'cards' ? 'RECENT STACKS' : 'TAG LIBRARY',
-              style: TextStyle(
-                color: Colors.grey[600],
-                fontSize: 10,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 2,
-              ),
-            ),
-          ),
-          Expanded(
-            child: _viewMode == 'cards'
-                ? _buildCardsView()
-                : _buildListView(),
-          ),
-        ],
-      );
-    } else {
-      return _buildAssetsView();
-    }
-  }
+  Widget _buildTagsView(colors) {
+    // Get unique tags from initialFilesystem
+    final tags = ['All', ...initialFilesystem.where((e) => e.type == 'folder').map((e) => e.name)];
+    
+    // Filter materials
+    final filteredMaterials = _selectedTag == 'All' 
+        ? _allMaterials 
+        : _allMaterials.where((m) => m.tag == _selectedTag).toList();
 
-  Widget _buildCardsView() {
-    return PageView.builder(
-      itemCount: initialFilesystem.length,
-      padEnds: false,
-      controller: PageController(viewportFraction: 0.85),
-      itemBuilder: (context, index) {
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8),
-          child: ProjectCard(
-            project: initialFilesystem[index],
-            onOpen: _handleOpen,
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildListView() {
-    return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        ...initialFilesystem.map((project) => TagListViewItem(
-              project: project,
-              onOpen: _handleOpen,
-            )),
-        const SizedBox(height: 32),
-        Column(
-          children: [
-            Text(
-              'Material Library',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 24,
-                fontFamily: 'serif',
-              ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 32),
-              child: Text(
-                'Organize your PBR assets by physical properties.',
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: Colors.grey[600],
-                  fontSize: 14,
+        // Filter Bar
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          child: Row(
+            children: tags.map((tag) {
+              final isSelected = _selectedTag == tag;
+              return Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: GestureDetector(
+                  onTap: () => setState(() => _selectedTag = tag),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isSelected ? Colors.white : Colors.white.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      tag,
+                      style: TextStyle(
+                        color: isSelected ? Colors.black : Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-          ],
+              );
+            }).toList(),
+          ),
         ),
-        const SizedBox(height: 80),
+
+        // List View
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            itemCount: filteredMaterials.length,
+            itemBuilder: (context, index) {
+              final item = filteredMaterials[index];
+              return _buildMaterialListItem(item);
+            },
+          ),
+        ),
       ],
     );
   }
 
-  Widget _buildAssetsView() {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              _buildIconButton(
-                icon: Icons.chevron_left,
-                onPressed: _handleBack,
-                backgroundColor: const Color(0xFF262626),
-              ),
-              const SizedBox(width: 12),
-              Text(
-                'Assets',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ],
+  Widget _buildMaterialListItem(MaterialItem item) {
+    return InkWell(
+      onTap: () => _handleOpen(item),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFF262626).withOpacity(0.5),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: const Color(0xFF404040).withOpacity(0.3),
           ),
-          const SizedBox(height: 16),
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.all(16),
+        ),
+        child: Row(
+          children: [
+            // Icon or Preview
+            Container(
+              width: 48,
+              height: 48,
               decoration: BoxDecoration(
-                color: const Color(0xFF262626).withOpacity(0.6),
-                borderRadius: BorderRadius.circular(12),
+                color: Colors.grey[800],
+                borderRadius: BorderRadius.circular(8),
               ),
-              child: currentContent.isEmpty
-                  ? Center(
-                      child: Text(
-                        'No assets found.',
-                        style: TextStyle(
-                          color: Colors.grey[600],
-                          fontSize: 16,
-                        ),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: currentContent.length,
-                      itemBuilder: (context, index) {
-                        return FileSystemItem(
-                          item: currentContent[index],
-                          onOpen: _handleOpen,
-                        );
-                      },
-                    ),
+              child: Icon(Icons.texture, color: Colors.white54),
             ),
-          ),
-        ],
+            const SizedBox(width: 16),
+            
+            // Name and Tag
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.name,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  // Tag Label
+                  if (item.tag != null)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: item.tagColor?.withOpacity(0.2) ?? Colors.grey.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: item.tagColor ?? Colors.grey,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            item.tag!,
+                            style: TextStyle(
+                              color: item.tagColor ?? Colors.grey,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            
+            // Action Button
+            IconButton(
+              icon: const Icon(Icons.more_vert, color: Colors.grey),
+              onPressed: () {},
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -967,272 +980,6 @@ class _MaterialLibraryScreenState extends State<MaterialLibraryScreen> {
 }
 
 // --- Components ---
-
-class FileSystemItem extends StatelessWidget {
-  final MaterialItem item;
-  final Function(MaterialItem) onOpen;
-
-  const FileSystemItem({
-    super.key,
-    required this.item,
-    required this.onOpen,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isFolder = item.type == 'folder';
-
-    return InkWell(
-      onTap: () => onOpen(item),
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        margin: const EdgeInsets.only(bottom: 8),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              isFolder ? Icons.folder : Icons.insert_drive_file,
-              color: isFolder ? Colors.yellow[700] : Colors.grey[600],
-              size: 24,
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Text(
-                item.name,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 15,
-                  fontWeight: FontWeight.w500,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (isFolder)
-              Text(
-                '${item.items.length} items',
-                style: TextStyle(
-                  color: Colors.grey[600],
-                  fontSize: 14,
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class ProjectCard extends StatelessWidget {
-  final MaterialItem project;
-  final Function(MaterialItem) onOpen;
-
-  const ProjectCard({
-    super.key,
-    required this.project,
-    required this.onOpen,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: () => onOpen(project),
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 20),
-        child: Stack(
-          children: [
-            // Background layers
-            if (project.previewImages.isNotEmpty || project.mainColor != null) ...[
-              Positioned.fill(
-                child: Transform.translate(
-                  offset: const Offset(0, -20),
-                  child: Transform.rotate(
-                    angle: 0.087,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: project.mainColor != null
-                            ? getDarkerColor(getDarkerColor(project.mainColor!))
-                            : Colors.grey[800],
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.4),
-                            blurRadius: 15,
-                            spreadRadius: 2,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Positioned.fill(
-                child: Transform.translate(
-                  offset: const Offset(0, -10),
-                  child: Transform.rotate(
-                    angle: -0.052,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: project.mainColor != null
-                            ? getDarkerColor(project.mainColor!)
-                            : Colors.grey[700],
-                        borderRadius: BorderRadius.circular(12),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.4),
-                            blurRadius: 15,
-                            spreadRadius: 2,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ],
-
-            // Front card
-            Transform.rotate(
-              angle: -0.017,
-              child: Container(
-                padding: const EdgeInsets.all(24),
-                decoration: BoxDecoration(
-                  color: project.mainColor ?? Colors.grey[600],
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.9),
-                      blurRadius: 50,
-                      spreadRadius: 10,
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      project.name,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 28,
-                        fontWeight: FontWeight.w900,
-                        height: 1.2,
-                        shadows: [
-                          Shadow(
-                            color: Colors.black.withOpacity(0.5),
-                            blurRadius: 3,
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${project.items.length} renders',
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.8),
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    ElevatedButton(
-                      onPressed: () => onOpen(project),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.black.withOpacity(0.2),
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 8,
-                        ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                      child: Text(
-                        'View',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class TagListViewItem extends StatelessWidget {
-  final MaterialItem project;
-  final Function(MaterialItem) onOpen;
-
-  const TagListViewItem({
-    super.key,
-    required this.project,
-    required this.onOpen,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: () => onOpen(project),
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        margin: const EdgeInsets.only(bottom: 8),
-        decoration: BoxDecoration(
-          color: const Color(0xFF262626).withOpacity(0.5),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(
-            color: const Color(0xFF404040).withOpacity(0.3),
-          ),
-        ),
-        child: Row(
-          children: [
-            SizedBox(
-              width: 40,
-              height: 40,
-              child: Icon(
-                project.iconShape ?? Icons.circle,
-                size: 32,
-                color: project.mainColor,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Text(
-                project.name,
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-            Text(
-              '${project.items.length}',
-              style: TextStyle(
-                color: project.mainColor,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
 class NavItem extends StatelessWidget {
   final IconData icon;

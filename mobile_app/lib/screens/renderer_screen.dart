@@ -59,8 +59,14 @@ class _RendererScreenState extends State<RendererScreen> {
   Future<void> _initializeRenderer() async {
     try {
       // 1. Initialize Renderer
-      // Using a reasonable resolution for mobile preview
-      await _renderer.initRenderer(width: 1080, height: 1920);
+      // Get the physical size of the screen to avoid stretching
+      final view = ui.PlatformDispatcher.instance.views.first;
+      final physicalSize = view.physicalSize;
+      
+      await _renderer.initRenderer(
+        width: physicalSize.width.toInt(), 
+        height: physicalSize.height.toInt()
+      );
 
       // 2. Setup Initial Camera
       _updateCamera();

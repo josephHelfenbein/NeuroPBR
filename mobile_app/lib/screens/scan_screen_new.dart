@@ -330,6 +330,10 @@ class _ScanScreenNewState extends State<ScanScreenNew>
             Column(
               children: [
                 TopControls(
+                  onBack: () {
+                    HapticFeedback.lightImpact();
+                    Navigator.pop(context);
+                  },
                   selectedMaterial: _selectedMaterial,
                   aspectRatio: _aspectRatio,
                   flashOn: _flashOn,
@@ -408,6 +412,7 @@ class _ScanScreenNewState extends State<ScanScreenNew>
 
 // --- Component: Top Controls ---
 class TopControls extends StatelessWidget {
+  final VoidCallback onBack;
   final String selectedMaterial;
   final String aspectRatio;
   final bool flashOn;
@@ -417,6 +422,7 @@ class TopControls extends StatelessWidget {
 
   const TopControls({
     super.key,
+    required this.onBack,
     required this.selectedMaterial,
     required this.aspectRatio,
     required this.flashOn,
@@ -433,6 +439,19 @@ class TopControls extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
+          GestureDetector(
+            onTap: onBack,
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: const Color(0xFF262626),
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFF3A3A3A)),
+              ),
+              child: const Icon(Icons.arrow_back, size: 20, color: Colors.white),
+            ),
+          ),
           GestureDetector(
             onTap: onMaterialSelector,
             child: Container(

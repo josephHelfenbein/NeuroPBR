@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'scan_screen_new.dart';
-import 'renderer_screen.dart';
 import '../theme/theme_provider.dart';
 import 'tags_screen.dart'; // ADD THIS
 import 'settings_screen.dart'; // ADD THIS
@@ -72,18 +71,6 @@ class _StatsScreenState extends State<StatsScreen> {
                 ],
               ),
             ),
-          ),
-          _IconButton(
-            icon: Icons.view_in_ar,
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const RendererScreen()),
-              );
-            },
-            backgroundColor: colors.accent,
-            hasShadow: true,
-            borderColor: colors.border,
           ),
         ],
       ),

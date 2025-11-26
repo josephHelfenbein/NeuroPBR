@@ -17,6 +17,8 @@ class FileSystemItem {
   final IconData? iconShape;
   final List<String> previewImages;
   final List<FileSystemItem> items;
+  final String? tag;
+  final Color? tagColor;
 
   const FileSystemItem({
     required this.id,
@@ -26,7 +28,33 @@ class FileSystemItem {
     this.iconShape,
     this.previewImages = const [],
     this.items = const [],
+    this.tag,
+    this.tagColor,
   });
+
+  FileSystemItem copyWith({
+    String? id,
+    String? name,
+    ItemType? type,
+    Color? mainColor,
+    IconData? iconShape,
+    List<String>? previewImages,
+    List<FileSystemItem>? items,
+    String? tag,
+    Color? tagColor,
+  }) {
+    return FileSystemItem(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      type: type ?? this.type,
+      mainColor: mainColor ?? this.mainColor,
+      iconShape: iconShape ?? this.iconShape,
+      previewImages: previewImages ?? this.previewImages,
+      items: items ?? this.items,
+      tag: tag ?? this.tag,
+      tagColor: tagColor ?? this.tagColor,
+    );
+  }
 }
 
 // --- Mock Data ---
@@ -119,12 +147,7 @@ final List<FileSystemItem> initialFilesystem = [
 ];
 
 // --- Utility Functions ---
-Color getDarkerColor(Color color) {
-  final red = math.max(0, color.red - 40);
-  final green = math.max(0, color.green - 40);
-  final blue = math.max(0, color.blue - 40);
-  return Color.fromARGB(color.alpha, red, green, blue);
-}
+// (None currently)
 
 List<FileSystemItem> getCurrentContent(List<String> pathIds) {
   List<FileSystemItem> current = initialFilesystem;
@@ -150,13 +173,10 @@ class TagsScreen extends StatefulWidget {
 
 class _TagsScreenState extends State<TagsScreen> {
   List<String> path = [];
-
-  // Local view mode state (not persisted) - null means use preference
-  String? _localViewModeOverride;
-  final ScrollController _cardsScrollController = ScrollController();
-
-  // Constants for card dimensions
-  static const double _cardWidth = 288.0;
+  
+  // Flattened list of all materials
+  List<FileSystemItem> _allMaterials = [];
+  String _selectedTag = 'All';
 
   bool get isRoot => path.isEmpty;
   List<FileSystemItem> get currentContent => getCurrentContent(path);
@@ -164,20 +184,25 @@ class _TagsScreenState extends State<TagsScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final prefs = Provider.of<PreferencesProvider>(context, listen: false);
-      final viewMode = _localViewModeOverride ?? prefs.tagsViewMode;
-      // Calculate initial scroll offset to center card at index 0 (Misc)
-      if (_cardsScrollController.hasClients && viewMode == 'cards') {
-        final double initialOffset = 0.0;
-        _cardsScrollController.jumpTo(initialOffset);
+    _flattenMaterials();
+  }
+  
+  void _flattenMaterials() {
+    _allMaterials = [];
+    for (var folder in initialFilesystem) {
+      if (folder.type == ItemType.folder) {
+        for (var item in folder.items) {
+          _allMaterials.add(item.copyWith(
+            tag: folder.name,
+            tagColor: folder.mainColor,
+          ));
+        }
       }
-    });
+    }
   }
 
   @override
   void dispose() {
-    _cardsScrollController.dispose();
     super.dispose();
   }
 
@@ -188,6 +213,10 @@ class _TagsScreenState extends State<TagsScreen> {
       });
     } else {
       debugPrint('Opening file: ${item.name}');
+      Navigator.push(
+        context,
+        MaterialPageRoute(builder: (context) => const RendererScreen()),
+      );
     }
   }
 
@@ -199,60 +228,32 @@ class _TagsScreenState extends State<TagsScreen> {
     }
   }
 
-  void toggleViewMode() {
-    final prefs = Provider.of<PreferencesProvider>(context, listen: false);
-    final currentMode = _localViewModeOverride ?? prefs.tagsViewMode;
-    setState(() {
-      _localViewModeOverride = currentMode == 'cards' ? 'list' : 'cards';
-    });
-  }
-
   @override
   Widget build(BuildContext context) {
     final themeProvider = Provider.of<ThemeProvider>(context);
-    final prefs = Provider.of<PreferencesProvider>(context);
-
     final colors = themeProvider.colors;
-
-    // Use local override if set, otherwise use preference (this allows settings changes to affect tags screen)
-    final isCards = (_localViewModeOverride ?? prefs.tagsViewMode) == 'cards';
 
     return Scaffold(
       backgroundColor: colors.background,
       body: SafeArea(
         child: Column(
           children: [
-            // Pass local toggle to header
-            _buildHeader(colors, isCards),
-            // Pass the boolean to body
-            Expanded(child: _buildBody(colors, isCards)),
+            _buildHeader(colors),
+            Expanded(child: _buildBody(colors)),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildHeader(dynamic colors, bool isCards){
-    final showToggle = isRoot;
-
+  Widget _buildHeader(dynamic colors){
     return Container(
       padding: const EdgeInsets.all(20),
       color: Colors.transparent,
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          if (showToggle)
-            _IconButton(
-              icon: isCards
-                  ? Icons.format_list_bulleted
-                  : Icons.grid_view_rounded,
-              onTap: toggleViewMode,
-              backgroundColor: colors.surface,
-              hasBorder: true,
-              borderColor: colors.border,
-            )
-          else
-            const SizedBox(width: 44),
+          const SizedBox(width: 44),
           GestureDetector(
             onTap: () {
               Navigator.push(
@@ -285,24 +286,12 @@ class _TagsScreenState extends State<TagsScreen> {
               ),
             ),
           ),
-          _IconButton(
-            icon: Icons.view_in_ar,
-            onTap: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (context) => const RendererScreen()),
-              );
-            },
-            backgroundColor: colors.accent,
-            hasShadow: true,
-            borderColor: colors.border,
-          ),
         ],
       ),
     );
   }
 
-  Widget _buildBody(dynamic colors, bool isCards) {
+  Widget _buildBody(dynamic colors) {
     if (!isRoot) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -361,83 +350,148 @@ class _TagsScreenState extends State<TagsScreen> {
       );
     }
 
+    // Get unique tags from initialFilesystem
+    final tags = ['All', ...initialFilesystem.where((e) => e.type == ItemType.folder).map((e) => e.name)];
+    
+    // Filter materials
+    final filteredMaterials = _selectedTag == 'All' 
+        ? _allMaterials 
+        : _allMaterials.where((m) => m.tag == _selectedTag).toList();
+
     return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(height: 8),
-        Text(
-          isCards ? 'RECENT STACKS' : 'TAG LIBRARY',
-          style: TextStyle(
-            color: colors.textSecondary,
-            fontSize: 11,
-            fontWeight: FontWeight.bold,
-            letterSpacing: 3.0,
+        // Filter Bar
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          child: Row(
+            children: tags.map((tag) {
+              final isSelected = _selectedTag == tag;
+              return Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: GestureDetector(
+                  onTap: () => setState(() => _selectedTag = tag),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isSelected ? Colors.white : Colors.white.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Text(
+                      tag,
+                      style: TextStyle(
+                        color: isSelected ? Colors.black : Colors.white,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
           ),
         ),
-        const SizedBox(height: 16),
+
+        // List View
         Expanded(
-          child: isCards ? _buildCardsView() : _buildListView(),
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            itemCount: filteredMaterials.length,
+            itemBuilder: (context, index) {
+              final item = filteredMaterials[index];
+              return _buildMaterialListItem(item, colors);
+            },
+          ),
         ),
       ],
     );
   }
 
-  Widget _buildCardsView() {
-    return Center(
-      child: SizedBox(
-        height: 400,
-        child: ListView.builder(
-          controller: _cardsScrollController,
-          scrollDirection: Axis.horizontal,
-          padding: EdgeInsets.symmetric(horizontal: (_cardWidth / 2) - 144),
-          clipBehavior: Clip.none,
-          cacheExtent: 3000,
-          physics: const BouncingScrollPhysics(),
-          itemCount: initialFilesystem.length,
-          itemBuilder: (context, index) {
-            return ProjectCard(
-              item: initialFilesystem[index],
-              onOpen: handleOpen,
-              index: index,
-            );
-          },
+  Widget _buildMaterialListItem(FileSystemItem item, dynamic colors) {
+    return InkWell(
+      onTap: () => handleOpen(item),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: colors.surface.withOpacity(0.5),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: colors.border.withOpacity(0.3),
+          ),
+        ),
+        child: Row(
+          children: [
+            // Icon or Preview
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: Colors.grey[800],
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(Icons.texture, color: Colors.white54),
+            ),
+            const SizedBox(width: 16),
+            
+            // Name and Tag
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item.name,
+                    style: TextStyle(
+                      color: colors.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  // Tag Label
+                  if (item.tag != null)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: item.tagColor?.withOpacity(0.2) ?? Colors.grey.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: item.tagColor ?? Colors.grey,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            item.tag!,
+                            style: TextStyle(
+                              color: item.tagColor ?? Colors.grey,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            
+            // Action Button
+            IconButton(
+              icon: Icon(Icons.more_vert, color: colors.textSecondary),
+              onPressed: () {},
+            ),
+          ],
         ),
       ),
-    );
-  }
-
-  Widget _buildListView() {
-    final colors = Provider.of<ThemeProvider>(context, listen: false).colors;
-
-    return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
-      children: [
-        ...initialFilesystem.map<Widget>(
-              (FileSystemItem item) => TagListViewItem(
-            item: item,
-            onOpen: handleOpen,
-          ),
-        ),
-        const SizedBox(height: 32),
-        Text(
-          'Material Library',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontFamily: 'Serif',
-            fontSize: 24,
-            color: colors.textPrimary,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 32),
-          child: Text(
-            'Organize your PBR assets by physical properties.',
-            textAlign: TextAlign.center,
-            style: TextStyle(color: colors.textSecondary, fontSize: 14),
-          ),
-        ),
-        const SizedBox(height: 80),
-      ],
     );
   }
 }
@@ -535,248 +589,6 @@ class FileSystemItemWidget extends StatelessWidget {
                 ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class ProjectCard extends StatelessWidget {
-  final FileSystemItem item;
-  final Function(FileSystemItem) onOpen;
-  final int index;
-
-  const ProjectCard({
-    super.key,
-    required this.item,
-    required this.onOpen,
-    required this.index,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final mainColor = item.mainColor ?? Colors.grey;
-    final darkerColor = getDarkerColor(mainColor);
-    final darkestColor = getDarkerColor(darkerColor);
-
-    return GestureDetector(
-      onTap: () => onOpen(item),
-      child: Container(
-        width: _TagsScreenState._cardWidth,
-        height: 360,
-        margin: const EdgeInsets.symmetric(horizontal: 8),
-        child: Stack(
-          clipBehavior: Clip.none,
-          alignment: Alignment.center,
-          children: [
-            // Back card 2 - furthest back
-            Positioned(
-              top: -20,
-              left: 0,
-              right: 0,
-              child: Container(
-                width: 256,
-                height: 320,
-                decoration: BoxDecoration(
-                  color: item.previewImages.length > 1
-                      ? Colors.transparent
-                      : darkestColor,
-                  borderRadius: BorderRadius.circular(20),
-                  image: item.previewImages.length > 1
-                      ? DecorationImage(
-                    image: NetworkImage(item.previewImages[1]),
-                    fit: BoxFit.cover,
-                  )
-                      : null,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.4),
-                      blurRadius: 15,
-                      spreadRadius: 2,
-                    ),
-                  ],
-                ),
-                child: item.previewImages.length > 1
-                    ? Container(
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.4),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                )
-                    : null,
-              ),
-            ),
-
-            // Back card 1 - middle layer
-            Positioned(
-              top: -10,
-              left: 0,
-              right: 0,
-              child: Container(
-                width: 256,
-                height: 320,
-                decoration: BoxDecoration(
-                  color: item.previewImages.isNotEmpty
-                      ? Colors.transparent
-                      : darkerColor,
-                  borderRadius: BorderRadius.circular(20),
-                  image: item.previewImages.isNotEmpty
-                      ? DecorationImage(
-                    image: NetworkImage(item.previewImages[0]),
-                    fit: BoxFit.cover,
-                  )
-                      : null,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.4),
-                      blurRadius: 15,
-                      spreadRadius: 2,
-                    ),
-                  ],
-                ),
-                child: item.previewImages.isNotEmpty
-                    ? Container(
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.4),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                )
-                    : null,
-              ),
-            ),
-
-            // Front card - main card with content
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: Container(
-                width: 256,
-                height: 320,
-                padding: const EdgeInsets.all(24),
-                decoration: BoxDecoration(
-                  color: mainColor,
-                  borderRadius: BorderRadius.circular(20),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.9),
-                      blurRadius: 50,
-                      offset: const Offset(0, 25),
-                    ),
-                  ],
-                ),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      item.name,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 32,
-                        fontWeight: FontWeight.w900,
-                        height: 1.1,
-                        shadows: [
-                          Shadow(
-                            color: Colors.black38,
-                            blurRadius: 4,
-                            offset: Offset(0, 2),
-                          )
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      '${item.items.length} renders',
-                      style: TextStyle(
-                        color: Colors.white.withOpacity(0.8),
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.2),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: const Text(
-                        'View',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// --- Tag List View Item Widget ---
-class TagListViewItem extends StatelessWidget {
-  final FileSystemItem item;
-  final Function(FileSystemItem) onOpen;
-
-  const TagListViewItem({super.key, required this.item, required this.onOpen});
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Provider.of<ThemeProvider>(context).colors;
-    final color = item.mainColor ?? colors.textPrimary;
-    return GestureDetector(
-      onTap: () => onOpen(item),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: colors.surface.withOpacity(0.5),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: colors.border.withOpacity(0.3)),
-        ),
-        child: Row(
-          children: [
-            Container(
-              width: 40,
-              height: 40,
-              alignment: Alignment.center,
-              child: Icon(
-                item.iconShape ?? Icons.circle,
-                size: 32,
-                color: color,
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Text(
-                item.name,
-                style: TextStyle(
-                  color: colors.textPrimary,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.5,
-                ),
-              ),
-            ),
-            Text(
-              '${item.items.length}',
-              style: TextStyle(
-                color: color,
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            const SizedBox(width: 8),
-          ],
         ),
       ),
     );
