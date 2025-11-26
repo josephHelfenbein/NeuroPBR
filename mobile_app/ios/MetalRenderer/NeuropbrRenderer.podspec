@@ -6,7 +6,7 @@ Pod::Spec.new do |s|
 A custom Metal renderer plugin for Flutter, handling PBR rendering, environment maps, and material previews.
                        DESC
   s.homepage         = 'https://josephhelfenbein.com'
-  s.license          = { :type => 'MIT', :file => 'LICENSE' }
+  s.license          = { :type => 'Apache License, Version 2.0', :file => 'LICENSE' }
   s.author           = { 'Joseph Helfenbein' => 'josephhelfenbein@gmail.com' }
   s.source           = { :path => '.' }
   s.source_files = '**/*.{h,m,mm,cpp,hpp,metal}'

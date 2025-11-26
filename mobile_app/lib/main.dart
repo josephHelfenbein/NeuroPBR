@@ -1,6 +1,7 @@
 // lib/main.dart
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:neuro_pbr/screens/main_tab_screen.dart';
 import 'package:neuro_pbr/screens/animated_splash_screen.dart';
 import 'package:neuro_pbr/providers/preferences_provider.dart';
@@ -9,6 +10,10 @@ import 'screens/carousel_screen.dart';
 import 'theme/theme_provider.dart';
 
 void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+  ]);
   runApp(
     MultiProvider(
       providers: [
