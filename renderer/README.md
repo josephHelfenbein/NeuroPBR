@@ -10,13 +10,20 @@ C++/CUDA renderer for generating synthetic training data using image-based light
 
 The renderer is built using **C++17** and **CUDA**, implementing a standard PBR pipeline optimized for high-throughput data generation.
 
-### Multithreaded Pipeline
-To maximize GPU utilization and minimize I/O bottlenecks, the renderer uses a 3-stage multithreaded pipeline connected by thread-safe queues:
-1.  **Loader Thread:** Reads material textures (Albedo, Normal, Roughness, Metallic) from disk and prepares render requests.
-2.  **Render Thread:** Consumes requests, uploads data to the GPU, executes the CUDA rendering kernels, and downloads the results.
-3.  **Writer Thread:** Saves the rendered images to disk as PNGs.
+### Multithreaded Pipeline & GPU Batching
+To maximize GPU utilization and minimize I/O bottlenecks, the renderer uses a 3-stage multithreaded pipeline connected by thread-safe queues. The depth of this pipeline (the "batch size") is dynamically calculated at runtime based on available resources.
 
-The pipeline automatically adjusts its queue size based on available system RAM to prevent out-of-memory errors while maintaining high throughput.
+1.  **Loader Thread:** Reads material textures (Albedo, Normal, Roughness, Metallic) from disk, packs them, and uploads them directly into pre-allocated GPU memory slots.
+2.  **Render Thread:** Consumes requests, executes the CUDA rendering kernels on the pre-loaded data, and downloads the results.
+3.  **Writer Thread:** Saves the rendered images to disk as PNGs and recycles the GPU memory slots for new requests.
+
+### Dynamic Resource Management
+The renderer automatically detects available **System RAM** and **GPU VRAM** to determine the optimal batch size:
+-   **CPU Batch Limit:** Calculated to ensure enough RAM for loading textures and buffering output frames.
+-   **GPU Batch Limit:** Calculated to ensure all in-flight materials fit within VRAM (approx. 224MB per slot for 2K textures).
+-   **Pre-allocation:** The renderer pre-allocates all necessary GPU buffers at startup based on the determined batch size, eliminating runtime allocation overhead and fragmentation.
+
+This ensures the renderer runs at maximum throughput on high-end systems while remaining stable on hardware with limited memory.
 
 ### Shading Model
 It uses the **Cook-Torrance** microfacet specular shading model, which is the industry standard for PBR:

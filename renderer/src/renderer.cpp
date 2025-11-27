@@ -102,43 +102,15 @@ void cudaCheck(cudaError_t err, const char* expr, const char* file, int line) {
 }
 
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
-                 const float* albedo, const float* normal,
-                 const float* roughness, const float* metallic,
+                 const float4* dAlbedo, const float4* dNormal,
+                 const float* dRoughness, const float* dMetallic,
+                 float4* dFrame,
                  int width, int height, std::vector<float4>& frameRGBA,
                  bool enableShadows,
                  bool enableCameraArtifacts,
                  unsigned long long artifactSeed) {
     size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     size_t frameBytes = pixelCount * sizeof(float4);
-
-    auto packRGB = [pixelCount](const float* src, std::vector<float4>& dst) {
-        for (size_t i = 0; i < pixelCount; ++i) {
-            size_t base = i * 3;
-            dst[i] = make_float4(src[base + 0], src[base + 1], src[base + 2], 0.0f);
-        }
-    };
-
-    std::vector<float4> packedAlbedo(pixelCount);
-    std::vector<float4> packedNormal(pixelCount);
-    packRGB(albedo, packedAlbedo);
-    packRGB(normal, packedNormal);
-
-    float4* dAlbedo = nullptr;
-    float4* dNormal = nullptr;
-    float* dRoughness = nullptr;
-    float* dMetallic = nullptr;
-    float4* dFrame = nullptr;
-
-    CUDA_CHECK(cudaMalloc(&dAlbedo, pixelCount * sizeof(float4)));
-    CUDA_CHECK(cudaMalloc(&dNormal, pixelCount * sizeof(float4)));
-    CUDA_CHECK(cudaMalloc(&dRoughness, pixelCount * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&dMetallic, pixelCount * sizeof(float)));
-    CUDA_CHECK(cudaMalloc(&dFrame, frameBytes));
-
-    CUDA_CHECK(cudaMemcpy(dAlbedo, packedAlbedo.data(), pixelCount * sizeof(float4), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dNormal, packedNormal.data(), pixelCount * sizeof(float4), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dRoughness, roughness, pixelCount * sizeof(float), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(dMetallic, metallic, pixelCount * sizeof(float), cudaMemcpyHostToDevice));
 
     int minShadeGrid = 0;
     int optimalShadeBlockSize = 0;
@@ -243,12 +215,6 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
 
     frameRGBA.resize(pixelCount);
     CUDA_CHECK(cudaMemcpy(frameRGBA.data(), dFrame, frameBytes, cudaMemcpyDeviceToHost));
-
-    cudaFree(dFrame);
-    cudaFree(dMetallic);
-    cudaFree(dRoughness);
-    cudaFree(dNormal);
-    cudaFree(dAlbedo);
 }
 HDRImage loadHDRImage(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);

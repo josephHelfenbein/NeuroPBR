@@ -166,8 +166,9 @@ BRDFLookupTable createBRDFLUT(unsigned size);
 void loadBRDFLUT(BRDFLookupTable& lut);
 
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
-                 const float* albedo, const float* normal,
-                 const float* roughness, const float* metallic,
+                 const float4* dAlbedo, const float4* dNormal,
+                 const float* dRoughness, const float* dMetallic,
+                 float4* dFrame,
                  int width, int height, std::vector<float4>& frameRGBA,
                  bool enableShadows = false,
                  bool enableCameraArtifacts = false,

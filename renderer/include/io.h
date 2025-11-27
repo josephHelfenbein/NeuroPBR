@@ -2,6 +2,8 @@
 
 #include <filesystem>
 #include <vector>
+#include <map>
+#include <string>
 #include <cuda_runtime.h>
 
 struct FloatImage {
@@ -18,3 +20,7 @@ void writePNGImage(const std::filesystem::path& filePath, const float4* frameDat
 void appendRenderMetadata(const std::filesystem::path& metadataPath,
                           const std::string& renderFilename,
                           const std::string& materialName);
+
+void loadMetadata(const std::filesystem::path& metadataPath, std::map<std::string, std::string>& entries);
+void saveMetadata(const std::filesystem::path& metadataPath, const std::map<std::string, std::string>& entries);
+

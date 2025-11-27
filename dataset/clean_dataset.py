@@ -165,7 +165,7 @@ def convert_to_png(src: Path, dst: Path, map_type: str, verbose: bool, resize: O
     Returns True on success, False if conversion could not be performed.
     """
     if Image is None:
-        debug("Pillow not available; cannot convert to PNG.", verbose)
+        print("WARNING: Pillow not available; cannot convert to PNG. Install it with 'pip install pillow'.")
         return False
     try:
         with Image.open(src) as im:
@@ -190,7 +190,7 @@ def convert_to_png(src: Path, dst: Path, map_type: str, verbose: bool, resize: O
             im.save(dst, format="PNG", optimize=True)
         return True
     except Exception as e:  # pragma: no cover - best-effort conversion
-        debug(f"PNG conversion failed for {src}: {e}", verbose)
+        print(f"ERROR: PNG conversion failed for {src}: {e}")
         return False
 
 
