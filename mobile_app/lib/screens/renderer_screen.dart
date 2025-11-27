@@ -81,7 +81,7 @@ class _RendererScreenState extends State<RendererScreen> {
       // 3. Setup Initial Lighting/Preview
       await _renderer.setLighting(const NeuropbrLighting(
         exposure: 1.0,
-        intensity: 1.0,
+        intensity: 0.1,
         rotation: 0.0,
       ));
 
@@ -89,7 +89,7 @@ class _RendererScreenState extends State<RendererScreen> {
         tint: const [1.0, 1.0, 1.0],
         roughnessMultiplier: 1.0,
         metallicMultiplier: 1.0,
-        toneMapping: NeuropbrToneMapping.aces,
+        toneMapping: NeuropbrToneMapping.filmic,
         modelType: _currentModel,
         zoom: 1.0,
       ));
@@ -337,6 +337,7 @@ class _RendererScreenState extends State<RendererScreen> {
     
     await _renderer.setEnvironment(NeuropbrEnvironment(
       environmentPath: path,
+      faceSize: 2048,
     ));
     
     if (_isInitialized) {

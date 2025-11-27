@@ -88,7 +88,7 @@ float3x3 computeTBN(float3 N, float3 p, float2 uv) {
 }
 
 float3 toneMap(float3 color, constant FrameUniforms &frame) {
-    float exposure = exp2(frame.toneMapping.y);
+    float exposure = exp2(frame.resolutionExposure.z);
     color *= exposure;
     if (frame.toneMapping.x < 0.5) {
         // ACES approximation
@@ -103,6 +103,12 @@ float3 toneMap(float3 color, constant FrameUniforms &frame) {
         color = (color * (6.2 * color + 0.5)) / (color * (6.2 * color + 1.7) + 0.06);
     }
     return pow(max(color, float3(0.0)), float3(1.0 / 2.2));
+}
+
+float3 rotateEnv(float3 v, float angle) {
+    float s = sin(angle);
+    float c = cos(angle);
+    return float3(c * v.x + s * v.z, v.y, -s * v.x + c * v.z);
 }
 
 fragment float4 background_fragment(
@@ -121,7 +127,10 @@ fragment float4 background_fragment(
     float3 rayDirCam = normalize(float3(ndc.x * aspect * tanHalfFov, ndc.y * tanHalfFov, -1.0));
     float3 rayDir = normalize((frame.cameraToWorld * float4(rayDirCam, 0.0)).xyz);
     
-    float3 color = envMap.sample(linearSampler, rayDir).rgb * frame.iblParams.x;
+    // Apply environment rotation
+    float3 envDir = rotateEnv(rayDir, frame.iblParams.y);
+    
+    float3 color = envMap.sample(linearSampler, envDir).rgb * frame.iblParams.x;
     color = toneMap(color, frame);
     return float4(color, 1.0);
 }
@@ -163,12 +172,16 @@ fragment float4 pbr_fragment(
 
     float3 F0 = mix(float3(0.04), albedo, metallic);
 
-    float3 irradiance = irradianceMap.sample(clampSampler, shadingN).rgb;
+    // Apply environment rotation to lookup vectors
+    float3 rotN = rotateEnv(shadingN, frame.iblParams.y);
+    float3 rotR = rotateEnv(R, frame.iblParams.y);
+
+    float3 irradiance = irradianceMap.sample(clampSampler, rotN).rgb;
     float3 diffuse = irradiance * albedo;
 
     // Map roughness to valid mip levels (0 to count-1) to avoid out-of-bounds sampling
     float lod = roughness * max(frame.iblParams.z - 1.0, 0.0);
-    float3 prefiltered = prefilteredMap.sample(clampSampler, R, level(lod)).rgb;
+    float3 prefiltered = prefilteredMap.sample(clampSampler, rotR, level(lod)).rgb;
     float2 brdf = brdfLUT.sample(clampSampler, float2(max(dot(shadingN, V), 0.0), roughness)).rg;
     float3 specular = prefiltered * (F0 * brdf.x + brdf.y);
 
