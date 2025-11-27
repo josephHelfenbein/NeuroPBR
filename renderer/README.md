@@ -10,6 +10,14 @@ C++/CUDA renderer for generating synthetic training data using image-based light
 
 The renderer is built using **C++17** and **CUDA**, implementing a standard PBR pipeline optimized for high-throughput data generation.
 
+### Multithreaded Pipeline
+To maximize GPU utilization and minimize I/O bottlenecks, the renderer uses a 3-stage multithreaded pipeline connected by thread-safe queues:
+1.  **Loader Thread:** Reads material textures (Albedo, Normal, Roughness, Metallic) from disk and prepares render requests.
+2.  **Render Thread:** Consumes requests, uploads data to the GPU, executes the CUDA rendering kernels, and downloads the results.
+3.  **Writer Thread:** Saves the rendered images to disk as PNGs.
+
+The pipeline automatically adjusts its queue size based on available system RAM to prevent out-of-memory errors while maintaining high throughput.
+
 ### Shading Model
 It uses the **Cook-Torrance** microfacet specular shading model, which is the industry standard for PBR:
 - **Distribution (D):** Trowbridge-Reitz (GGX)
