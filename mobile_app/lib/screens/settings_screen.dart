@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'scan_screen_new.dart';
+import 'scan_screen.dart';
 import '../theme/theme_provider.dart';
 import '../providers/preferences_provider.dart';
 

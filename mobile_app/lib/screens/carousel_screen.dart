@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'start_screen.dart';
-import 'scan_screen_new.dart';
+import 'scan_screen.dart';
 import 'tags_screen.dart';
 import 'stats_screen.dart';
 import 'settings_screen.dart';
