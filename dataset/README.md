@@ -15,7 +15,8 @@ pip install datasets pillow
 python dataset/export_matsynth.py \
   --dst dataset/matsynth_raw \
   --split train \
-  --limit 500
+  --limit 500 \
+  --start 0
 ```
 
 Script highlights:
@@ -24,6 +25,7 @@ Script highlights:
 - Exports the core channels (`basecolor`, `normal`, `roughness`, `metallic`) plus auxiliary maps when available.
 - Writes per-material folders (`mat_00000`, `mat_00001`, …) so they can be passed directly into the cleaner or renderer pipelines.
 - Adds the optional MatSynth metadata JSON per material when available.
+- Supports resuming via `--start` flag (e.g., `--start 500` to skip the first 500 materials).
 
 ## Exporting MatSynth to Google Cloud Storage
 
@@ -31,15 +33,20 @@ For cloud-based workflows, `dataset/export_matsynth_gcs.py` streams the MatSynth
 
 ```bash
 pip install google-cloud-storage datasets pillow
-python dataset/export_matsynth_gcs.py
+python dataset/export_matsynth_gcs.py \
+  --bucket main-testing \
+  --prefix raw \
+  --limit 4000 \
+  --start 0
 ```
 
 The script defaults to:
 - Bucket: `main-testing`
 - Prefix: `raw`
 - Limit: 4000 materials
+- Start Index: 0
 
-You can modify the `main()` function arguments in the script to change these defaults. It uploads the following maps as PNGs:
+You can modify these defaults using command line flags. It uploads the following maps as PNGs:
 - `basecolor`, `normal`, `roughness`, `metallic`
 - `diffuse`, `specular`, `displacement`, `opacity`, `blend_mask`
 
