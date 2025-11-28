@@ -25,6 +25,24 @@ Script highlights:
 - Writes per-material folders (`mat_00000`, `mat_00001`, …) so they can be passed directly into the cleaner or renderer pipelines.
 - Adds the optional MatSynth metadata JSON per material when available.
 
+## Exporting MatSynth to Google Cloud Storage
+
+For cloud-based workflows, `dataset/export_matsynth_gcs.py` streams the MatSynth dataset and uploads it directly to a Google Cloud Storage bucket.
+
+```bash
+pip install google-cloud-storage datasets pillow
+python dataset/export_matsynth_gcs.py
+```
+
+The script defaults to:
+- Bucket: `main-testing`
+- Prefix: `raw`
+- Limit: 4000 materials
+
+You can modify the `main()` function arguments in the script to change these defaults. It uploads the following maps as PNGs:
+- `basecolor`, `normal`, `roughness`, `metallic`
+- `diffuse`, `specular`, `displacement`, `opacity`, `blend_mask`
+
 ## Cleaning and Normalizing PBR Texture Sets
 
 Use the Python script `dataset/clean_dataset.py` to scan a source directory recursively, detect common PBR map files, and create a cleaned dataset containing only the supported maps:
