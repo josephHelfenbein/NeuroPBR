@@ -1,4 +1,3 @@
-# export_matsynth_direct.py
 from datasets import load_dataset
 from PIL import Image
 from google.cloud import storage
@@ -22,7 +21,6 @@ def main(bucket_name="main-testing", prefix="raw", limit=4000):
         # Upload images directly to GCS
         for key in image_keys:
             if ex.get(key) is not None:
-                # Convert to bytes
                 buf = io.BytesIO()
                 img = ex[key] if isinstance(ex[key], Image.Image) else Image.fromarray(ex[key])
                 img.save(buf, format='PNG')
