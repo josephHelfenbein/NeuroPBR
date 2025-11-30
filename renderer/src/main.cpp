@@ -153,13 +153,20 @@ size_t getFreeVideoMemory() {
     return free;
 }
 
+struct RetryInfo {
+    std::string sampleName;
+    std::string textureName;
+    bool isDirty;
+};
+
 void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
                   ThreadSafeQueue<GPUMemorySlot>& freeSlots,
                   const std::filesystem::path& texturesDir,
                   const std::vector<std::string>& textureNames,
                   int maxRenders,
                   size_t numEnvironments,
-                  size_t startIndex) {
+                  size_t startIndex,
+                  const std::vector<RetryInfo>& retryRequests) {
     try {
     CUDA_CHECK(cudaSetDevice(0));
     std::mt19937_64 rng(std::chrono::high_resolution_clock::now().time_since_epoch().count());
@@ -171,6 +178,91 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
     std::uniform_int_distribution<size_t> textureIndexDist(0, textureNames.size() - 1);
     std::uniform_int_distribution<size_t> environmentIndexDist(0, numEnvironments - 1);
     std::uniform_int_distribution<unsigned long long> seedDist;
+
+    for (const auto& retry : retryRequests) {
+        try {
+            GPUMemorySlot slot;
+            if (!freeSlots.pop(slot)) break;
+
+            bool texFound = false;
+            for (const auto& t : textureNames) {
+                if (t == retry.textureName) {
+                    texFound = true;
+                    break;
+                }
+            }
+            if (!texFound) {
+                std::cerr << "Warning: Texture " << retry.textureName << " for retry " << retry.sampleName << " not found in texture list. Attempting load anyway..." << std::endl;
+            }
+
+            FloatImage dAlbedo = loadPNGImage(texturesDir / retry.textureName / "albedo.png", 3, true);
+            FloatImage dNormal = loadPNGImage(texturesDir / retry.textureName / "normal.png", 3, true);
+            FloatImage dRoughness = loadPNGImage(texturesDir / retry.textureName / "roughness.png", 1, true);
+            FloatImage dMetallic = loadPNGImage(texturesDir / retry.textureName / "metallic.png", 1, true);
+
+            if (dAlbedo.data.empty() || dNormal.data.empty() || dRoughness.data.empty() || dMetallic.data.empty()) {
+                std::cerr << "Failed to load all required texture maps for retry " << retry.sampleName << ". Skipping..." << std::endl;
+                freeSlots.push(slot);
+                continue;
+            }
+
+            int W = dAlbedo.width;
+            int H = dAlbedo.height;
+            size_t pixelCount = static_cast<size_t>(W) * static_cast<size_t>(H);
+
+            if (pixelCount > 2048 * 2048) {
+                std::cerr << "Texture " << retry.textureName << " is too large. Skipping retry..." << std::endl;
+                freeSlots.push(slot);
+                continue;
+            }
+
+            std::vector<float4> packedAlbedo(pixelCount);
+            std::vector<float4> packedNormal(pixelCount);
+            
+            for (size_t i = 0; i < pixelCount; ++i) {
+                packedAlbedo[i] = make_float4(dAlbedo.data[i * 3 + 0], dAlbedo.data[i * 3 + 1], dAlbedo.data[i * 3 + 2], 0.0f);
+                packedNormal[i] = make_float4(dNormal.data[i * 3 + 0], dNormal.data[i * 3 + 1], dNormal.data[i * 3 + 2], 0.0f);
+            }
+
+            CUDA_CHECK(cudaMemcpy(slot.dAlbedo, packedAlbedo.data(), pixelCount * sizeof(float4), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(slot.dNormal, packedNormal.data(), pixelCount * sizeof(float4), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(slot.dRoughness, dRoughness.data.data(), pixelCount * sizeof(float), cudaMemcpyHostToDevice));
+            CUDA_CHECK(cudaMemcpy(slot.dMetallic, dMetallic.data.data(), pixelCount * sizeof(float), cudaMemcpyHostToDevice));
+
+            std::filesystem::path targetDir;
+            bool enableShadows = false;
+            bool enableCameraArtifacts = false;
+            unsigned long long artifactSeed = 0;
+
+            if (retry.isDirty) {
+                targetDir = std::filesystem::path("output") / "dirty" / retry.sampleName;
+                enableShadows = uni(rng) < P_SHADOW;
+                enableCameraArtifacts = uni(rng) < P_SMUDGE;
+                artifactSeed = seedDist(rng);
+            } else {
+                targetDir = std::filesystem::path("output") / "clean" / retry.sampleName;
+            }
+            std::filesystem::create_directories(targetDir);
+
+            RenderRequest req{
+                environmentIndexDist(rng),
+                slot,
+                targetDir,
+                retry.textureName,
+                retry.isDirty,
+                enableShadows,
+                enableCameraArtifacts,
+                artifactSeed,
+                W, H
+            };
+
+            queue.push(std::move(req));
+            std::cout << "Queued retry for " << retry.sampleName << std::endl;
+
+        } catch (const std::exception& e) {
+            std::cerr << "Retry Warning: " << e.what() << ". Skipping..." << std::endl;
+        }
+    }
 
     int frameIndex = 0;
     while (frameIndex < maxRenders) {
@@ -344,7 +436,7 @@ void writerThread(ThreadSafeQueue<RenderResult>& queue, ThreadSafeQueue<GPUMemor
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--start-index N]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--continuing]" << std::endl;
         return 1;
     }
     try {
@@ -389,20 +481,67 @@ int main(int argc, char** argv) {
         
         const int maxRenders = std::stoi(argv[2]);
         size_t startIndex = 0;
+        bool continuing = false;
 
         for (int i = 3; i < argc; ++i) {
             std::string arg = argv[i];
-            if ((arg == "--start-index" || arg == "-s") && i + 1 < argc) {
-                long long parsed = std::stoll(argv[++i]);
-                if (parsed < 0) {
-                    throw std::invalid_argument("start index must be non-negative");
-                }
-                startIndex = static_cast<size_t>(parsed);
+            if (arg == "--continuing" || arg == "-c") {
+                continuing = true;
             } else {
                 std::cerr << "Unknown argument: " << arg << std::endl;
-                std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--start-index N]" << std::endl;
+                std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--continuing]" << std::endl;
                 return 1;
             }
+        }
+
+        std::vector<RetryInfo> retryRequests;
+        if (continuing) {
+            std::cout << "Continuing mode enabled. Scanning for incomplete samples..." << std::endl;
+            std::map<std::string, std::string> metadata;
+            std::filesystem::path metadataPath = std::filesystem::path("output") / "render_metadata.json";
+            loadMetadata(metadataPath, metadata);
+
+            size_t maxIndex = 0;
+            
+            auto scanDir = [&](const std::filesystem::path& dir, bool isDirty) {
+                if (!std::filesystem::exists(dir)) return;
+                for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+                    if (entry.is_directory()) {
+                        std::string name = entry.path().filename().string();
+                        if (name.rfind("sample_", 0) == 0) {
+                            // Extract index
+                            try {
+                                size_t idx = std::stoull(name.substr(7));
+                                if (idx > maxIndex) maxIndex = idx;
+
+                                // Check completeness
+                                bool complete = true;
+                                for (int j = 0; j < 3; ++j) {
+                                    if (!std::filesystem::exists(entry.path() / (std::to_string(j) + ".png"))) {
+                                        complete = false;
+                                        break;
+                                    }
+                                }
+
+                                if (!complete) {
+                                    if (metadata.count(name)) {
+                                        retryRequests.push_back({name, metadata[name], isDirty});
+                                    } else {
+                                        std::cerr << "Skipping incomplete sample " << name << " (no metadata found)" << std::endl;
+                                    }
+                                }
+                            } catch (...) {}
+                        }
+                    }
+                }
+            };
+
+            scanDir(std::filesystem::path("output") / "clean", false);
+            scanDir(std::filesystem::path("output") / "dirty", true);
+
+            startIndex = maxIndex + 1;
+            std::cout << "Found " << retryRequests.size() << " incomplete samples to retry." << std::endl;
+            std::cout << "New start index: " << startIndex << std::endl;
         }
         
         const size_t staticCpuReservation = environmentResidentBytes + brdfResidentBytes;
@@ -479,7 +618,7 @@ int main(int argc, char** argv) {
             freeSlots.push(slot);
         }
 
-        std::thread t1(loaderThread, std::ref(loadQueue), std::ref(freeSlots), texturesDir, textureNames, maxRenders, environments.size(), startIndex);
+        std::thread t1(loaderThread, std::ref(loadQueue), std::ref(freeSlots), texturesDir, textureNames, maxRenders, environments.size(), startIndex, retryRequests);
         std::thread t2(renderThread, std::ref(loadQueue), std::ref(writeQueue), std::cref(environments), std::cref(brdfLut));
         std::thread t3(writerThread, std::ref(writeQueue), std::ref(freeSlots));
 

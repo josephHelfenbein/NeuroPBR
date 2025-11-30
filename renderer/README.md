@@ -84,17 +84,17 @@ The binary will be written to `bin/neuropbr_renderer`.
 ### Command-line usage
 
 ```bash
-./bin/neuropbr_renderer <materials_dir> <num_samples> [--start-index N]
+./bin/neuropbr_renderer <materials_dir> <num_samples> [--continuing]
 ```
 
 - `<materials_dir>` – Path to the cleaned material dataset (each material folder must contain `albedo.png`, `normal.png`, `roughness.png`, `metallic.png` and be uniquely named).
 - `<num_samples>` – Number of samples to render; each sample produces three views and writes to `output/clean` or `output/dirty` plus `output/render_metadata.json`.
-- `--start-index` / `-s` – Optional offset applied to the generated sample folders (`sample_<index>`). Use this to append new renders to an existing dataset without overwriting earlier samples. Defaults to `0`.
+- `--continuing` / `-c` – Optional flag. If set, the renderer scans the output directory for the highest existing sample index and starts numbering new samples from there. It also detects any incomplete samples (missing views) and retries them before starting new renders.
 
 Example (from `renderer/`):
 
 ```bash
-./bin/neuropbr_renderer ../dataset/matsynth_clean 2000 --start-index 6000
+./bin/neuropbr_renderer ../dataset/matsynth_clean 2000 --continuing
 ```
 
 Ensure `assets/hdris` contain the required textures before rendering.

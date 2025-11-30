@@ -82,28 +82,21 @@ source .venv/bin/activate
 pip install datasets pillow
 ```
 
-2. **Stream MatSynth via Hugging Face and cache it locally.**
+2. **Stream and clean MatSynth via Hugging Face.**
+
+Use `process_dataset.py` to stream the dataset, clean it in-memory (normalizing names and converting to PNG), and save it locally.
 
 ```bash
-python export_matsynth.py --dst matsynth_raw --split train --limit 500
+python process_dataset.py \
+  --clean \
+  --clean-dir matsynth_clean \
+  --limit 500 \
+  --manifest matsynth_clean/manifest.json
 ```
 
-Adjust `--split`, `--limit`, or `--save-metadata False` to control how much you pull.
+Adjust `--limit` to control how many materials to pull. The script automatically handles map normalization (albedo, normal, roughness, metallic) and format conversion.
 
-3. **Normalize map names and ensure every material has the required channels.**
-
-```bash
-python clean_dataset.py \
-	--src matsynth_raw \
-	--dst matsynth_clean \
-	--require-all \
-	--manifest matsynth_clean/manifest.json
-```
-
-Useful flags:
-- `--keep-ext` preserves original formats instead of converting to PNG.
-
-See `dataset/README.md` for detailed CLI descriptions and troubleshooting tips.
+See `dataset/README.md` for advanced usage (GCS upload, raw export, etc.).
 
 ---
 
@@ -121,10 +114,10 @@ cmake --build build --config Release --parallel
 
 ```bash
 cd renderer
-./bin/neuropbr_renderer ../dataset/matsynth_clean 2000
+./bin/neuropbr_renderer ../dataset/matsynth_clean 2000 --continuing
 ```
 
-Arguments: `<textures_dir> <num_samples>`. The renderer automatically creates `output/clean`, `output/dirty`, and `output/render_metadata.json`, writing three views per sample with randomized lighting and artifacts.
+Arguments: `<textures_dir> <num_samples> [--continuing]`. The renderer automatically creates `output/clean`, `output/dirty`, and `output/render_metadata.json`, writing three views per sample with randomized lighting and artifacts. Use `--continuing` to resume from the last sample index and retry any incomplete renders.
 
 ---
 
