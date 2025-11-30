@@ -118,7 +118,8 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
                   const std::filesystem::path& texturesDir,
                   const std::vector<std::string>& textureNames,
                   int maxRenders,
-                  size_t numEnvironments) {
+                  size_t numEnvironments,
+                  size_t startIndex) {
     try {
     CUDA_CHECK(cudaSetDevice(0));
     std::mt19937_64 rng(std::chrono::high_resolution_clock::now().time_since_epoch().count());
@@ -177,7 +178,7 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
             CUDA_CHECK(cudaMemcpy(slot.dRoughness, dRoughness.data.data(), pixelCount * sizeof(float), cudaMemcpyHostToDevice));
             CUDA_CHECK(cudaMemcpy(slot.dMetallic, dMetallic.data.data(), pixelCount * sizeof(float), cudaMemcpyHostToDevice));
 
-            std::string sampleName = "sample_" + std::to_string(frameIndex);
+            std::string sampleName = "sample_" + std::to_string(startIndex + static_cast<size_t>(frameIndex));
             std::filesystem::path targetDir;
             bool dirtySet = uni(rng) > P_CLEAN;
             bool enableShadows = false;
@@ -302,8 +303,8 @@ void writerThread(ThreadSafeQueue<RenderResult>& queue, ThreadSafeQueue<GPUMemor
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <textures directory>" << std::endl;
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--start-index N]" << std::endl;
         return 1;
     }
     try {
@@ -344,6 +345,22 @@ int main(int argc, char** argv) {
         }
         
         const int maxRenders = std::stoi(argv[2]);
+        size_t startIndex = 0;
+
+        for (int i = 3; i < argc; ++i) {
+            std::string arg = argv[i];
+            if ((arg == "--start-index" || arg == "-s") && i + 1 < argc) {
+                long long parsed = std::stoll(argv[++i]);
+                if (parsed < 0) {
+                    throw std::invalid_argument("start index must be non-negative");
+                }
+                startIndex = static_cast<size_t>(parsed);
+            } else {
+                std::cerr << "Unknown argument: " << arg << std::endl;
+                std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--start-index N]" << std::endl;
+                return 1;
+            }
+        }
         
         size_t totalRam = getSystemMemorySize();
         size_t reservedRam = 8ULL * 1024 * 1024 * 1024; // Reserve 8GB for OS/other
@@ -408,7 +425,7 @@ int main(int argc, char** argv) {
             freeSlots.push(slot);
         }
 
-        std::thread t1(loaderThread, std::ref(loadQueue), std::ref(freeSlots), texturesDir, textureNames, maxRenders, environments.size());
+        std::thread t1(loaderThread, std::ref(loadQueue), std::ref(freeSlots), texturesDir, textureNames, maxRenders, environments.size(), startIndex);
         std::thread t2(renderThread, std::ref(loadQueue), std::ref(writeQueue), std::cref(environments), std::cref(brdfLut));
         std::thread t3(writerThread, std::ref(writeQueue), std::ref(freeSlots));
 
