@@ -184,21 +184,27 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
             GPUMemorySlot slot;
             if (!freeSlots.pop(slot)) break;
 
-            bool texFound = false;
-            for (const auto& t : textureNames) {
-                if (t == retry.textureName) {
-                    texFound = true;
-                    break;
+            std::string currentTextureName = retry.textureName;
+            if (currentTextureName.empty()) {
+                size_t randomTexIndex = textureIndexDist(rng);
+                currentTextureName = textureNames[randomTexIndex];
+            } else {
+                bool texFound = false;
+                for (const auto& t : textureNames) {
+                    if (t == currentTextureName) {
+                        texFound = true;
+                        break;
+                    }
+                }
+                if (!texFound) {
+                    std::cerr << "Warning: Texture " << currentTextureName << " for retry " << retry.sampleName << " not found in texture list. Attempting load anyway..." << std::endl;
                 }
             }
-            if (!texFound) {
-                std::cerr << "Warning: Texture " << retry.textureName << " for retry " << retry.sampleName << " not found in texture list. Attempting load anyway..." << std::endl;
-            }
 
-            FloatImage dAlbedo = loadPNGImage(texturesDir / retry.textureName / "albedo.png", 3, true);
-            FloatImage dNormal = loadPNGImage(texturesDir / retry.textureName / "normal.png", 3, true);
-            FloatImage dRoughness = loadPNGImage(texturesDir / retry.textureName / "roughness.png", 1, true);
-            FloatImage dMetallic = loadPNGImage(texturesDir / retry.textureName / "metallic.png", 1, true);
+            FloatImage dAlbedo = loadPNGImage(texturesDir / currentTextureName / "albedo.png", 3, true);
+            FloatImage dNormal = loadPNGImage(texturesDir / currentTextureName / "normal.png", 3, true);
+            FloatImage dRoughness = loadPNGImage(texturesDir / currentTextureName / "roughness.png", 1, true);
+            FloatImage dMetallic = loadPNGImage(texturesDir / currentTextureName / "metallic.png", 1, true);
 
             if (dAlbedo.data.empty() || dNormal.data.empty() || dRoughness.data.empty() || dMetallic.data.empty()) {
                 std::cerr << "Failed to load all required texture maps for retry " << retry.sampleName << ". Skipping..." << std::endl;
@@ -211,7 +217,7 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
             size_t pixelCount = static_cast<size_t>(W) * static_cast<size_t>(H);
 
             if (pixelCount > 2048 * 2048) {
-                std::cerr << "Texture " << retry.textureName << " is too large. Skipping retry..." << std::endl;
+                std::cerr << "Texture " << currentTextureName << " is too large. Skipping retry..." << std::endl;
                 freeSlots.push(slot);
                 continue;
             }
@@ -248,7 +254,7 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
                 environmentIndexDist(rng),
                 slot,
                 targetDir,
-                retry.textureName,
+                currentTextureName,
                 retry.isDirty,
                 enableShadows,
                 enableCameraArtifacts,
@@ -257,7 +263,7 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
             };
 
             queue.push(std::move(req));
-            std::cout << "Queued retry for " << retry.sampleName << std::endl;
+            std::cout << "Queued retry for " << retry.sampleName << " (" << currentTextureName << ")" << std::endl;
 
         } catch (const std::exception& e) {
             std::cerr << "Retry Warning: " << e.what() << ". Skipping..." << std::endl;
@@ -527,7 +533,8 @@ int main(int argc, char** argv) {
                                     if (metadata.count(name)) {
                                         retryRequests.push_back({name, metadata[name], isDirty});
                                     } else {
-                                        std::cerr << "Skipping incomplete sample " << name << " (no metadata found)" << std::endl;
+                                        std::cout << "Queueing incomplete sample " << name << " for regeneration (no metadata found)" << std::endl;
+                                        retryRequests.push_back({name, "", isDirty});
                                     }
                                 }
                             } catch (...) {}
