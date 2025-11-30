@@ -89,6 +89,46 @@ struct RenderResult {
     GPUMemorySlot gpuSlot;
 };
 
+constexpr size_t kCubemapFaces = 6ULL;
+constexpr size_t kBytesPerMB = 1024ULL * 1024ULL;
+
+size_t cubemapFaceBytes(unsigned size) {
+    if (size == 0) {
+        return 0;
+    }
+    size_t dim = static_cast<size_t>(size);
+    return dim * dim * kCubemapFaces * sizeof(float4);
+}
+
+size_t specularMipBytes(const EnvironmentCubemap& env) {
+    size_t total = 0;
+    for (unsigned level = 0; level < env.mipLevels; ++level) {
+        unsigned faceDim = std::max(1u, env.faceSize >> level);
+        total += cubemapFaceBytes(faceDim);
+    }
+    return total;
+}
+
+size_t estimateEnvironmentResidentBytes(const EnvironmentCubemap& env) {
+    return cubemapFaceBytes(env.faceSize) + specularMipBytes(env) + cubemapFaceBytes(env.irradianceSize);
+}
+
+size_t estimateTotalEnvironmentResidentBytes(const std::vector<EnvironmentCubemap>& envs) {
+    size_t total = 0;
+    for (const auto& env : envs) {
+        total += estimateEnvironmentResidentBytes(env);
+    }
+    return total;
+}
+
+size_t estimateBRDFResidentBytes(const BRDFLookupTable& lut) {
+    if (lut.size == 0) {
+        return 0;
+    }
+    size_t dim = static_cast<size_t>(lut.size);
+    return dim * dim * sizeof(float2);
+}
+
 size_t getSystemMemorySize() {
 #ifdef _WIN32
     MEMORYSTATUSEX status;
@@ -328,8 +368,11 @@ int main(int argc, char** argv) {
         std::cout << "Generated cubemaps: " << environments.size() << std::endl;
         std::cout << "Precomputing BRDF lookup table..." << std::endl;
 
+        const size_t environmentResidentBytes = estimateTotalEnvironmentResidentBytes(environments);
+
         BRDFLookupTable brdfLut = createBRDFLUT(512);
         loadBRDFLUT(brdfLut);
+        const size_t brdfResidentBytes = estimateBRDFResidentBytes(brdfLut);
 
         std::cout << "Precomputation complete. Starting rendering. Press CTRL+C to stop." << std::endl;
 
@@ -362,11 +405,23 @@ int main(int argc, char** argv) {
             }
         }
         
+        const size_t staticCpuReservation = environmentResidentBytes + brdfResidentBytes;
+
         size_t totalRam = getSystemMemorySize();
         size_t reservedRam = 8ULL * 1024 * 1024 * 1024; // Reserve 8GB for OS/other
         if (totalRam < reservedRam) reservedRam = totalRam / 2; // If low RAM, reserve half
 
         size_t availableRam = totalRam - reservedRam;
+        if (staticCpuReservation > 0) {
+            std::cout << "Host reservation for precomputed assets: "
+                      << staticCpuReservation / kBytesPerMB << " MB" << std::endl;
+            if (staticCpuReservation >= availableRam) {
+                std::cerr << "Warning: Precomputed assets consume the dynamic host budget, clamping to minimum batch heuristics." << std::endl;
+                availableRam = 0;
+            } else {
+                availableRam -= staticCpuReservation;
+            }
+        }
         
         // Memory calculation per batch item (Queue entry):
         // 1. Load Queue (RenderRequest):
@@ -383,7 +438,6 @@ int main(int argc, char** argv) {
 
         int cpuBatchSize = (int)(availableRam / memoryPerBatchItemCPU);
         if (cpuBatchSize < 2) cpuBatchSize = 2;
-        if (cpuBatchSize > 64) cpuBatchSize = 64;
 
         // GPU Memory Calculation
         size_t freeVRAM = getFreeVideoMemory();
