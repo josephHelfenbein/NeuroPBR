@@ -63,6 +63,9 @@ python train.py --input-dir ./data/input --output-dir ./data/output --device cud
 
 # Mixed clean/dirty renders (curriculum 1)
 python train.py --input-dir ./data/input --output-dir ./data/output --render-curriculum 1
+
+# Save checkpoints to a custom directory
+python train.py --input-dir ./data/input --output-dir ./data/output --checkpoint-dir ./my_checkpoints
 ```
 
 ### 4. Alternate Presets
@@ -314,6 +317,11 @@ cfg.training.use_tensorboard = True
 cfg.training.log_every_n_steps = 10
 cfg.training.log_images_every_n_epochs = 5
 cfg.training.use_wandb = False
+```
+
+You can override the checkpoint directory at runtime with the CLI flag `--checkpoint-dir`:
+```bash
+python train.py --input-dir ./data/input --output-dir ./data/output --checkpoint-dir ./my_checkpoints
 ```
 
 ---
