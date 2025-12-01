@@ -349,8 +349,12 @@ def apply_torch_compile(model, model_name="model"):
                 # However, max-autotune can be memory hungry. We'll only use it if we have plenty of VRAM (>= 20GB).
                 
                 if "generator" in model_name.lower() and total_memory_gb >= 20:
-                    mode = "max-autotune"
-                    reason = "High-end GPU with >20GB VRAM detected, optimizing for max performance"
+                    if is_hopper:
+                        mode = "default"
+                        reason = "Hopper GPU (H100) detected - using default compile mode to avoid Triton 'PassManager' crashes with max-autotune"
+                    else:
+                        mode = "max-autotune"
+                        reason = "High-end GPU with >20GB VRAM detected, optimizing for max performance"
                 elif "generator" in model_name.lower():
                     mode = "default"
                     reason = "Ampere+ GPU detected, but VRAM < 20GB. Using default compile mode to save memory."
