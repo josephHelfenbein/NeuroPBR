@@ -265,6 +265,12 @@ def parse_args():
         help="Directory to save .pt shard files.",
     )
     parser.add_argument(
+        "--shards-dir",
+        type=str,
+        default=None,
+        help="Alias for --out-dir (Directory to save .pt shard files).",
+    )
+    parser.add_argument(
         "--shard-size",
         type=int,
         default=8,
@@ -278,9 +284,13 @@ if __name__ == "__main__":
     args = parse_args()
     cfg = _load_config(args.config)
     _apply_data_overrides(cfg, args)
+    
+    # Handle alias
+    out_dir = args.shards_dir if args.shards_dir else args.out_dir
+    
     run_inference(
         config=cfg,
         checkpoint_path=args.checkpoint,
-        out_dir=args.out_dir,
+        out_dir=out_dir,
         shard_size=args.shard_size,
     )
