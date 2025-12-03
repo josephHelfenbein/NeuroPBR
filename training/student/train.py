@@ -10,7 +10,8 @@ from contextlib import nullcontext
 from tqdm import tqdm
 
 # Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
+# Insert at the beginning to ensure 'train' resolves to the parent module, not this script
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 import torch.nn as nn
