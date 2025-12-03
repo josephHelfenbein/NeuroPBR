@@ -23,6 +23,7 @@ Example usage from the `training` directory:
 from pathlib import Path
 import argparse
 from tqdm import tqdm
+from contextlib import nullcontext
 
 import torch
 from torch.utils.data import DataLoader
@@ -112,6 +113,7 @@ def run_inference(
     checkpoint_path: str,
     out_dir: str = "teacher_shards",
     shard_size: int = 256,
+    batch_size: int = 4,
 ):
     out_dir_path = Path(out_dir)
     out_dir_path.mkdir(parents=True, exist_ok=True)
@@ -142,6 +144,20 @@ def run_inference(
         
     model.load_state_dict(new_state_dict)
     model.eval()
+    
+    # Optimize model for inference
+    if device.type == "cuda":
+        # Use TF32 on Ampere+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        # Compile model if possible (PyTorch 2.0+)
+        if hasattr(torch, "compile"):
+            print("Compiling model for faster inference...")
+            try:
+                model = torch.compile(model, mode="max-autotune")
+            except Exception as e:
+                print(f"Warning: torch.compile failed ({e}), proceeding without compilation.")
 
     # 2) Build dataset (no train/val split, use all samples once)
     if config.transform.use_imagenet_stats:
@@ -168,10 +184,12 @@ def run_inference(
     # Use DataLoader for parallel loading (significantly speeds up PNG decoding)
     loader = DataLoader(
         ds,
-        batch_size=1,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=8,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2
     )
 
     shard_idx = 0
@@ -181,41 +199,55 @@ def run_inference(
     shard_outputs = {"albedo": [], "roughness": [],
                      "metallic": [], "normal": []}
 
-    print(f"Running teacher over {len(ds)} samples...")
+    print(f"Running teacher over {len(ds)} samples (batch_size={batch_size})...")
+    
+    # Use AMP for faster inference on modern GPUs
+    amp_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" and torch.cuda.is_bf16_supported() else (
+              torch.autocast("cuda", dtype=torch.float16) if device.type == "cuda" else nullcontext())
+
     with torch.no_grad():
-        for i, (inputs_batch, targets_batch) in enumerate(tqdm(loader)):
-            # inputs_batch: (1, 3, 3, H, W)
-            # targets_batch: (1, 4, 3, H, W)
+        for batch_i, (inputs_batch, targets_batch) in enumerate(tqdm(loader)):
+            # inputs_batch: (B, 3, 3, H, W)
+            # targets_batch: (B, 4, 3, H, W)
+            current_batch_size = inputs_batch.shape[0]
             
             # Move to device
-            inputs_device = inputs_batch.to(device)
+            inputs_device = inputs_batch.to(device, non_blocking=True)
 
-            # Run teacher
-            pred = model(inputs_device)
+            # Run teacher with AMP
+            with amp_ctx:
+                pred = model(inputs_device)
             
-            # Store data (move to CPU to save memory)
-            shard_samples.append(i)
-            shard_inputs.append(inputs_batch) 
-            shard_targets.append(targets_batch)
-            
-            for k in shard_outputs:
-                shard_outputs[k].append(pred[k].cpu())
+            # Process each sample in the batch
+            for i in range(current_batch_size):
+                # Calculate global sample index
+                global_idx = batch_i * batch_size + i
+                
+                # Store data (move to CPU to save memory)
+                shard_samples.append(global_idx)
+                
+                # Keep inputs/targets as (1, ...) for concatenation later
+                shard_inputs.append(inputs_batch[i].unsqueeze(0)) 
+                shard_targets.append(targets_batch[i].unsqueeze(0))
+                
+                for k in shard_outputs:
+                    shard_outputs[k].append(pred[k][i].unsqueeze(0).cpu())
 
-            # When shard is full, write to disk
-            if len(shard_samples) == shard_size:
-                save_shard(
-                    out_dir_path, 
-                    shard_idx,
-                    shard_samples, 
-                    shard_inputs,
-                    shard_targets,
-                    shard_outputs
-                )
-                shard_idx += 1
-                shard_samples = []
-                shard_inputs = []
-                shard_targets = []
-                shard_outputs = {k: [] for k in shard_outputs}
+                # When shard is full, write to disk
+                if len(shard_samples) == shard_size:
+                    save_shard(
+                        out_dir_path, 
+                        shard_idx,
+                        shard_samples, 
+                        shard_inputs,
+                        shard_targets,
+                        shard_outputs
+                    )
+                    shard_idx += 1
+                    shard_samples = []
+                    shard_inputs = []
+                    shard_targets = []
+                    shard_outputs = {k: [] for k in shard_outputs}
 
         # Flush last partial shard
         if shard_samples:
@@ -304,6 +336,12 @@ def parse_args():
         default=8,
         help="Number of samples per .pt shard. Default 8 (~4GB at 2048x2048).",
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=4,
+        help="Inference batch size. Default 4.",
+    )
 
     return parser.parse_args()
 
@@ -342,4 +380,5 @@ if __name__ == "__main__":
         checkpoint_path=args.checkpoint,
         out_dir=out_dir,
         shard_size=args.shard_size,
+        batch_size=args.batch_size,
     )
