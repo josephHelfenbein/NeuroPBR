@@ -87,20 +87,18 @@ def _apply_data_overrides(config: TrainConfig, args: argparse.Namespace) -> None
     config.data.use_dirty_renders = (config.data.render_curriculum == 2)
 
 
-def save_shard(out_dir: Path, idx: int, sample_indices, inputs, targets, outputs):
-    """Save a single shard of data (inputs, targets, teacher_outputs) to disk."""
+def save_shard(out_dir: Path, idx: int, sample_indices, outputs):
+    """Save a single shard of teacher outputs to disk (inputs/targets loaded from PNGs during training)."""
     shard_path = out_dir / f"shard_{idx:05d}.pt"
     
-    # Stack lists into tensors and cast to float16 to save 50% disk space
-    tensor_inputs = torch.cat(inputs, dim=0).half()  # (B, 3, 3, H, W)
-    tensor_targets = torch.cat(targets, dim=0).half()  # (B, 4, 3, H, W)
+    # Stack lists into tensors and cast to float16
+    # We ONLY save the teacher outputs to save massive amounts of disk space.
+    # Inputs and Targets will be loaded from the original PNG dataset during student training.
     tensor_outputs = {k: torch.cat(v, dim=0).half() for k, v in outputs.items()}  # (B, C, H, W)
     
     torch.save(
         {
             "indices": sample_indices,
-            "inputs": tensor_inputs,
-            "targets": tensor_targets,
             "teacher_outputs": tensor_outputs,
         },
         shard_path,
@@ -196,8 +194,8 @@ def run_inference(
 
     shard_idx = 0
     shard_samples = []
-    shard_inputs = []
-    shard_targets = []
+    # shard_inputs = []  <-- No longer saving inputs/targets to save disk space
+    # shard_targets = [] 
     shard_outputs = {"albedo": [], "roughness": [],
                      "metallic": [], "normal": []}
 
@@ -228,9 +226,9 @@ def run_inference(
                 # Store data (move to CPU to save memory)
                 shard_samples.append(global_idx)
                 
-                # Keep inputs/targets as (1, ...) for concatenation later
-                shard_inputs.append(inputs_batch[i].unsqueeze(0)) 
-                shard_targets.append(targets_batch[i].unsqueeze(0))
+                # We don't store inputs/targets anymore
+                # shard_inputs.append(inputs_batch[i].unsqueeze(0)) 
+                # shard_targets.append(targets_batch[i].unsqueeze(0))
                 
                 for k in shard_outputs:
                     shard_outputs[k].append(pred[k][i].unsqueeze(0).cpu())
@@ -241,14 +239,11 @@ def run_inference(
                         out_dir_path, 
                         shard_idx,
                         shard_samples, 
-                        shard_inputs,
-                        shard_targets,
                         shard_outputs
                     )
                     shard_idx += 1
                     shard_samples = []
-                    shard_inputs = []
-                    shard_targets = []
+                    # shard_inputs/targets are no longer collected
                     shard_outputs = {k: [] for k in shard_outputs}
                     
                     # Clear cache to prevent fragmentation over long runs
@@ -261,8 +256,6 @@ def run_inference(
                 out_dir_path, 
                 shard_idx, 
                 shard_samples, 
-                shard_inputs,
-                shard_targets,
                 shard_outputs
             )
 

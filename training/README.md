@@ -424,6 +424,8 @@ For mobile deployment (Core ML), we train a lightweight "Student" model (MobileN
 ### 1. Generate Distillation Shards
 Instead of running the heavy teacher model during training (which is slow and VRAM-heavy), we pre-compute the teacher's outputs and save them as "shards" (.pt files).
 
+**Note:** Shards now only store the teacher's predictions (in float16) to save disk space. The original inputs and targets are loaded from the PNG dataset on-the-fly during student training.
+
 ```bash
 # Generate shards from a trained teacher checkpoint
 python teacher_infer.py \
@@ -433,7 +435,8 @@ python teacher_infer.py \
   --shards-dir ./data/shards \
   --shard-size 8
 ```
-*   `--shard-size 8`: Keeps shard files manageable (~4GB) for 2048x2048 resolution.
+*   `--shard-size 8`: Keeps shard files manageable (~64MB) for 2048x2048 resolution.
+*   `--output-dir`: Required to verify dataset integrity, even though targets aren't saved to shards.
 
 ### 2. Train Student Model
 Train the student model using the pre-computed shards. This is much faster and uses less VRAM.
@@ -447,6 +450,7 @@ python student/train.py \
   --output-dir ./data/output \
   --checkpoint-dir ./checkpoints_student
 ```
+*   `--input-dir` and `--output-dir` are **required** here because the student loader reads the original PNGs from disk while fetching teacher predictions from the shards.
 
 ### 3. Core ML Optimization
 The `configs/mobilenetv3_2048.py` configuration is specifically tuned for Apple Neural Engine (ANE):

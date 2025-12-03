@@ -212,18 +212,27 @@ class PBRDataset(Dataset):
 
 class DistillationShardDataset(Dataset):
     """
-    Dataset for loading pre-computed distillation shards.
+    Dataset for loading pre-computed distillation shards (teacher outputs only).
+    Inputs and targets are loaded from the original PBRDataset on the fly.
     
     Each shard is a .pt file containing:
-    - inputs: (B, 3, 3, H, W)
-    - targets: (B, 4, 3, H, W)
     - teacher_outputs: Dict[str, Tensor]
-    - indices: List[int]
+    - indices: List[int] (indices into the PBRDataset)
     """
     
     def __init__(
         self,
         shards_dir: str,
+        # PBRDataset args
+        input_dir: str,
+        output_dir: str,
+        metadata_path: Optional[str],
+        transform_mean: List,
+        transform_std: List,
+        image_size: Tuple[int, int] = (2048, 2048),
+        use_dirty: bool = False,
+        curriculum_mode: int = 0,
+        # Split args
         split: Optional[Literal["train", "val"]] = None,
         val_ratio: float = 0.1,
         seed: int = 42
@@ -232,35 +241,44 @@ class DistillationShardDataset(Dataset):
         if not self.shards_dir.exists():
             raise FileNotFoundError(f"Shards directory not found: {self.shards_dir}")
             
+        # Initialize the underlying PBRDataset (with split=None to access all samples)
+        # We rely on the shard indices to map back to this dataset.
+        self.pbr_dataset = PBRDataset(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            metadata_path=metadata_path,
+            transform_mean=transform_mean,
+            transform_std=transform_std,
+            image_size=image_size,
+            use_dirty=use_dirty,
+            curriculum_mode=curriculum_mode,
+            split=None, # We handle splitting via shard indices
+            val_ratio=val_ratio,
+            seed=seed
+        )
+
         # Find all shards
         self.shard_paths = sorted(list(self.shards_dir.glob("shard_*.pt")))
         if not self.shard_paths:
             raise FileNotFoundError(f"No .pt shards found in {self.shards_dir}")
             
-        # Build index: global_idx -> (shard_idx, local_idx)
-        # We need to open shards to know their size if they vary, 
-        # but usually they are fixed size except the last one.
-        # To be safe and fast, we can scan them once.
+        # Build index: global_idx -> (shard_idx, local_idx, pbr_dataset_idx)
         self.index_map = []
         
         print(f"Scanning {len(self.shard_paths)} shards...")
         for shard_idx, p in enumerate(self.shard_paths):
-            # We can read just the indices or metadata if possible, 
-            # but torch.load loads the whole file usually.
             try:
                 # Map location cpu to avoid gpu memory usage during scan
                 data = torch.load(p, map_location="cpu", weights_only=False) 
-                num_samples = len(data["indices"])
+                indices = data["indices"]
+                num_samples = len(indices)
                 for i in range(num_samples):
-                    self.index_map.append((shard_idx, i))
+                    # Store (shard_idx, local_idx_in_shard, original_dataset_idx)
+                    self.index_map.append((shard_idx, i, indices[i]))
             except Exception as e:
                 print(f"Error loading shard {p}: {e}")
                 
         # Split train/val
-        # We shuffle the global indices to split, but for access efficiency 
-        # we might want to keep shard locality. 
-        # However, for training, random access is needed anyway.
-        
         all_indices = list(range(len(self.index_map)))
         random.seed(seed)
         random.shuffle(all_indices)
@@ -282,7 +300,7 @@ class DistillationShardDataset(Dataset):
 
     def __getitem__(self, idx):
         global_idx = self.indices[idx]
-        shard_idx, local_idx = self.index_map[global_idx]
+        shard_idx, local_idx, pbr_idx = self.index_map[global_idx]
         
         # Load shard if not cached
         if self.cached_shard_idx != shard_idx:
@@ -293,16 +311,10 @@ class DistillationShardDataset(Dataset):
             )
             self.cached_shard_idx = shard_idx
             
-        # Extract data and cast back to float32
-        # inputs: (3, 3, H, W)
-        inputs = self.cached_data["inputs"][local_idx].float()
+        # Load inputs/targets from original dataset
+        inputs, pbr_maps = self.pbr_dataset[pbr_idx]
         
-        # targets: (4, 3, H, W) -> unpack to pbr_maps format
-        # The PBRDataset returns pbr_maps as (4, 3, H, W) stacked.
-        # Our saved targets are already (B, 4, 3, H, W), so we get (4, 3, H, W).
-        pbr_maps = self.cached_data["targets"][local_idx].float()
-        
-        # teacher_outputs: Dict[str, Tensor]
+        # Load teacher outputs from shard
         teacher_pred = {
             k: v[local_idx].float() for k, v in self.cached_data["teacher_outputs"].items()
         }
@@ -341,6 +353,14 @@ def get_dataloader(
     if shards_dir:
         ds = DistillationShardDataset(
             shards_dir=shards_dir,
+            input_dir=input_dir,
+            output_dir=output_dir,
+            metadata_path=metadata_path,
+            transform_mean=transform_mean,
+            transform_std=transform_std,
+            image_size=image_size,
+            use_dirty=use_dirty,
+            curriculum_mode=curriculum_mode,
             split=split,
             val_ratio=val_ratio,
             seed=seed
