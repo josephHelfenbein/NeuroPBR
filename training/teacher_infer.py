@@ -152,7 +152,8 @@ def run_inference(
         torch.backends.cudnn.allow_tf32 = True
         
         # Compile model if possible (PyTorch 2.0+)
-        if hasattr(torch, "compile"):
+        # Note: Disabled by default due to instability (CUDA illegal memory access) with max-autotune on some setups
+        if hasattr(torch, "compile") and False:  # Set to True to enable compilation
             print("Compiling model for faster inference...")
             try:
                 model = torch.compile(model, mode="max-autotune")
