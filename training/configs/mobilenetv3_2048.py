@@ -26,14 +26,20 @@ def get_config() -> TrainConfig:
     # Model: MobileNetV3-Large encoder
     config.model.encoder_type = "mobilenetv3"
     config.model.encoder_backbone = "mobilenet_v3_large"
-    config.model.encoder_stride = 1  # 2048 → 2048 (no downsampling)
-    config.model.decoder_sr_scale = 0  # Keep 2048 resolution (no SR needed)
-    config.model.freeze_backbone = False  # Fine-tune the backbone
+    
+    # Mobile Optimization: Use stride 2 (standard) to keep latent size manageable (64x64)
+    config.model.encoder_stride = 2
+    config.model.decoder_sr_scale = 2  # Upsample 1024 (decoder out) -> 2048
+
+    config.model.freeze_backbone = False
     config.model.freeze_bn = False
 
-    # Transformer: Use 16 heads for compatibility (can use 8, 16, 24, 28, 32)
-    config.model.transformer_num_heads = 16
-    config.model.transformer_depth = 4
+    # Transformer: Lightweight for Mobile (Core ML)
+    config.model.use_transformer = True
+    config.model.transformer_dim = 256
+    config.model.transformer_num_heads = 4
+    config.model.transformer_depth = 2
+    config.model.transformer_mlp_ratio = 2
 
     # Discriminator: 6-layer for high resolution
     config.model.discriminator_type = "configurable"

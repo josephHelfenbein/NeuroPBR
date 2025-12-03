@@ -363,10 +363,11 @@ class UNetMobileNetV3Encoder(nn.Module):
 
         # Skip connection points based on MobileNetV3-Large architecture
         # These are the indices where spatial resolution changes
+        # We exclude the final layer (16/12) as that is the latent output
         if backbone == 'mobilenet_v3_large':
-            self.skip_indices = [1, 3, 6, 12, 16]  # After each downsampling
+            self.skip_indices = [1, 3, 6, 12]  # After each downsampling
         else:  # mobilenet_v3_small
-            self.skip_indices = [0, 1, 3, 8, 12]
+            self.skip_indices = [0, 1, 3, 8]
 
         self.skip = skip
         self.freeze_backbone = freeze_backbone

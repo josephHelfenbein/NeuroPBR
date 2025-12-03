@@ -413,3 +413,44 @@ model.load_state_dict(ckpt['model_state_dict'])
 with torch.no_grad():
     outputs = model(inputs)
 ```
+
+---
+
+## Student Training (Distillation)
+
+For mobile deployment (Core ML), we train a lightweight "Student" model (MobileNetV3 + Small ViT) to mimic the heavy "Teacher" model (ResNet + Large ViT).
+
+### 1. Generate Distillation Shards
+Instead of running the heavy teacher model during training (which is slow and VRAM-heavy), we pre-compute the teacher's outputs and save them as "shards" (.pt files).
+
+```bash
+# Generate shards from a trained teacher checkpoint
+python teacher_infer.py \
+  --checkpoint checkpoints/best_model.pth \
+  --input-dir ./data/input \
+  --output-dir ./data/output \
+  --shards-dir ./data/shards \
+  --shard-size 8
+```
+*   `--shard-size 8`: Keeps shard files manageable (~4GB) for 2048x2048 resolution.
+
+### 2. Train Student Model
+Train the student model using the pre-computed shards. This is much faster and uses less VRAM.
+
+```bash
+# Train using the mobile-optimized config
+python student/train.py \
+  --config configs/mobilenetv3_2048.py \
+  --shards-dir ./data/shards \
+  --input-dir ./data/input \
+  --output-dir ./data/output \
+  --checkpoint-dir ./checkpoints_student
+```
+
+### 3. Core ML Optimization
+The `configs/mobilenetv3_2048.py` configuration is specifically tuned for Apple Neural Engine (ANE):
+*   **Encoder**: MobileNetV3-Large with Stride 2 (reduces latent size to 64x64).
+*   **Transformer**: Reduced dimension (256) and depth (2) to fit memory bandwidth constraints.
+*   **Resolution**: 2048x2048 input/output.
+
+This pipeline produces a model capable of running on iPhone 13 Pro and newer.

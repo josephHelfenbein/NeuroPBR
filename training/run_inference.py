@@ -49,7 +49,7 @@ parser.add_argument("--out-dir", default="inference_outputs")
 parser.add_argument("--input-dir", type=str, help="Directory containing exactly three PNG renders to use for inference.")
 args = parser.parse_args()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
 try:
     with torch.serialization.safe_globals([TrainConfig]):

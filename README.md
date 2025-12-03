@@ -151,6 +151,21 @@ Key options:
 
 Refer to `training/README.md` for the loss breakdown, advanced configs, and troubleshooting steps.
 
+### 3b. Train Student Model (for Mobile)
+
+For iOS deployment, train a lightweight student model via knowledge distillation:
+
+1.  **Generate Shards**: Pre-compute teacher outputs.
+    ```bash
+    python teacher_infer.py --checkpoint checkpoints/best_model.pth --shards-dir ./data/shards ...
+    ```
+2.  **Train Student**: Train the MobileNetV3-based model on these shards.
+    ```bash
+    python student/train.py --config configs/mobilenetv3_2048.py --shards-dir ./data/shards ...
+    ```
+
+See `training/README.md` for full distillation instructions.
+
 ---
 
 ## 4. Mobile App (`mobile_app/`)

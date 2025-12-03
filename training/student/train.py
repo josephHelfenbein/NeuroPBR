@@ -276,7 +276,7 @@ class Trainer:
     def __init__(
         self,
         config: TrainConfig,
-        teacher_checkpoint_path: str,
+        teacher_checkpoint_path: Optional[str] = None,
         temperature: float = 4.0,
         alpha: float = 0.3,
         rank: int = 0
@@ -303,12 +303,17 @@ class Trainer:
         self.student = StudentGenerator(config).to(self.device)
 
         # Load and freeze teacher model (for inference only during training)
-        if self.is_main_process:
-            print(f"Loading teacher model from {teacher_checkpoint_path}...")
-        self.teacher = self._load_teacher(teacher_checkpoint_path)
-        self.teacher.eval()
-        for param in self.teacher.parameters():
-            param.requires_grad = False
+        if teacher_checkpoint_path:
+            if self.is_main_process:
+                print(f"Loading teacher model from {teacher_checkpoint_path}...")
+            self.teacher = self._load_teacher(teacher_checkpoint_path)
+            self.teacher.eval()
+            for param in self.teacher.parameters():
+                param.requires_grad = False
+        else:
+            self.teacher = None
+            if self.is_main_process:
+                print("No teacher checkpoint provided. Assuming shards contain teacher predictions.")
 
         # Build distillation loss
         hard_loss_config = {
@@ -469,13 +474,23 @@ class Trainer:
     def train_epoch(self, train_loader: DataLoader, epoch: int):
         """Train for one epoch with distillation."""
         self.student.train()
-        self.teacher.eval()  # Teacher always in eval mode (inference only)
+        if self.teacher:
+            self.teacher.eval()  # Teacher always in eval mode (inference only)
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=not self.is_main_process)
 
         epoch_loss = 0.0
 
-        for batch_idx, (input_renders, pbr_maps) in enumerate(pbar):
+        for batch_idx, batch_data in enumerate(pbar):
+            # Handle both dataset types
+            if len(batch_data) == 3:
+                input_renders, pbr_maps, teacher_pred_batch = batch_data
+                # teacher_pred_batch is a dict of tensors. Move to device.
+                teacher_pred = {k: v.to(self.device) for k, v in teacher_pred_batch.items()}
+            else:
+                input_renders, pbr_maps = batch_data
+                teacher_pred = None
+
             input_renders = input_renders.to(self.device)
             pbr_maps = pbr_maps.to(self.device)
 
@@ -488,8 +503,11 @@ class Trainer:
             }
 
             # Get teacher predictions (no gradient - inference only)
-            with torch.no_grad():
-                teacher_pred = self.teacher(input_renders)
+            if teacher_pred is None:
+                if self.teacher is None:
+                     raise RuntimeError("Teacher model not loaded and no teacher predictions in batch!")
+                with torch.no_grad():
+                    teacher_pred = self.teacher(input_renders)
 
             # Train student
             self.optimizer.zero_grad()
@@ -568,7 +586,8 @@ class Trainer:
         from utils.visualization import log_images_to_tensorboard, log_input_renders
 
         self.student.eval()
-        self.teacher.eval()
+        if self.teacher:
+            self.teacher.eval()
 
         total_loss = 0.0
         num_batches = 0
@@ -583,9 +602,17 @@ class Trainer:
 
         first_batch_logged = False
 
-        for batch_idx, (input_renders, pbr_maps) in enumerate(val_loader):
+        for batch_idx, batch_data in enumerate(val_loader):
             if batch_idx >= max_batches:
                 break
+
+            # Handle both dataset types
+            if len(batch_data) == 3:
+                input_renders, pbr_maps, teacher_pred_batch = batch_data
+                teacher_pred = {k: v.to(self.device) for k, v in teacher_pred_batch.items()}
+            else:
+                input_renders, pbr_maps = batch_data
+                teacher_pred = None
 
             input_renders = input_renders.to(self.device)
             pbr_maps = pbr_maps.to(self.device)
@@ -598,7 +625,17 @@ class Trainer:
             }
 
             # Get predictions
-            teacher_pred = self.teacher(input_renders)  # For comparison logging only
+            if teacher_pred is None:
+                if self.teacher is None:
+                     # If validating on a dataset without teacher preds and no teacher model, 
+                     # we can't compute distillation loss. 
+                     # But we can still compute metrics against GT.
+                     # However, the loss function expects teacher_pred.
+                     # Let's assume we skip soft loss or fail.
+                     # For now, let's fail to be safe.
+                     raise RuntimeError("Teacher model not loaded and no teacher predictions in batch!")
+                teacher_pred = self.teacher(input_renders)
+            
             student_pred = self.student(input_renders)  # Student runs independently
 
             # Compute loss
@@ -827,12 +864,13 @@ def main(args):
         config.training.checkpoint_dir = args.checkpoint_dir
 
     # Validate paths
-    if not config.data.input_dir:
-        raise ValueError("Input directory is not set. Pass --input-dir")
-    if not config.data.output_dir:
-        raise ValueError("Output directory is not set. Pass --output-dir")
-    if not config.data.metadata_path:
-        raise ValueError("Metadata path is not set. Pass --metadata-path")
+    if not args.shards_dir:
+        if not config.data.input_dir:
+            raise ValueError("Input directory is not set. Pass --input-dir")
+        if not config.data.output_dir:
+            raise ValueError("Output directory is not set. Pass --output-dir")
+        if not config.data.metadata_path:
+            raise ValueError("Metadata path is not set. Pass --metadata-path")
 
     # Set seed
     set_seed(config.training.seed)
@@ -864,7 +902,8 @@ def main(args):
         split="train",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,
-        seed=config.training.seed
+        seed=config.training.seed,
+        shards_dir=args.shards_dir
     )
 
     val_loader = get_dataloader(
@@ -883,7 +922,8 @@ def main(args):
         split="val",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,
-        seed=config.training.seed
+        seed=config.training.seed,
+        shards_dir=args.shards_dir
     )
 
     print(f"Train batches: {len(train_loader)}")
@@ -909,9 +949,9 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train Student Model with Knowledge Distillation")
 
-    # Required
-    parser.add_argument("--teacher-checkpoint", type=str, required=True,
-                      help="Path to pre-trained teacher model checkpoint")
+    # Required (unless shards are used)
+    parser.add_argument("--teacher-checkpoint", type=str, default=None,
+                      help="Path to pre-trained teacher model checkpoint (required unless --shards-dir is used)")
 
     # Config
     parser.add_argument("--config", type=str, default="default",
@@ -924,6 +964,8 @@ if __name__ == "__main__":
                       help="Weight for distillation loss. Final loss = alpha*soft + (1-alpha)*hard (default: 0.3)")
 
     # Data
+    parser.add_argument("--shards-dir", type=str, default=None,
+                      help="Directory containing pre-computed distillation shards (.pt files)")
     parser.add_argument("--batch-size", type=int, default=None,
                       help="Batch size per GPU")
     parser.add_argument("--input-dir", type=str, default=None,
@@ -946,5 +988,9 @@ if __name__ == "__main__":
                       help="Directory to save student checkpoints")
 
     args = parser.parse_args()
+
+    # Validation
+    if not args.shards_dir and not args.teacher_checkpoint:
+        parser.error("--teacher-checkpoint is required unless --shards-dir is specified.")
 
     main(args)
