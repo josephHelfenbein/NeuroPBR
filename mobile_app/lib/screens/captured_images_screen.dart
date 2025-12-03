@@ -2,9 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:io';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:neuro_pbr/screens/tags_screen.dart';
 import 'package:provider/provider.dart';
 import '../theme/theme_provider.dart';
 import '../theme/app_theme.dart';
+import 'dart:typed_data';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+import '../services/pbr_service.dart';
+import 'dart:convert';
 
 class CapturedImagesScreen extends StatefulWidget {
   final List<String> imagePaths;
@@ -21,17 +27,19 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
   Set<int> _selectedIndices = {};
   Map<int, String> _imageTags = {};
   String _activeFilter = 'ALL';
+  final PBRService _pbrService = PBRService();
+  bool _isLoading = false; // To show loading spinner
 
   // Drag Select State
   final ScrollController _scrollController = ScrollController();
   final GlobalKey _gridKey = GlobalKey();
   bool _isDragging = false;
   int? _startDragIndex;
-  Set<int> _initialSelectedIndices = {}; // To support toggle-drag
+  Set<int> _initialSelectedIndices = {};
 
   // Auto-scroll constants
   static const double _scrollThreshold = 50.0;
-  static const double _scrollSpeed = 15.0; // Pixels per scroll update
+  static const double _scrollSpeed = 15.0;
 
   @override
   void initState() {
@@ -118,21 +126,54 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
       canPop: false,
       onPopInvoked: (didPop) {
         if (didPop) return;
-        Navigator.pop(context, _images);
+        if (!_isLoading) Navigator.pop(context, _images); // Prevent back while loading
       },
       child: Scaffold(
-        // 3. Use theme background color
         backgroundColor: background,
-        body: SafeArea(
-          child: Column(
-            children: [
-              _buildTopBar(surface, backButtonSurface, backIconColor, primaryText),
-              _buildFilterRow(primaryText, secondaryText, surface, isDark),
-              _buildStatusInfo(primaryText, secondaryText, accent),
-              Expanded(child: _buildGridWithDrag(secondaryText)),
-              _buildBottomControls(surface, accent, iconColor, secondaryText),
-            ],
-          ),
+        body: Stack( // <--- CHANGED TO STACK
+          children: [
+            SafeArea(
+              child: Column(
+                children: [
+                  _buildTopBar(surface, backButtonSurface, backIconColor, primaryText),
+                  _buildFilterRow(primaryText, secondaryText, surface, isDark),
+                  _buildStatusInfo(primaryText, secondaryText, accent),
+                  Expanded(child: _buildGridWithDrag(secondaryText)),
+                  _buildBottomControls(surface, accent, iconColor, secondaryText),
+                ],
+              ),
+            ),
+
+            // --- NEW LOADING OVERLAY ---
+            if (_isLoading)
+              Container(
+                color: Colors.black.withOpacity(0.7),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(color: accent),
+                      const SizedBox(height: 20),
+                      Text(
+                        "GENERATING PBR MAPS...",
+                        style: GoogleFonts.robotoMono(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.5
+                        ),
+                      ),
+                      Text(
+                        "This may take a moment",
+                        style: GoogleFonts.robotoMono(
+                          color: Colors.white70,
+                          fontSize: 10,
+                        ),
+                      )
+                    ],
+                  ),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -547,7 +588,7 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
 
           // Process Button
           GestureDetector(
-            onTap: _canProcess ? _processImages : null,
+            onTap: _canProcess ? _showNameDialog : null,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
               width: 72,
@@ -631,9 +672,241 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
     });
   }
 
-  void _processImages() {
+  Future<void> _processImages(String customName) async {
     HapticFeedback.heavyImpact();
-    // Logic here
+
+    // Safety check
+    if (_selectedIndices.length != 3) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      // 1. Convert selected indices to File objects
+      // We sort indices to ensure consistent order (optional, but good practice)
+      final List<int> sortedIndices = _selectedIndices.toList()..sort();
+
+      final File v1 = File(_images[sortedIndices[0]]);
+      final File v2 = File(_images[sortedIndices[1]]);
+      final File v3 = File(_images[sortedIndices[2]]);
+
+      // 2. Call the AI Service
+      final results = await _pbrService.generatePBRMaps(
+        view1: v1,
+        view2: v2,
+        view3: v3,
+      );
+
+      // 3. Save to Disk
+      await _saveMapsToDisk(results, customName);
+
+      // 4. Success Feedback
+      if (mounted) {
+        HapticFeedback.mediumImpact();
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (context) => const TagsScreen()),
+              (Route<dynamic> route) => false, // 'false' means: Remove ALL previous routes
+        );
+      }
+
+    } catch (e) {
+      if (mounted) {
+        HapticFeedback.vibrate();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("Error: $e"),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<bool> _doesNameExist(String rawName) async {
+    final Directory appDocDir = await getApplicationDocumentsDirectory();
+    // Sanitize the name exactly like we do in the save function
+    final String safeName = rawName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+    final Directory materialDir = Directory('${appDocDir.path}/Materials/$safeName');
+
+    return await materialDir.exists();
+  }
+
+  Future<void> _saveMapsToDisk(Map<String, Uint8List> maps, String userGivenName) async {
+    try {
+      // 1. Get the base "Materials" directory
+      final Directory appDocDir = await getApplicationDocumentsDirectory();
+      final Directory materialsBaseDir = Directory('${appDocDir.path}/Materials');
+
+      if (!await materialsBaseDir.exists()) {
+        await materialsBaseDir.create(recursive: true);
+      }
+
+      // 2. Sanitize Name (Remove characters that break file systems)
+      String safeName = userGivenName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+
+      // Use the first selected tag as the material tag, or default to "Misc"
+      String materialTag = "Misc";
+      if (_selectedIndices.isNotEmpty) {
+        materialTag = _imageTags[_selectedIndices.first] ?? "Misc";
+      }
+
+      // 3. Create the specific folder for this material
+      Directory newMaterialDir = Directory('${materialsBaseDir.path}/$safeName');
+
+      // duplicate check logic
+      if (await newMaterialDir.exists()) {
+        // This creates a recursive override if somehow the user bypasses the dialog,
+        // but in normal use, this line should never be hit.
+        await newMaterialDir.delete(recursive: true);
+      }
+
+      await newMaterialDir.create(recursive: true);
+
+      // 4. Save the Texture Images
+      for (var entry in maps.entries) {
+        final String mapName = entry.key; // "albedo", "normal", etc.
+        final Uint8List data = entry.value;
+
+        if (data.isNotEmpty) {
+          // Save as "albedo.png", "normal.png" matching your loader's expectation
+          final File file = File(p.join(newMaterialDir.path, '$mapName.png'));
+          await file.writeAsBytes(data);
+        }
+      }
+
+      // 5. CRITICAL: Create info.json
+      // Your loader specifically checks for this file!
+      final File infoFile = File('${newMaterialDir.path}/info.json');
+      final Map<String, String> infoData = {
+        'name': userGivenName, // The pretty name the user typed
+        'tag': materialTag,
+        'date_created': DateTime.now().toIso8601String(),
+      };
+
+      await infoFile.writeAsString(jsonEncode(infoData));
+
+    } catch (e) {
+      print("Error saving material to filesystem: $e");
+      throw e; // Rethrow so the UI knows it failed
+    }
+  }
+
+  Future<void> _showNameDialog() async {
+    HapticFeedback.selectionClick();
+
+    final TextEditingController controller = TextEditingController(text: "");
+
+    final String? name = await showDialog<String>(
+      context: context,
+      // barrierDismissible: false, // Optional: Force them to click Cancel or Create
+      builder: (context) => StatefulBuilder(
+          builder: (context, setState) {
+            final theme = Provider.of<ThemeProvider>(context);
+
+            // Define local variables for state
+            bool isChecking = false; // To show a mini spinner on the button
+            String? errorMessage;    // To show "Name already exists" in red
+
+            return StatefulBuilder( // Nest another builder to update local dialog state
+                builder: (context, setDialogState) {
+                  final bool isValid = controller.text.trim().isNotEmpty;
+
+                  return AlertDialog(
+                    backgroundColor: theme.colors.surface,
+                    title: Text(
+                        "Name Material",
+                        style: GoogleFonts.robotoMono(
+                            color: theme.colors.textPrimary,
+                            fontWeight: FontWeight.bold
+                        )
+                    ),
+                    content: Column(
+                      mainAxisSize: MainAxisSize.min, // Keep dialog compact
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        TextField(
+                          controller: controller,
+                          autofocus: true,
+                          style: TextStyle(color: theme.colors.textPrimary),
+                          onChanged: (value) {
+                            // Clear error when user types
+                            if (errorMessage != null) {
+                              setDialogState(() {
+                                errorMessage = null;
+                              });
+                            }
+                          },
+                          decoration: InputDecoration(
+                            hintText: "Enter unique name...",
+                            hintStyle: TextStyle(color: theme.colors.textSecondary.withOpacity(0.5)),
+                            errorText: errorMessage, // This displays the red text if set
+                            enabledBorder: UnderlineInputBorder(
+                              borderSide: BorderSide(color: theme.colors.accent),
+                            ),
+                            focusedBorder: UnderlineInputBorder(
+                              borderSide: BorderSide(color: theme.colors.accent, width: 2),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(context, null),
+                        child: Text("Cancel", style: TextStyle(color: theme.colors.textSecondary)),
+                      ),
+                      TextButton(
+                        // Disable button if text is empty OR if we are currently checking
+                        onPressed: (isValid && !isChecking) ? () async {
+                          // 1. Start Checking
+                          setDialogState(() { isChecking = true; });
+
+                          final String inputName = controller.text.trim();
+                          final bool exists = await _doesNameExist(inputName);
+
+                          // 2. Handle Result
+                          if (exists) {
+                            // Stop spinner, show error, DON'T close dialog
+                            setDialogState(() {
+                              isChecking = false;
+                              errorMessage = "Material name already exists";
+                            });
+                            HapticFeedback.mediumImpact(); // Error vibration
+                          } else {
+                            // Success! Close dialog and pass the name back
+                            if (context.mounted) {
+                              Navigator.pop(context, inputName);
+                            }
+                          }
+                        } : null,
+                        child: isChecking
+                            ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: theme.colors.accent))
+                            : Text(
+                            "CREATE",
+                            style: TextStyle(
+                                color: isValid ? theme.colors.accent : theme.colors.textSecondary.withOpacity(0.3),
+                                fontWeight: FontWeight.bold
+                            )
+                        ),
+                      ),
+                    ],
+                  );
+                }
+            );
+          }
+      ),
+    );
+
+    if (name != null && name.isNotEmpty) {
+      _processImages(name);
+    }
   }
 
   void _showTagSelector(int index) {
