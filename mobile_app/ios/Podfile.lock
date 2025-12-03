@@ -45,10 +45,10 @@ SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   flutter_native_splash: c32d145d68aeda5502d5f543ee38c192065986cf
   image_picker_ios: e0ece4aa2a75771a7de3fa735d26d90817041326
-  NeuropbrRenderer: ee231c6c834cfb5eb1bbaac662dad06042b0dad6
+  NeuropbrRenderer: bbfbc9d3ef4e140ab85ee901909fe8f5c5689909
   path_provider_foundation: bb55f6dbba17d0dccd6737fe6f7f34fbd0376880
   shared_preferences_foundation: 7036424c3d8ec98dfe75ff1667cb0cd531ec82bb
 
-PODFILE CHECKSUM: 26f2137c0b467661d9be2cdf53473c91a02e4f58
+PODFILE CHECKSUM: be9f2d45155886d7361d3c137f354a45bbe33c0c
 
 COCOAPODS: 1.16.2

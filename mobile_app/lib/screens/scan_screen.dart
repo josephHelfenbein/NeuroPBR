@@ -223,21 +223,62 @@ class _ScanScreenNewState extends State<ScanScreenNew>
     HapticFeedback.lightImpact();
     final ImagePicker picker = ImagePicker();
     try {
-      final XFile? image = await picker.pickImage(source: ImageSource.gallery);
-      if (image != null && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Selected: ${image.name}',
-              style: GoogleFonts.robotoMono(
-                fontWeight: FontWeight.w500,
+      final List<XFile> images = await picker.pickMultiImage();
+      if (images.isNotEmpty && mounted) {
+        // Process each picked image: center-crop to square and resize to 2048x2048
+        for (final XFile image in images) {
+          try {
+            final file = File(image.path);
+            final bytes = await file.readAsBytes();
+            final decoded = img.decodeImage(bytes);
+            if (decoded != null) {
+              // Center-crop to square
+              final minDim = math.min(decoded.width, decoded.height);
+              final cropX = ((decoded.width - minDim) / 2).round();
+              final cropY = ((decoded.height - minDim) / 2).round();
+              final cropped = img.copyCrop(decoded, x: cropX, y: cropY, width: minDim, height: minDim);
+
+              // Resize to 2048x2048
+              final resized = img.copyResize(cropped, width: 2048, height: 2048, interpolation: img.Interpolation.cubic);
+
+              // Encode as PNG and write to a new file in temp directory
+              final outBytes = img.encodePng(resized);
+              final tempDir = await Directory.systemTemp.createTemp('neuropbr_');
+              final outFile = File('${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}_2048.png');
+              await outFile.writeAsBytes(outBytes);
+
+              setState(() {
+                _capturedImages.add(outFile.path);
+              });
+            } else {
+              // Fallback if decoding fails - copy to temp and add
+              setState(() {
+                _capturedImages.add(image.path);
+              });
+            }
+          } catch (e) {
+            debugPrint('Error processing gallery image: $e');
+            setState(() {
+              _capturedImages.add(image.path);
+            });
+          }
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Added ${images.length} image${images.length > 1 ? 's' : ''}',
+                style: GoogleFonts.robotoMono(
+                  fontWeight: FontWeight.w500,
+                ),
               ),
+              duration: const Duration(seconds: 2),
+              backgroundColor: const Color(0xFF1a1a1a),
+              behavior: SnackBarBehavior.floating,
             ),
-            duration: const Duration(seconds: 2),
-            backgroundColor: const Color(0xFF1a1a1a),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+          );
+        }
       }
     } catch (e) {
       debugPrint('Error picking image: $e');

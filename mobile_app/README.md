@@ -45,6 +45,7 @@ The app is built with **Flutter** for the UI and logic, but relies heavily on na
     *   The repository includes a pre-compiled Core ML model at `ios/Runner/pbr_model.mlpackage`, so no extra setup is needed to run the default model. If you trained a custom model, ensure it replaces this file.
     *   Open `ios/Runner.xcworkspace` in Xcode.
     *   Ensure `pbr_model.mlpackage` is added to the "Runner" target (drag and drop it into the project navigator if missing).
+    *   **Important**: Ensure `PBRModelHandler.swift` is added to the "Runner" target in Xcode. If you see "Cannot find type 'PBRModelHandler'", right-click the Runner group in Xcode -> "Add Files to 'Runner'..." and select `ios/Runner/PBRModelHandler.swift`.
     ```bash
     cd ios
     pod install

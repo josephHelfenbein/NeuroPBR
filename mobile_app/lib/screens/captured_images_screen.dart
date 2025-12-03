@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'dart:io';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:neuro_pbr/screens/tags_screen.dart';
+import 'package:neuro_pbr/screens/main_tab_screen.dart';
 import 'package:provider/provider.dart';
 import '../theme/theme_provider.dart';
 import '../theme/app_theme.dart';
@@ -705,7 +705,7 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
       if (mounted) {
         HapticFeedback.mediumImpact();
         Navigator.of(context).pushAndRemoveUntil(
-          MaterialPageRoute(builder: (context) => const TagsScreen()),
+          MaterialPageRoute(builder: (context) => const MainTabScreen()),
               (Route<dynamic> route) => false, // 'false' means: Remove ALL previous routes
         );
       }
@@ -806,102 +806,98 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
     final String? name = await showDialog<String>(
       context: context,
       // barrierDismissible: false, // Optional: Force them to click Cancel or Create
-      builder: (context) => StatefulBuilder(
-          builder: (context, setState) {
-            final theme = Provider.of<ThemeProvider>(context);
+      builder: (context) {
+        final theme = Provider.of<ThemeProvider>(context);
 
-            // Define local variables for state
-            bool isChecking = false; // To show a mini spinner on the button
-            String? errorMessage;    // To show "Name already exists" in red
+        // Define local variables for state
+        bool isChecking = false; // To show a mini spinner on the button
+        String? errorMessage;    // To show "Name already exists" in red
 
-            return StatefulBuilder( // Nest another builder to update local dialog state
-                builder: (context, setDialogState) {
-                  final bool isValid = controller.text.trim().isNotEmpty;
+        return StatefulBuilder(
+            builder: (context, setDialogState) {
+              final bool isValid = controller.text.trim().isNotEmpty;
 
-                  return AlertDialog(
-                    backgroundColor: theme.colors.surface,
-                    title: Text(
-                        "Name Material",
-                        style: GoogleFonts.robotoMono(
-                            color: theme.colors.textPrimary,
+              return AlertDialog(
+                backgroundColor: theme.colors.surface,
+                title: Text(
+                    "Name Material",
+                    style: GoogleFonts.robotoMono(
+                        color: theme.colors.textPrimary,
+                        fontWeight: FontWeight.bold
+                    )
+                ),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min, // Keep dialog compact
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextField(
+                      controller: controller,
+                      autofocus: true,
+                      style: TextStyle(color: theme.colors.textPrimary),
+                      onChanged: (value) {
+                        // Rebuild to update isValid and clear any error
+                        setDialogState(() {
+                          errorMessage = null;
+                        });
+                      },
+                      decoration: InputDecoration(
+                        hintText: "Enter unique name...",
+                        hintStyle: TextStyle(color: theme.colors.textSecondary.withOpacity(0.5)),
+                        errorText: errorMessage, // This displays the red text if set
+                        enabledBorder: UnderlineInputBorder(
+                          borderSide: BorderSide(color: theme.colors.accent),
+                        ),
+                        focusedBorder: UnderlineInputBorder(
+                          borderSide: BorderSide(color: theme.colors.accent, width: 2),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, null),
+                    child: Text("Cancel", style: TextStyle(color: theme.colors.textSecondary)),
+                  ),
+                  TextButton(
+                    // Disable button if text is empty OR if we are currently checking
+                    onPressed: (isValid && !isChecking) ? () async {
+                      // 1. Start Checking
+                      setDialogState(() { isChecking = true; });
+
+                      final String inputName = controller.text.trim();
+                      final bool exists = await _doesNameExist(inputName);
+
+                      // 2. Handle Result
+                      if (exists) {
+                        // Stop spinner, show error, DON'T close dialog
+                        setDialogState(() {
+                          isChecking = false;
+                          errorMessage = "Material name already exists";
+                        });
+                        HapticFeedback.mediumImpact(); // Error vibration
+                      } else {
+                        // Success! Close dialog and pass the name back
+                        if (context.mounted) {
+                          Navigator.pop(context, inputName);
+                        }
+                      }
+                    } : null,
+                    child: isChecking
+                        ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: theme.colors.accent))
+                        : Text(
+                        "CREATE",
+                        style: TextStyle(
+                            color: isValid ? theme.colors.accent : theme.colors.textSecondary.withOpacity(0.3),
                             fontWeight: FontWeight.bold
                         )
                     ),
-                    content: Column(
-                      mainAxisSize: MainAxisSize.min, // Keep dialog compact
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        TextField(
-                          controller: controller,
-                          autofocus: true,
-                          style: TextStyle(color: theme.colors.textPrimary),
-                          onChanged: (value) {
-                            // Clear error when user types
-                            if (errorMessage != null) {
-                              setDialogState(() {
-                                errorMessage = null;
-                              });
-                            }
-                          },
-                          decoration: InputDecoration(
-                            hintText: "Enter unique name...",
-                            hintStyle: TextStyle(color: theme.colors.textSecondary.withOpacity(0.5)),
-                            errorText: errorMessage, // This displays the red text if set
-                            enabledBorder: UnderlineInputBorder(
-                              borderSide: BorderSide(color: theme.colors.accent),
-                            ),
-                            focusedBorder: UnderlineInputBorder(
-                              borderSide: BorderSide(color: theme.colors.accent, width: 2),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, null),
-                        child: Text("Cancel", style: TextStyle(color: theme.colors.textSecondary)),
-                      ),
-                      TextButton(
-                        // Disable button if text is empty OR if we are currently checking
-                        onPressed: (isValid && !isChecking) ? () async {
-                          // 1. Start Checking
-                          setDialogState(() { isChecking = true; });
-
-                          final String inputName = controller.text.trim();
-                          final bool exists = await _doesNameExist(inputName);
-
-                          // 2. Handle Result
-                          if (exists) {
-                            // Stop spinner, show error, DON'T close dialog
-                            setDialogState(() {
-                              isChecking = false;
-                              errorMessage = "Material name already exists";
-                            });
-                            HapticFeedback.mediumImpact(); // Error vibration
-                          } else {
-                            // Success! Close dialog and pass the name back
-                            if (context.mounted) {
-                              Navigator.pop(context, inputName);
-                            }
-                          }
-                        } : null,
-                        child: isChecking
-                            ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: theme.colors.accent))
-                            : Text(
-                            "CREATE",
-                            style: TextStyle(
-                                color: isValid ? theme.colors.accent : theme.colors.textSecondary.withOpacity(0.3),
-                                fontWeight: FontWeight.bold
-                            )
-                        ),
-                      ),
-                    ],
-                  );
-                }
-            );
-          }
-      ),
+                  ),
+                ],
+              );
+            }
+        );
+      },
     );
 
     if (name != null && name.isNotEmpty) {
