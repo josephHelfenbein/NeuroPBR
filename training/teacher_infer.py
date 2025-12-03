@@ -117,7 +117,15 @@ def run_inference(
     # 1) Load teacher model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = MultiViewPBRGenerator(config).to(device)
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    
+    print(f"Loading checkpoint weights from {checkpoint_path}...")
+    try:
+        # PyTorch 2.6+ defaults to weights_only=True, which breaks custom configs
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    except TypeError:
+        # Older PyTorch versions don't have weights_only argument (and default to False)
+        ckpt = torch.load(checkpoint_path, map_location=device)
+
     model.load_state_dict(ckpt["generator_state_dict"])
     model.eval()
 
