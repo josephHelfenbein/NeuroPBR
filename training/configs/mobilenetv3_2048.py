@@ -57,7 +57,7 @@ def get_config() -> TrainConfig:
     config.training.epochs = 100
     config.training.gan_start_epoch = 5
     config.training.val_every_n_epochs = 1
-    config.training.save_every_n_epochs = 5
+    config.training.save_every_n_epochs = 1
     config.training.use_amp = True  # Mixed precision for faster training
 
     # Optimizer

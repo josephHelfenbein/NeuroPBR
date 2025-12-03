@@ -862,6 +862,8 @@ def main(args):
         config.data.render_curriculum = args.render_curriculum
     if args.device:
         config.training.device = args.device
+    if args.no_amp:
+        config.training.use_amp = False
     if args.epochs:
         config.training.epochs = args.epochs
     if args.checkpoint_dir:
@@ -982,6 +984,8 @@ if __name__ == "__main__":
                       help="0=clean only, 1=match dataset clean/dirty ratio, 2=dirty only")
     parser.add_argument("--device", type=str, default=None,
                       help="Device: 'auto' (default), 'cuda', 'cuda:0', or 'cpu'")
+    parser.add_argument("--no-amp", action="store_true",
+                      help="Disable mixed precision (AMP) training")
 
     # Training
     parser.add_argument("--epochs", type=int, default=None,
