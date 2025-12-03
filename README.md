@@ -129,7 +129,12 @@ Arguments: `<textures_dir> <num_samples> [--continuing]`. The renderer automatic
 cd training
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+
+# For macOS (Apple Silicon/Intel) - includes coremltools
+pip install -r requirements_macos.txt
+
+# For Linux - includes triton
+pip install -r requirements_linux.txt
 ```
 
 2. **Launch training using the renderer outputs.**
@@ -162,6 +167,13 @@ For iOS deployment, train a lightweight student model via knowledge distillation
 2.  **Train Student**: Train the MobileNetV3-based model on these shards.
     ```bash
     python student/train.py --config configs/mobilenetv3_2048.py --shards-dir ./data/shards ...
+    ```
+3.  **Convert to Core ML**: Export the trained student for iOS.
+    A pre-compiled model is already included in the repository at `mobile_app/ios/Runner/pbr_model.mlpackage`. Run this command only if you want to replace it with your own trained model.
+    ```bash
+    python3 training/coreml/converter.py \
+      checkpoints/best_student.pth \
+      --output mobile_app/ios/Runner/pbr_model.mlpackage
     ```
 
 See `training/README.md` for full distillation instructions.

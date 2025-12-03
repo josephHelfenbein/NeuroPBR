@@ -40,33 +40,9 @@ import UIKit
         return
       }
 
-      // Validate Arguments
-      guard let args = call.arguments as? [String: Any],
-      let v1 = args["view1"] as? FlutterStandardTypedData,
-      let v2 = args["view2"] as? FlutterStandardTypedData,
-      let v3 = args["view3"] as? FlutterStandardTypedData else {
-        result(FlutterError(code: "INVALID_ARGS", message: "Expected view1, view2, view3 as bytes", details: nil))
-        return
-      }
-
-      // Run Model
       if #available(iOS 15.0, *) {
-        DispatchQueue.global(qos: .userInitiated).async {
-          do {
-            let outputs = try self?.pbrHandler?.generateMaps(
-              view1Data: v1.data,
-              view2Data: v2.data,
-              view3Data: v3.data
-            )
-            DispatchQueue.main.async {
-              result(outputs)
-            }
-          } catch {
-            DispatchQueue.main.async {
-              result(FlutterError(code: "MODEL_ERROR", message: error.localizedDescription, details: nil))
-            }
-          }
-        }
+        // Delegate to the handler which parses args and runs the model
+        self?.pbrHandler?.generatePBR(call: call, result: result)
       } else {
         result(FlutterError(code: "OS_OBSOLETE", message: "Requires iOS 15+", details: nil))
       }

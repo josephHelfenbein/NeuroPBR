@@ -23,7 +23,7 @@ The app is built with **Flutter** for the UI and logic, but relies heavily on na
 1.  **Flutter Layer (`lib/`)**: Handles the UI, camera capture flow, and coordinates the native plugins.
 2.  **Dart Plugin (`neuropbr_plugin.dart`)**: Communicates with the native iOS code via MethodChannels.
 3.  **Native iOS Layer (`ios/`)**:
-    -   **Core ML**: Hosts the Student model for fast inference.
+    -   **Runner**: Contains the application logic and the Core ML model (`pbr_model.mlpackage`).
     -   **Metal Renderer**: A real-time renderer sharing core logic with the desktop CUDA renderer but optimized for Apple Silicon. See [MetalRenderer/README.md](ios/MetalRenderer/README.md) for deep technical details.
 
 ## Prerequisites
@@ -42,6 +42,9 @@ The app is built with **Flutter** for the UI and logic, but relies heavily on na
     ```
 
 2.  **Setup iOS Project**:
+    *   The repository includes a pre-compiled Core ML model at `ios/Runner/pbr_model.mlpackage`, so no extra setup is needed to run the default model. If you trained a custom model, ensure it replaces this file.
+    *   Open `ios/Runner.xcworkspace` in Xcode.
+    *   Ensure `pbr_model.mlpackage` is added to the "Runner" target (drag and drop it into the project navigator if missing).
     ```bash
     cd ios
     pod install

@@ -38,9 +38,14 @@ The training pipeline uses `torch.compile` and `triton`, which are not fully sup
 cd training
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+
+# For macOS (Apple Silicon/Intel) - includes coremltools
+pip install -r requirements_macos.txt
+
+# For Linux - includes triton
+pip install -r requirements_linux.txt
 ```
-Optional extras (uncomment in `requirements.txt`): `wandb`, `opencv-python`, `matplotlib`.
+Optional extras (uncomment in the respective requirements file): `wandb`, `opencv-python`, `matplotlib`.
 
 ### 2. Verify Dataset Layout
 ```
@@ -459,3 +464,36 @@ The `configs/mobilenetv3_2048.py` configuration is specifically tuned for Apple 
 *   **Resolution**: 2048x2048 input/output.
 
 This pipeline produces a model capable of running on iPhone 13 Pro and newer.
+
+### 4. Convert to Core ML
+Once the student model is trained, convert it to a `.mlpackage` for iOS deployment using the provided converter script.
+
+**Note:** A pre-compiled model is already included in the repository at `mobile_app/ios/Runner/pbr_model.mlpackage`. Use this script only if you have trained a new student model and want to deploy it.
+
+```bash
+# Run on macOS (requires coremltools)
+python3 training/coreml/converter.py \
+  checkpoints/best_student.pth \
+  --output mobile_app/ios/Runner/pbr_model.mlpackage
+```
+
+This script automatically:
+1. Detects the student architecture.
+2. Strips training artifacts (like `_orig_mod` prefixes from `torch.compile`).
+3. Traces the model with dummy inputs.
+4. Applies the correct normalization (ImageNet stats) directly into the Core ML model.
+5. Exports a Float16 quantized model ready for the app.
+
+### 5. Run Core ML Inference (CLI)
+You can test the compiled `.mlpackage` on macOS using the provided inference script. This is useful for verifying the model's output without deploying to a device.
+
+```bash
+python3 training/coreml/run_inference.py \
+  mobile_app/ios/Runner/pbr_model.mlpackage \
+  --input path/to/folder_with_3_images \
+  --output inference_results
+```
+
+*   **Input**: A folder containing at least 3 images (png/jpg). The script will use the first 3 sorted alphabetically.
+*   **Output**: Saves `albedo.png`, `normal.png`, `roughness.png`, and `metallic.png` to the specified output directory.
+*   **Note**: The script automatically handles resizing inputs to 2048x2048 to match the model's requirements.

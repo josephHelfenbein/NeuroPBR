@@ -6,5 +6,8 @@ mobile_app/windows/** linguist-vendored
 mobile_app/linux/** linguist-vendored
 mobile_app/web/** linguist-vendored
 mobile_app/ios/** linguist-vendored
-mobile_app/ios/CoreML/** linguist-vendored=false
+
+# Un-vendor iOS user code
 mobile_app/ios/MetalRenderer/** linguist-vendored=false
+mobile_app/ios/Runner/** linguist-vendored=false
+mobile_app/ios/Runner/GeneratedPluginRegistrant.* linguist-vendored
