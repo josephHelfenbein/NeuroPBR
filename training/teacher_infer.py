@@ -182,12 +182,13 @@ def run_inference(
     )
 
     # Use DataLoader for parallel loading (significantly speeds up PNG decoding)
+    # Reduced workers and disabled pin_memory to avoid CUDA/multiprocessing errors
     loader = DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=8,
-        pin_memory=True,
+        num_workers=4,
+        pin_memory=False,
         persistent_workers=True,
         prefetch_factor=2
     )
@@ -347,6 +348,12 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    # Ensure safe multiprocessing start method for CUDA
+    try:
+        torch.multiprocessing.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
+
     args = parse_args()
     
     # 1. Load base config (default or from file)
