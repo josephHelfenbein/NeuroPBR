@@ -265,18 +265,31 @@ class DistillationShardDataset(Dataset):
         # Build index: global_idx -> (shard_idx, local_idx, pbr_dataset_idx)
         self.index_map = []
         
-        print(f"Scanning {len(self.shard_paths)} shards...")
-        for shard_idx, p in enumerate(self.shard_paths):
-            try:
-                # Map location cpu to avoid gpu memory usage during scan
-                data = torch.load(p, map_location="cpu", weights_only=False) 
-                indices = data["indices"]
-                num_samples = len(indices)
-                for i in range(num_samples):
-                    # Store (shard_idx, local_idx_in_shard, original_dataset_idx)
-                    self.index_map.append((shard_idx, i, indices[i]))
-            except Exception as e:
-                print(f"Error loading shard {p}: {e}")
+        # Cache the index map to disk to avoid re-scanning
+        index_cache_path = self.shards_dir / "shard_index_cache.pt"
+        
+        if index_cache_path.exists():
+            print(f"Loading shard index from cache: {index_cache_path}")
+            self.index_map = torch.load(index_cache_path, weights_only=False)
+        else:
+            print(f"Scanning {len(self.shard_paths)} shards...")
+            for shard_idx, p in enumerate(self.shard_paths):
+                try:
+                    # Map location cpu to avoid gpu memory usage during scan
+                    # Only load indices, not the heavy tensors
+                    # Note: torch.load loads everything, but we can try to be efficient
+                    data = torch.load(p, map_location="cpu", weights_only=False) 
+                    indices = data["indices"]
+                    num_samples = len(indices)
+                    for i in range(num_samples):
+                        # Store (shard_idx, local_idx_in_shard, original_dataset_idx)
+                        self.index_map.append((shard_idx, i, indices[i]))
+                except Exception as e:
+                    print(f"Error loading shard {p}: {e}")
+            
+            # Save cache
+            print(f"Saving shard index cache to {index_cache_path}")
+            torch.save(self.index_map, index_cache_path)
                 
         # Split train/val
         all_indices = list(range(len(self.index_map)))
