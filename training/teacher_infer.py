@@ -58,10 +58,7 @@ def _load_config(config_arg: str) -> TrainConfig:
 
 def _apply_data_overrides(config: TrainConfig, args: argparse.Namespace) -> None:
     """Apply CLI overrides for data paths and dirty/clean choice."""
-    if args.data_root:
-        config.data.data_root = args.data_root
-
-    root_path = Path(config.data.data_root) if config.data.data_root else None
+    root_path = Path(args.data_root) if args.data_root else None
 
     # Input/output/metadata: explicit CLI wins; otherwise fall back to data_root
     if args.input_dir:
@@ -282,7 +279,28 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    
+    # 1. Load base config (default or from file)
     cfg = _load_config(args.config)
+    
+    # 2. Try to load config from checkpoint to ensure architecture matches weights
+    # This prevents "size mismatch" errors if the user forgets --config
+    try:
+        print(f"Inspecting checkpoint: {args.checkpoint}")
+        # Load on CPU to avoid OOM before we're ready
+        ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+        if "config" in ckpt:
+            print("  Found config in checkpoint. Using it to ensure model architecture matches.")
+            saved_config = ckpt["config"]
+            # Use the saved config as the base, but we will override data paths below
+            cfg = saved_config
+        else:
+            print("  No config found in checkpoint. Using CLI/default config.")
+    except Exception as e:
+        print(f"  Warning: Could not load config from checkpoint ({e}).")
+        print("  Proceeding with CLI/default config.")
+
+    # 3. Apply CLI overrides (input/output dirs, curriculum)
     _apply_data_overrides(cfg, args)
     
     # Handle alias
