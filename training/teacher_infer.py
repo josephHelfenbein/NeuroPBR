@@ -22,8 +22,10 @@ Example usage from the `training` directory:
 
 from pathlib import Path
 import argparse
+from tqdm import tqdm
 
 import torch
+from torch.utils.data import DataLoader
 
 from train import MultiViewPBRGenerator
 from train_config import (
@@ -163,6 +165,15 @@ def run_inference(
         seed=config.training.seed,
     )
 
+    # Use DataLoader for parallel loading (significantly speeds up PNG decoding)
+    loader = DataLoader(
+        ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=8,
+        pin_memory=True
+    )
+
     shard_idx = 0
     shard_samples = []
     shard_inputs = []
@@ -172,20 +183,20 @@ def run_inference(
 
     print(f"Running teacher over {len(ds)} samples...")
     with torch.no_grad():
-        for i in range(len(ds)):
-            # inputs: (3,3,H,W), targets: (4,3,H,W)
-            inputs_raw, targets_raw = ds[i]
+        for i, (inputs_batch, targets_batch) in enumerate(tqdm(loader)):
+            # inputs_batch: (1, 3, 3, H, W)
+            # targets_batch: (1, 4, 3, H, W)
             
-            # Prepare for model
-            inputs_batch = inputs_raw.unsqueeze(0).to(device)  # (1,3,3,H,W)
+            # Move to device
+            inputs_device = inputs_batch.to(device)
 
             # Run teacher
-            pred = model(inputs_batch)
+            pred = model(inputs_device)
             
             # Store data (move to CPU to save memory)
             shard_samples.append(i)
-            shard_inputs.append(inputs_raw.unsqueeze(0)) # Keep as (1,3,3,H,W) for cat later
-            shard_targets.append(targets_raw.unsqueeze(0)) # Keep as (1,4,3,H,W) for cat later
+            shard_inputs.append(inputs_batch) 
+            shard_targets.append(targets_batch)
             
             for k in shard_outputs:
                 shard_outputs[k].append(pred[k].cpu())
