@@ -250,6 +250,10 @@ def run_inference(
                     shard_inputs = []
                     shard_targets = []
                     shard_outputs = {k: [] for k in shard_outputs}
+                    
+                    # Clear cache to prevent fragmentation over long runs
+                    if device.type == "cuda":
+                        torch.cuda.empty_cache()
 
         # Flush last partial shard
         if shard_samples:
