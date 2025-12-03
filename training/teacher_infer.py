@@ -91,10 +91,10 @@ def save_shard(out_dir: Path, idx: int, sample_indices, inputs, targets, outputs
     """Save a single shard of data (inputs, targets, teacher_outputs) to disk."""
     shard_path = out_dir / f"shard_{idx:05d}.pt"
     
-    # Stack lists into tensors
-    tensor_inputs = torch.cat(inputs, dim=0)  # (B, 3, 3, H, W)
-    tensor_targets = torch.cat(targets, dim=0)  # (B, 4, 3, H, W)
-    tensor_outputs = {k: torch.cat(v, dim=0) for k, v in outputs.items()}  # (B, C, H, W)
+    # Stack lists into tensors and cast to float16 to save 50% disk space
+    tensor_inputs = torch.cat(inputs, dim=0).half()  # (B, 3, 3, H, W)
+    tensor_targets = torch.cat(targets, dim=0).half()  # (B, 4, 3, H, W)
+    tensor_outputs = {k: torch.cat(v, dim=0).half() for k, v in outputs.items()}  # (B, C, H, W)
     
     torch.save(
         {

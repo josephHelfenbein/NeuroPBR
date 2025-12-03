@@ -293,18 +293,18 @@ class DistillationShardDataset(Dataset):
             )
             self.cached_shard_idx = shard_idx
             
-        # Extract data
+        # Extract data and cast back to float32
         # inputs: (3, 3, H, W)
-        inputs = self.cached_data["inputs"][local_idx]
+        inputs = self.cached_data["inputs"][local_idx].float()
         
         # targets: (4, 3, H, W) -> unpack to pbr_maps format
         # The PBRDataset returns pbr_maps as (4, 3, H, W) stacked.
         # Our saved targets are already (B, 4, 3, H, W), so we get (4, 3, H, W).
-        pbr_maps = self.cached_data["targets"][local_idx]
+        pbr_maps = self.cached_data["targets"][local_idx].float()
         
         # teacher_outputs: Dict[str, Tensor]
         teacher_pred = {
-            k: v[local_idx] for k, v in self.cached_data["teacher_outputs"].items()
+            k: v[local_idx].float() for k, v in self.cached_data["teacher_outputs"].items()
         }
         
         return inputs, pbr_maps, teacher_pred

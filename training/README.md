@@ -385,6 +385,7 @@ tensorboard --logdir checkpoints/logs
 | --- | --- |
 | Only CPU detected | `python -c "import torch; print(torch.cuda.is_available())"`; reinstall CUDA build or pass `--device cuda` to see explicit error |
 | OOM | Lower `batch_size`, switch to `resnet18`, reduce transformer depth, keep AMP enabled |
+| OOM (Fragmentation) | Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` environment variable before running scripts |
 | Unstable GAN | Lower `g_lr/d_lr`, tighter `grad_clip_norm`, delay GAN start, freeze BN |
 | Slow convergence | Increase LR, use cosine scheduler with warmup, raise L1/normal weights |
 | Poor normal quality | Boost `w_normal` & `w_normal_map`, verify dataset normalization |
