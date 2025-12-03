@@ -81,12 +81,45 @@ See `mobile_app/lib/neuropbr_preview_demo.dart` for an executable walkthrough. T
 
 Drop the resulting `Texture` widget anywhere in the Flutter tree to embed the live Metal surface inside the app UI.
 
-## Automatic HDRI prefiltering
+## Precomputed Environment Maps
 
-`MetalBridge.mm` now mirrors the CUDA preprocessing flow on-device:
+For faster app startup, the mobile app now uses **precomputed environment maps** instead of processing raw HDRIs at runtime.
 
-- Supplying `hdr` (path or payload) inside `setEnvironment` tells the bridge to load the equirect texture, run `EnvironmentPrefilter.metal` compute kernels to produce cubemap, irradiance, prefiltered mip chain, and BRDF LUT, and then push the resulting handles into the renderer.
-- If you only provide `environment` and it points to a `.hdr/.exr` file while the other slots are omitted, the bridge automatically enables the same pipeline so existing call sites stay compatible.
-- Optional knobs (`faceSize`, `irradianceSize`, `specularSamples`, `diffuseSamples`) can be attached to the `setEnvironment` call (and are exposed in `NeuropbrEnvironment`) to trade quality for speed when generating the cubemap.
+### How It Works
 
-The generated textures are cached inside the bridge (`TextureHandle`s backed by Metal resources), so subsequent renders reuse the prefitered results without recomputing unless you upload a new HDRI.
+The app loads precomputed KTX files from `assets/env_maps/` containing:
+- `{name}_env.ktx` – Environment cubemap (512×512 per face, RGBA16F)
+- `{name}_irradiance.ktx` – Diffuse irradiance cubemap (32×32 per face)  
+- `{name}_prefiltered.ktx` – Specular prefiltered cubemap with mip levels for roughness
+- `brdf_lut.ktx` – Shared BRDF integration lookup table (512×512, RG16F)
+
+The `EnvironmentPrefilter` class includes KTX loading methods:
+- `loadKTXCubemap:error:` – Parses KTX cubemap files with mipmap support
+- `loadKTX2DTexture:error:` – Parses KTX 2D textures (for BRDF LUT)
+- `loadPrecomputedEnvironment:irradiancePath:prefilteredPath:brdfPath:error:` – Convenience method to load all environment textures at once
+
+`MetalBridge.mm` automatically detects `.ktx` file extensions and routes them through the KTX loader instead of `MTKTextureLoader`.
+
+### Regenerating Environment Maps
+
+If you need to add new HDRIs or regenerate the environment maps:
+
+1. Place `.hdr` files in `mobile_app/assets/hdris/`
+2. Run the generation script (requires macOS with Metal):
+   ```bash
+   cd mobile_app/scripts
+   ./generate_env_maps.sh
+   ```
+
+This script uses the same Metal compute shaders (`EnvironmentPrefilter.metal`) to precompute the maps on the GPU, processing all HDRIs in ~2 seconds.
+
+### Live HDRI Processing (Fallback)
+
+The renderer still supports on-device HDRI processing as a fallback:
+
+- Supplying `hdr` (path or payload) inside `setEnvironment` tells the bridge to load the equirect texture, run `EnvironmentPrefilter.metal` compute kernels to produce cubemap, irradiance, prefiltered mip chain, and BRDF LUT.
+- If you provide `environment` pointing to a `.hdr/.exr` file while other slots are omitted, the bridge automatically enables this pipeline.
+- Optional knobs (`faceSize`, `irradianceSize`, `specularSamples`, `diffuseSamples`) can trade quality for speed.
+- Generated textures are cached inside the bridge, so subsequent renders reuse the prefiltered results without recomputing.
+
+This is useful for dynamically loading user-provided HDRIs, but adds ~1-2 seconds to initial environment setup compared to precomputed maps.

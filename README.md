@@ -169,7 +169,7 @@ For iOS deployment, train a lightweight student model via knowledge distillation
     python student/train.py --config configs/mobilenetv3_2048.py --shards-dir ./data/shards ...
     ```
 3.  **Convert to Core ML**: Export the trained student for iOS.
-    A pre-compiled model is already included in the repository at `mobile_app/ios/Runner/pbr_model.mlpackage`. Run this command only if you want to replace it with your own trained model.
+    A pre-compiled model is already included in the repository at `mobile_app/ios/Runner/pbr_model.mlpackage`. Run this command (requires macOS) only if you want to replace it with your own trained model.
     ```bash
     python3 training/coreml/converter.py \
       checkpoints/best_student.pth \
