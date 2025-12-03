@@ -7,6 +7,28 @@ static const NSUInteger kDefaultSpecularSamples = 1024;
 static const NSUInteger kDefaultDiffuseSamples = 512;
 static const NSUInteger kBRDFLUTSize = 512;
 
+// KTX file format constants
+static const uint8_t KTX_IDENTIFIER[12] = {0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A};
+
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t identifier[12];
+    uint32_t endianness;
+    uint32_t glType;
+    uint32_t glTypeSize;
+    uint32_t glFormat;
+    uint32_t glInternalFormat;
+    uint32_t glBaseInternalFormat;
+    uint32_t pixelWidth;
+    uint32_t pixelHeight;
+    uint32_t pixelDepth;
+    uint32_t numberOfArrayElements;
+    uint32_t numberOfFaces;
+    uint32_t numberOfMipmapLevels;
+    uint32_t bytesOfKeyValueData;
+} KTXHeader;
+#pragma pack(pop)
+
 @interface NPBREnvironmentProducts ()
 @end
 
@@ -261,6 +283,312 @@ static const NSUInteger kBRDFLUTSize = 512;
     [commandBuffer commit];
     [commandBuffer waitUntilCompleted];
     return lut;
+}
+
+#pragma mark - KTX Loading
+
+- (MTLPixelFormat)metalPixelFormatFromGLFormat:(uint32_t)glInternalFormat glType:(uint32_t)glType {
+    // GL_RGBA16F = 0x881A, GL_HALF_FLOAT = 0x140B
+    // GL_RGBA32F = 0x8814, GL_FLOAT = 0x1406
+    // GL_RG16F = 0x822F
+    
+    if (glInternalFormat == 0x881A || (glInternalFormat == 0x1908 && glType == 0x140B)) {
+        return MTLPixelFormatRGBA16Float;
+    }
+    if (glInternalFormat == 0x8814 || (glInternalFormat == 0x1908 && glType == 0x1406)) {
+        return MTLPixelFormatRGBA32Float;
+    }
+    if (glInternalFormat == 0x822F) {
+        return MTLPixelFormatRG16Float;
+    }
+    // Default to RGBA16Float
+    return MTLPixelFormatRGBA16Float;
+}
+
+- (NSUInteger)bytesPerPixelForFormat:(MTLPixelFormat)format {
+    switch (format) {
+        case MTLPixelFormatRGBA16Float: return 8;
+        case MTLPixelFormatRGBA32Float: return 16;
+        case MTLPixelFormatRG16Float: return 4;
+        case MTLPixelFormatRG32Float: return 8;
+        default: return 8;
+    }
+}
+
+- (nullable id<MTLTexture>)loadKTXCubemap:(NSString *)path error:(NSError **)error {
+    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
+    if (!data) {
+        return nil;
+    }
+    
+    if (data.length < sizeof(KTXHeader)) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-10 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"KTX file too small"}];
+        }
+        return nil;
+    }
+    
+    const uint8_t *bytes = (const uint8_t *)data.bytes;
+    KTXHeader header;
+    memcpy(&header, bytes, sizeof(KTXHeader));
+    
+    // Verify identifier
+    if (memcmp(header.identifier, KTX_IDENTIFIER, 12) != 0) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-11 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"Invalid KTX identifier"}];
+        }
+        return nil;
+    }
+    
+    // Check endianness
+    BOOL needsSwap = (header.endianness != 0x04030201);
+    if (needsSwap) {
+        // For simplicity, we don't support byte-swapped files
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-12 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"KTX endianness not supported"}];
+        }
+        return nil;
+    }
+    
+    if (header.numberOfFaces != 6) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-13 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"KTX file is not a cubemap"}];
+        }
+        return nil;
+    }
+    
+    MTLPixelFormat format = [self metalPixelFormatFromGLFormat:header.glInternalFormat glType:header.glType];
+    NSUInteger bytesPerPixel = [self bytesPerPixelForFormat:format];
+    NSUInteger size = header.pixelWidth;
+    NSUInteger mipCount = MAX(1, header.numberOfMipmapLevels);
+    
+    // Create cubemap texture
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:format 
+                                                                                       size:size 
+                                                                                  mipmapped:(mipCount > 1)];
+    desc.mipmapLevelCount = mipCount;
+    desc.usage = MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModeShared;
+    
+    id<MTLTexture> texture = [_device newTextureWithDescriptor:desc];
+    if (!texture) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-14 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"Failed to create cubemap texture"}];
+        }
+        return nil;
+    }
+    
+    // Read mip levels
+    NSUInteger offset = sizeof(KTXHeader) + header.bytesOfKeyValueData;
+    
+    for (NSUInteger mip = 0; mip < mipCount; ++mip) {
+        if (offset + 4 > data.length) break;
+        
+        uint32_t imageSize;
+        memcpy(&imageSize, bytes + offset, 4);
+        offset += 4;
+        
+        NSUInteger mipSize = MAX(1, size >> mip);
+        NSUInteger bytesPerRow = mipSize * bytesPerPixel;
+        NSUInteger bytesPerFace = mipSize * mipSize * bytesPerPixel;
+        
+        for (NSUInteger face = 0; face < 6; ++face) {
+            if (offset + bytesPerFace > data.length) break;
+            
+            [texture replaceRegion:MTLRegionMake2D(0, 0, mipSize, mipSize)
+                       mipmapLevel:mip
+                             slice:face
+                         withBytes:bytes + offset
+                       bytesPerRow:bytesPerRow
+                     bytesPerImage:bytesPerFace];
+            
+            offset += bytesPerFace;
+        }
+        
+        // Align to 4-byte boundary
+        NSUInteger padding = (4 - (imageSize % 4)) % 4;
+        offset += padding;
+    }
+    
+    return texture;
+}
+
+- (nullable id<MTLTexture>)loadTexture2D:(NSString *)path error:(NSError **)error {
+    // Check if this is a KTX file
+    NSString *ext = path.pathExtension.lowercaseString;
+    if ([ext isEqualToString:@"ktx"]) {
+        return [self loadKTX2DTexture:path error:error];
+    }
+    
+    // Use MTKTextureLoader for PNG/image files
+    MTKTextureLoader *loader = [[MTKTextureLoader alloc] initWithDevice:_device];
+    
+    NSDictionary *options = @{
+        MTKTextureLoaderOptionSRGB : @NO,
+        MTKTextureLoaderOptionTextureUsage : @(MTLTextureUsageShaderRead),
+        MTKTextureLoaderOptionTextureStorageMode : @(MTLStorageModeShared)
+    };
+    
+    NSURL *url = [NSURL fileURLWithPath:path];
+    id<MTLTexture> texture = [loader newTextureWithContentsOfURL:url options:options error:error];
+    
+    return texture;
+}
+
+- (nullable id<MTLTexture>)loadKTX2DTexture:(NSString *)path error:(NSError **)error {
+    NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
+    if (!data) {
+        return nil;
+    }
+    
+    if (data.length < sizeof(KTXHeader)) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-20 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"KTX 2D file too small"}];
+        }
+        return nil;
+    }
+    
+    const uint8_t *bytes = (const uint8_t *)data.bytes;
+    KTXHeader header;
+    memcpy(&header, bytes, sizeof(KTXHeader));
+    
+    // Verify identifier
+    if (memcmp(header.identifier, KTX_IDENTIFIER, 12) != 0) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-21 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"Invalid KTX 2D identifier"}];
+        }
+        return nil;
+    }
+    
+    // Check endianness
+    BOOL needsSwap = (header.endianness != 0x04030201);
+    if (needsSwap) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-22 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"KTX 2D endianness not supported"}];
+        }
+        return nil;
+    }
+    
+    MTLPixelFormat format = [self metalPixelFormatFromGLFormat:header.glInternalFormat glType:header.glType];
+    NSUInteger bytesPerPixel = [self bytesPerPixelForFormat:format];
+    NSUInteger width = header.pixelWidth;
+    NSUInteger height = header.pixelHeight > 0 ? header.pixelHeight : 1;
+    
+    // Create 2D texture
+    MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format 
+                                                                                    width:width 
+                                                                                   height:height 
+                                                                                mipmapped:NO];
+    desc.usage = MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModeShared;
+    
+    id<MTLTexture> texture = [_device newTextureWithDescriptor:desc];
+    if (!texture) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-23 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"Failed to create 2D texture"}];
+        }
+        return nil;
+    }
+    
+    // Read first mip level
+    NSUInteger offset = sizeof(KTXHeader) + header.bytesOfKeyValueData;
+    
+    if (offset + 4 > data.length) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-24 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"KTX 2D file truncated"}];
+        }
+        return nil;
+    }
+    
+    uint32_t imageSize;
+    memcpy(&imageSize, bytes + offset, 4);
+    offset += 4;
+    
+    NSUInteger bytesPerRow = width * bytesPerPixel;
+    
+    if (offset + width * height * bytesPerPixel > data.length) {
+        if (error) {
+            *error = [NSError errorWithDomain:@"NPBREnvironment" code:-25 
+                                     userInfo:@{NSLocalizedDescriptionKey : @"KTX 2D image data truncated"}];
+        }
+        return nil;
+    }
+    
+    [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+               mipmapLevel:0
+                 withBytes:bytes + offset
+               bytesPerRow:bytesPerRow];
+    
+    return texture;
+}
+
+- (nullable NPBREnvironmentProducts *)loadPrecomputedEnvironment:(NSString *)environmentPath
+                                                  irradiancePath:(NSString *)irradiancePath
+                                                 prefilteredPath:(NSString *)prefilteredPath
+                                                        brdfPath:(nullable NSString *)brdfPath
+                                                           error:(NSError **)error {
+    NSError *loadError = nil;
+    
+    // Load environment cubemap
+    id<MTLTexture> envTexture = [self loadKTXCubemap:environmentPath error:&loadError];
+    if (!envTexture) {
+        NSLog(@"[Neuropbr] Failed to load environment cubemap: %@", loadError.localizedDescription);
+        if (error) *error = loadError;
+        return nil;
+    }
+    
+    // Load irradiance cubemap
+    id<MTLTexture> irrTexture = [self loadKTXCubemap:irradiancePath error:&loadError];
+    if (!irrTexture) {
+        NSLog(@"[Neuropbr] Failed to load irradiance cubemap: %@", loadError.localizedDescription);
+        if (error) *error = loadError;
+        return nil;
+    }
+    
+    // Load prefiltered cubemap
+    id<MTLTexture> prefilteredTexture = [self loadKTXCubemap:prefilteredPath error:&loadError];
+    if (!prefilteredTexture) {
+        NSLog(@"[Neuropbr] Failed to load prefiltered cubemap: %@", loadError.localizedDescription);
+        if (error) *error = loadError;
+        return nil;
+    }
+    
+    // Load or generate BRDF LUT
+    id<MTLTexture> brdfTexture = nil;
+    if (brdfPath.length > 0) {
+        brdfTexture = [self loadTexture2D:brdfPath error:&loadError];
+        if (!brdfTexture) {
+            NSLog(@"[Neuropbr] Failed to load BRDF LUT, will generate: %@", loadError.localizedDescription);
+        }
+    }
+    if (!brdfTexture) {
+        brdfTexture = [self sharedBRDFLUT];
+    }
+    
+    NPBREnvironmentProducts *products = [[NPBREnvironmentProducts alloc] init];
+    products.environment = envTexture;
+    products.irradiance = irrTexture;
+    products.prefiltered = prefilteredTexture;
+    products.brdf = brdfTexture;
+    products.mipLevelCount = prefilteredTexture.mipmapLevelCount;
+    
+    NSLog(@"[Neuropbr] Loaded precomputed environment: env=%lux%lu, irr=%lux%lu, pf=%lux%lu mips=%lu",
+          (unsigned long)envTexture.width, (unsigned long)envTexture.height,
+          (unsigned long)irrTexture.width, (unsigned long)irrTexture.height,
+          (unsigned long)prefilteredTexture.width, (unsigned long)prefilteredTexture.height,
+          (unsigned long)products.mipLevelCount);
+    
+    return products;
 }
 
 @end

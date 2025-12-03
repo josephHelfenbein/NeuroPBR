@@ -1050,18 +1050,37 @@ destinationBytesPerImage:bytesPerRow * height];
                            error:(NSError **)error {
     id<MTLTexture> texture = fallback;
     if (path.length) {
-        NSMutableDictionary *options = [@{ MTKTextureLoaderOptionSRGB : @NO,
-                                           MTKTextureLoaderOptionTextureUsage : @(usage) } mutableCopy];
-        if (expectCube) {
-            options[MTKTextureLoaderOptionCubeLayout] = MTKTextureLoaderCubeLayoutVertical;
-        }
-        NSError *loadError = nil;
-        texture = [_textureLoader newTextureWithContentsOfURL:[NSURL fileURLWithPath:path] options:options error:&loadError];
-        if (!texture) {
-            if (error) {
-                *error = loadError;
+        NSString *ext = path.pathExtension.lowercaseString;
+        
+        // Check for KTX files - use our custom loader
+        if ([ext isEqualToString:@"ktx"]) {
+            NSError *loadError = nil;
+            if (expectCube) {
+                texture = [_prefilter loadKTXCubemap:path error:&loadError];
+            } else {
+                texture = [_prefilter loadTexture2D:path error:&loadError];
             }
-            return TextureBinding{};
+            if (!texture) {
+                if (error) {
+                    *error = loadError;
+                }
+                return TextureBinding{};
+            }
+        } else {
+            // Use MTKTextureLoader for other formats
+            NSMutableDictionary *options = [@{ MTKTextureLoaderOptionSRGB : @NO,
+                                               MTKTextureLoaderOptionTextureUsage : @(usage) } mutableCopy];
+            if (expectCube) {
+                options[MTKTextureLoaderOptionCubeLayout] = MTKTextureLoaderCubeLayoutVertical;
+            }
+            NSError *loadError = nil;
+            texture = [_textureLoader newTextureWithContentsOfURL:[NSURL fileURLWithPath:path] options:options error:&loadError];
+            if (!texture) {
+                if (error) {
+                    *error = loadError;
+                }
+                return TextureBinding{};
+            }
         }
     }
     if (!texture) {

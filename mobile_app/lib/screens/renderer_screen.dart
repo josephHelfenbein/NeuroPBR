@@ -37,17 +37,18 @@ class _RendererScreenState extends State<RendererScreen> {
 
   // Scene State
   NeuropbrModelType _currentModel = NeuropbrModelType.sphere;
-  String _currentHdri = 'sunny_rose_garden_8k.hdr';
+  String _currentEnvMap = 'sunny_rose_garden_8k';
   
-  final List<String> _availableHdris = [
-    'furry_clouds_8k.hdr',
-    'large_corridor_8k.hdr',
-    'sunny_rose_garden_8k.hdr',
-    'the_sky_is_on_fire_8k.hdr',
+  // Available environment maps (base names without extension)
+  final List<String> _availableEnvMaps = [
+    'furry_clouds_8k',
+    'large_corridor_8k',
+    'sunny_rose_garden_8k',
+    'the_sky_is_on_fire_8k',
   ];
 
   // Cache for copied asset paths
-  final Map<String, String> _hdriPaths = {};
+  final Map<String, Map<String, String>> _envMapPaths = {};
   
   final List<String> _defaultTextures = [
     'albedo.png',
@@ -56,6 +57,9 @@ class _RendererScreenState extends State<RendererScreen> {
     'roughness.png',
   ];
   final Map<String, String> _texturePaths = {};
+  
+  // Shared BRDF LUT path
+  String? _brdfLutPath;
 
   @override
   void initState() {
@@ -102,8 +106,8 @@ class _RendererScreenState extends State<RendererScreen> {
       }
 
       // 5. Prepare and Load Initial Environment
-      await _prepareHdris();
-      await _loadEnvironment(_currentHdri);
+      await _prepareEnvMaps();
+      await _loadEnvironment(_currentEnvMap);
 
       setState(() {
         _isInitialized = true;
@@ -316,28 +320,61 @@ class _RendererScreenState extends State<RendererScreen> {
     ));
   }
 
-  Future<void> _prepareHdris() async {
+  Future<void> _prepareEnvMaps() async {
     final tempDir = await getTemporaryDirectory();
     
-    for (final hdri in _availableHdris) {
+    // Copy BRDF LUT first (shared across all environments)
+    try {
+      final brdfByteData = await rootBundle.load('assets/env_maps/brdf_lut.ktx');
+      final brdfFile = File('${tempDir.path}/brdf_lut.ktx');
+      await brdfFile.writeAsBytes(brdfByteData.buffer.asUint8List());
+      _brdfLutPath = brdfFile.path;
+    } catch (e) {
+      debugPrint('Failed to copy BRDF LUT: $e');
+    }
+    
+    // Copy environment map files for each environment
+    for (final envMap in _availableEnvMaps) {
       try {
-        final byteData = await rootBundle.load('assets/hdris/$hdri');
-        final file = File('${tempDir.path}/$hdri');
-        await file.writeAsBytes(byteData.buffer.asUint8List());
-        _hdriPaths[hdri] = file.path;
+        final paths = <String, String>{};
+        
+        // Environment cubemap
+        final envByteData = await rootBundle.load('assets/env_maps/${envMap}_env.ktx');
+        final envFile = File('${tempDir.path}/${envMap}_env.ktx');
+        await envFile.writeAsBytes(envByteData.buffer.asUint8List());
+        paths['environment'] = envFile.path;
+        
+        // Irradiance cubemap
+        final irrByteData = await rootBundle.load('assets/env_maps/${envMap}_irradiance.ktx');
+        final irrFile = File('${tempDir.path}/${envMap}_irradiance.ktx');
+        await irrFile.writeAsBytes(irrByteData.buffer.asUint8List());
+        paths['irradiance'] = irrFile.path;
+        
+        // Prefiltered cubemap
+        final pfByteData = await rootBundle.load('assets/env_maps/${envMap}_prefiltered.ktx');
+        final pfFile = File('${tempDir.path}/${envMap}_prefiltered.ktx');
+        await pfFile.writeAsBytes(pfByteData.buffer.asUint8List());
+        paths['prefiltered'] = pfFile.path;
+        
+        _envMapPaths[envMap] = paths;
       } catch (e) {
-        debugPrint('Failed to copy HDRI $hdri: $e');
+        debugPrint('Failed to copy environment maps for $envMap: $e');
       }
     }
   }
 
-  Future<void> _loadEnvironment(String hdriName) async {
-    final path = _hdriPaths[hdriName];
-    if (path == null) return;
+  Future<void> _loadEnvironment(String envMapName) async {
+    final paths = _envMapPaths[envMapName];
+    if (paths == null) {
+      debugPrint('Environment maps not found for $envMapName');
+      return;
+    }
     
     await _renderer.setEnvironment(NeuropbrEnvironment(
-      environmentPath: path,
-      faceSize: 2048,
+      environmentPath: paths['environment'],
+      irradiancePath: paths['irradiance'],
+      prefilteredPath: paths['prefiltered'],
+      brdfPath: _brdfLutPath,
     ));
     
     if (_isInitialized) {
@@ -533,20 +570,20 @@ class _RendererScreenState extends State<RendererScreen> {
                         height: 80,
                         child: ListView.builder(
                           scrollDirection: Axis.horizontal,
-                          itemCount: _availableHdris.length,
+                          itemCount: _availableEnvMaps.length,
                           itemBuilder: (context, index) {
-                            final hdri = _availableHdris[index];
-                            final isSelected = _currentHdri == hdri;
+                            final envMap = _availableEnvMaps[index];
+                            final isSelected = _currentEnvMap == envMap;
                             // Clean up name for display
-                            final displayName = hdri
-                                .replaceAll('_8k.hdr', '')
+                            final displayName = envMap
+                                .replaceAll('_8k', '')
                                 .replaceAll('_', ' ')
                                 .toUpperCase();
 
                             return GestureDetector(
                               onTap: () {
-                                setState(() => _currentHdri = hdri);
-                                _loadEnvironment(hdri);
+                                setState(() => _currentEnvMap = envMap);
+                                _loadEnvironment(envMap);
                               },
                               child: Container(
                                 width: 100,

@@ -71,8 +71,8 @@ flutter:
     - assets/app_icon.png
     - assets/initial.png
     - assets/native_splash.png
-    - assets/hdris/
     - assets/default_tex/
+    - assets/env_maps/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

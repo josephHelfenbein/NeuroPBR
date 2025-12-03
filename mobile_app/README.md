@@ -14,6 +14,7 @@ The mobile app serves as the primary interface for the NeuroPBR pipeline in the 
   - Uses a custom C++ and Metal PBR IBL renderer.
   - Exposed to Flutter via an Objective-C++ bridge (`MetalBridge.mm`).
   - Supports high-fidelity previewing with environment lighting.
+  - Uses precomputed environment maps (KTX format) for fast loading.
 - **Material Export**: Save or share the generated PBR texture maps.
 
 ## Architecture
@@ -57,3 +58,28 @@ The app is built with **Flutter** for the UI and logic, but relies heavily on na
     ```bash
     flutter run
     ```
+
+## Environment Maps
+
+The app uses precomputed environment maps for IBL (Image-Based Lighting) instead of processing raw HDRIs at runtime. This significantly improves app load times.
+
+### Precomputed Assets
+
+Environment maps are stored in `assets/env_maps/` as KTX files:
+- `{name}_env.ktx` - Environment cubemap (512×512 per face, RGBA16F)
+- `{name}_irradiance.ktx` - Diffuse irradiance cubemap (32×32 per face)
+- `{name}_prefiltered.ktx` - Specular prefiltered cubemap with mip levels
+- `brdf_lut.ktx` - Shared BRDF integration lookup table
+
+### Regenerating Environment Maps
+
+If you add new HDRIs or need to regenerate the environment maps:
+
+1.  Place your `.hdr` files in `assets/hdris/`
+2.  Run the generation script (requires macOS with Metal support):
+    ```bash
+    cd scripts
+    ./generate_env_maps.sh
+    ```
+
+This script uses the actual Metal compute shaders from the renderer to generate the environment maps on the GPU, processing all HDRIs in about 2-3 seconds.

@@ -17,12 +17,26 @@ NS_ASSUME_NONNULL_BEGIN
                        library:(id<MTLLibrary>)library
                   commandQueue:(id<MTLCommandQueue>)queue;
 
+/// Generate environment products from an HDR texture (live computation)
 - (nullable NPBREnvironmentProducts *)generateFromHDRTexture:(id<MTLTexture>)hdrTexture
                                                     faceSize:(NSUInteger)faceSize
                                               irradianceSize:(NSUInteger)irradianceSize
                                              specularSamples:(NSUInteger)specularSamples
                                              diffuseSamples:(NSUInteger)diffuseSamples
                                                        error:(NSError **)error;
+
+/// Load precomputed environment maps from disk (KTX files)
+- (nullable NPBREnvironmentProducts *)loadPrecomputedEnvironment:(NSString *)environmentPath
+                                                  irradiancePath:(NSString *)irradiancePath
+                                                 prefilteredPath:(NSString *)prefilteredPath
+                                                        brdfPath:(nullable NSString *)brdfPath
+                                                           error:(NSError **)error;
+
+/// Load a KTX cubemap texture from disk
+- (nullable id<MTLTexture>)loadKTXCubemap:(NSString *)path error:(NSError **)error;
+
+/// Load a 2D texture (for BRDF LUT) from disk
+- (nullable id<MTLTexture>)loadTexture2D:(NSString *)path error:(NSError **)error;
 
 - (id<MTLTexture>)sharedBRDFLUT;
 
