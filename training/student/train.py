@@ -383,7 +383,10 @@ class Trainer:
             print(f"[Rank {rank}] Student Trainer initialized")
             print(f"  Device: {self.device}")
             print(f"  Student params: {sum(p.numel() for p in self.student.parameters()):,}")
-            print(f"  Teacher params: {sum(p.numel() for p in self.teacher.parameters()):,}")
+            if self.teacher:
+                print(f"  Teacher params: {sum(p.numel() for p in self.teacher.parameters()):,}")
+            else:
+                print("  Teacher params: N/A (using pre-computed shards)")
             print(f"  Distillation temperature: {temperature}")
             print(f"  Distillation alpha: {alpha}")
             print(f"  Mixed precision (AMP): {'enabled' if self.use_amp else 'disabled'}")
