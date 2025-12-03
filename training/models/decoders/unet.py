@@ -164,8 +164,12 @@ class UNetDecoder(nn.Module):
     def forward(self, x, skips):
         reversed_skips = skips[::-1]
 
-        for dec, skip in zip(self.decoders, reversed_skips):
-            x = dec(x, skip)
+        for i, skip in enumerate(reversed_skips):
+            x = self.decoders[i](x, skip)
+
+        # Apply the final projection if it exists
+        if len(self.decoders) > len(skips):
+            x = self.decoders[-1](x)
 
         # Super-resolve to 2048×2048
         x = self.sr_head(x)
@@ -215,8 +219,12 @@ class UNetDecoderHeads(nn.Module):
     def forward(self, x, skips):
         reversed_skips = skips[::-1]
 
-        for dec, skip in zip(self.decoders, reversed_skips):
-            x = dec(x, skip)
+        for i, skip in enumerate(reversed_skips):
+            x = self.decoders[i](x, skip)
+
+        # Apply the final projection if it exists
+        if len(self.decoders) > len(skips):
+            x = self.decoders[-1](x)
 
         # Super-resolve to 2048×2048
         x = self.sr_head(x)
