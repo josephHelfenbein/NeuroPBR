@@ -6,7 +6,7 @@ outputs (PBR maps) into compact `.pt` shards for student distillation.
 
 Example usage from the `training` directory:
 
-    # Using default config, clean renders, 1024x1024 (from config)
+    # Using default config, clean renders, 2048x2048 (from config)
     python teacher_infer.py \
         --data-root /path/to/data \
         --checkpoint checkpoints/best_model.pth
@@ -87,14 +87,20 @@ def _apply_data_overrides(config: TrainConfig, args: argparse.Namespace) -> None
     config.data.use_dirty_renders = (config.data.render_curriculum == 2)
 
 
-def save_shard(out_dir: Path, idx: int, sample_indices, outputs):
-    """Save a single shard of teacher outputs to disk."""
+def save_shard(out_dir: Path, idx: int, sample_indices, inputs, targets, outputs):
+    """Save a single shard of data (inputs, targets, teacher_outputs) to disk."""
     shard_path = out_dir / f"shard_{idx:05d}.pt"
-    tensor_outputs = {k: torch.cat(v, dim=0)
-                      for k, v in outputs.items()}  # (B, C, H, W)
+    
+    # Stack lists into tensors
+    tensor_inputs = torch.cat(inputs, dim=0)  # (B, 3, 3, H, W)
+    tensor_targets = torch.cat(targets, dim=0)  # (B, 4, 3, H, W)
+    tensor_outputs = {k: torch.cat(v, dim=0) for k, v in outputs.items()}  # (B, C, H, W)
+    
     torch.save(
         {
             "indices": sample_indices,
+            "inputs": tensor_inputs,
+            "targets": tensor_targets,
             "teacher_outputs": tensor_outputs,
         },
         shard_path,
@@ -142,32 +148,57 @@ def run_inference(
 
     shard_idx = 0
     shard_samples = []
+    shard_inputs = []
+    shard_targets = []
     shard_outputs = {"albedo": [], "roughness": [],
                      "metallic": [], "normal": []}
 
     print(f"Running teacher over {len(ds)} samples...")
     with torch.no_grad():
         for i in range(len(ds)):
-            inputs, _ = ds[i]  # inputs: (3,3,H,W)
-            inputs = inputs.unsqueeze(0).to(device)  # (1,3,3,H,W)
+            # inputs: (3,3,H,W), targets: (4,3,H,W)
+            inputs_raw, targets_raw = ds[i]
+            
+            # Prepare for model
+            inputs_batch = inputs_raw.unsqueeze(0).to(device)  # (1,3,3,H,W)
 
-            pred = model(inputs)
+            # Run teacher
+            pred = model(inputs_batch)
+            
+            # Store data (move to CPU to save memory)
+            shard_samples.append(i)
+            shard_inputs.append(inputs_raw.unsqueeze(0)) # Keep as (1,3,3,H,W) for cat later
+            shard_targets.append(targets_raw.unsqueeze(0)) # Keep as (1,4,3,H,W) for cat later
+            
             for k in shard_outputs:
                 shard_outputs[k].append(pred[k].cpu())
 
-            shard_samples.append(i)
-
             # When shard is full, write to disk
             if len(shard_samples) == shard_size:
-                save_shard(out_dir_path, shard_idx,
-                           shard_samples, shard_outputs)
+                save_shard(
+                    out_dir_path, 
+                    shard_idx,
+                    shard_samples, 
+                    shard_inputs,
+                    shard_targets,
+                    shard_outputs
+                )
                 shard_idx += 1
                 shard_samples = []
+                shard_inputs = []
+                shard_targets = []
                 shard_outputs = {k: [] for k in shard_outputs}
 
         # Flush last partial shard
         if shard_samples:
-            save_shard(out_dir_path, shard_idx, shard_samples, shard_outputs)
+            save_shard(
+                out_dir_path, 
+                shard_idx, 
+                shard_samples, 
+                shard_inputs,
+                shard_targets,
+                shard_outputs
+            )
 
 
 def parse_args():
@@ -236,8 +267,8 @@ def parse_args():
     parser.add_argument(
         "--shard-size",
         type=int,
-        default=256,
-        help="Number of samples per .pt shard.",
+        default=8,
+        help="Number of samples per .pt shard. Default 8 (~4GB at 2048x2048).",
     )
 
     return parser.parse_args()

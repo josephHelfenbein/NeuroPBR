@@ -49,7 +49,7 @@ parser.add_argument("--out-dir", default="inference_outputs")
 parser.add_argument("--input-dir", type=str, help="Directory containing exactly three PNG renders to use for inference.")
 args = parser.parse_args()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 
 try:
     with torch.serialization.safe_globals([TrainConfig]):
@@ -60,7 +60,17 @@ except pickle.UnpicklingError:
 cfg = ckpt.get("config", get_default_config())
 
 model = MultiViewPBRGenerator(cfg).to(device)
-model.load_state_dict(ckpt["generator_state_dict"])
+
+state_dict = ckpt["generator_state_dict"]
+# Remove _orig_mod prefix from torch.compile
+new_state_dict = {}
+for k, v in state_dict.items():
+    if k.startswith("_orig_mod."):
+        new_state_dict[k[10:]] = v
+    else:
+        new_state_dict[k] = v
+
+model.load_state_dict(new_state_dict)
 model.eval()
 
 transform = _build_input_transform(cfg.data.image_size, cfg.transform.mean, cfg.transform.std)

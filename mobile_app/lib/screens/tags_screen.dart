@@ -6,7 +6,7 @@ import 'dart:io';
 import 'dart:convert';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
-import 'scan_screen_new.dart';
+import 'scan_screen.dart';
 import 'renderer_screen.dart';
 import '../theme/theme_provider.dart';
 

@@ -54,7 +54,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-import training.utils.gpu_optimization as gpu_optimization
+import utils.gpu_optimization as gpu_optimization
 
 try:
     from torch.amp import autocast as _autocast, GradScaler as _GradScaler

@@ -3,15 +3,21 @@ import 'package:flutter/services.dart';
 import 'package:camera/camera.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:provider/provider.dart';
+import 'dart:io';
+import 'dart:math' as math;
+import 'package:image/image.dart' as img;
+import 'captured_images_screen.dart';
+import '../theme/theme_provider.dart';
 
-class ScanScreen extends StatefulWidget {
-  const ScanScreen({super.key});
+class ScanScreenNew extends StatefulWidget {
+  const ScanScreenNew({super.key});
 
   @override
-  State<ScanScreen> createState() => _ScanScreenState();
+  State<ScanScreenNew> createState() => _ScanScreenNewState();
 }
 
-class _ScanScreenState extends State<ScanScreen>
+class _ScanScreenNewState extends State<ScanScreenNew>
     with WidgetsBindingObserver, TickerProviderStateMixin {
   CameraController? _controller;
   List<CameraDescription>? _cameras;
@@ -22,6 +28,8 @@ class _ScanScreenState extends State<ScanScreen>
   bool _isCapturing = false;
   bool _materialSelectorExpanded = false;
   double _exposureValue = 0.0;
+  double _minExposure = 0.0;
+  double _maxExposure = 0.0;
   int _isoValue = 400;
   String _resolutionInfo = 'Loading...';
   String _fpsInfo = '...';
@@ -29,7 +37,8 @@ class _ScanScreenState extends State<ScanScreen>
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   List<double> _availableZoomLevels = [1.0];
-  String _aspectRatio = '1:1'; // '1:1', '9:16', 'Full'
+  String _aspectRatio = 'Full';
+  List<String> _capturedImages = [];
 
   late AnimationController _focusController;
   late AnimationController _captureController;
@@ -115,7 +124,7 @@ class _ScanScreenState extends State<ScanScreen>
 
       _controller = CameraController(
         _cameras![_currentCameraIndex],
-        ResolutionPreset.max, // Highest quality available
+        ResolutionPreset.ultraHigh,
         enableAudio: false,
         imageFormatGroup: ImageFormatGroup.jpeg,
       );
@@ -123,13 +132,11 @@ class _ScanScreenState extends State<ScanScreen>
       await _controller!.initialize();
 
       if (mounted) {
-        // Get actual camera resolution
         final size = _controller!.value.previewSize;
         if (size != null) {
-          final width = size.height.toInt(); // swapped because of orientation
+          final width = size.height.toInt();
           final height = size.width.toInt();
 
-          // Determine resolution label
           if (width >= 3840 || height >= 2160) {
             _resolutionInfo = '4K';
           } else if (width >= 1920 || height >= 1080) {
@@ -140,21 +147,20 @@ class _ScanScreenState extends State<ScanScreen>
             _resolutionInfo = '${width}x$height';
           }
 
-          _fpsInfo = '30fps'; // Most mobile cameras default to 30fps
+          _fpsInfo = '30fps';
         }
 
-        // Get zoom capabilities
         _minZoom = await _controller!.getMinZoomLevel();
         _maxZoom = await _controller!.getMaxZoomLevel();
+        _minExposure = await _controller!.getMinExposureOffset();
+        _maxExposure = await _controller!.getMaxExposureOffset();
 
-        // Generate available zoom levels (1x, 2x, 3x) within device limits
         _availableZoomLevels = [];
         for (double zoom = 1.0; zoom <= 3.0; zoom += 1.0) {
           if (zoom <= _maxZoom) {
             _availableZoomLevels.add(zoom);
           }
         }
-        // If device supports more, cap at 3x for UI simplicity
         if (_availableZoomLevels.isEmpty) {
           _availableZoomLevels = [1.0];
         }
@@ -164,9 +170,8 @@ class _ScanScreenState extends State<ScanScreen>
       }
     } catch (e) {
       debugPrint('Error initializing camera: $e');
-      // Set quirky fallback text if camera fails
       setState(() {
-        _resolutionInfo = 'Neural Vision™';
+        _resolutionInfo = 'Neural Vision';
         _fpsInfo = 'Engaged';
       });
     }
@@ -178,32 +183,37 @@ class _ScanScreenState extends State<ScanScreen>
   }
 
   Future<void> _toggleFlash() async {
-    if (_controller == null) return;
+    if (_controller == null || !_controller!.value.isInitialized) return;
 
     HapticFeedback.lightImpact();
-    final newFlashMode = _flashOn ? FlashMode.off : FlashMode.torch;
-    await _controller!.setFlashMode(newFlashMode);
-    setState(() => _flashOn = !_flashOn);
+    try {
+      final newFlashMode = _flashOn ? FlashMode.off : FlashMode.torch;
+      await _controller!.setFlashMode(newFlashMode);
+      if (mounted) {
+        setState(() => _flashOn = !_flashOn);
+      }
+    } catch (e) {
+      debugPrint('Error toggling flash: $e');
+    }
   }
 
   Future<void> _applyExposure() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
 
     try {
-      // Set exposure offset (range is typically -4.0 to 4.0, we use -3.0 to 3.0)
       await _controller!.setExposureOffset(_exposureValue);
     } catch (e) {
       debugPrint('Error setting exposure: $e');
     }
   }
 
-  Future<void> _setZoom(double zoom) async {
+  Future<void> _setZoom(double targetZoom) async {
     if (_controller == null || !_controller!.value.isInitialized) return;
 
     try {
       HapticFeedback.lightImpact();
-      await _controller!.setZoomLevel(zoom);
-      setState(() => _currentZoom = zoom);
+      await _controller!.setZoomLevel(targetZoom);
+      setState(() => _currentZoom = targetZoom);
     } catch (e) {
       debugPrint('Error setting zoom: $e');
     }
@@ -234,578 +244,661 @@ class _ScanScreenState extends State<ScanScreen>
     }
   }
 
+  Future<void> _openCapturedImages() async {
+    if (_capturedImages.isEmpty) return;
+
+    HapticFeedback.lightImpact();
+
+    // We use 'await' to pause here until the user comes back
+    final updatedList = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => CapturedImagesScreen(imagePaths: _capturedImages),
+      ),
+    );
+
+    // When they return, we check if they sent back a list
+    if (updatedList != null && updatedList is List<String> && mounted) {
+      setState(() {
+        _capturedImages = updatedList;
+      });
+    }
+  }
+
   Future<void> _capturePhoto() async {
-    if (_controller == null || !_controller!.value.isInitialized || _isCapturing) {
+    // 1. Hardware Check & Initial Guard
+    // We add _isCapturing to the check to prevent double-tapping while the UI is locked
+    if (_controller == null || !_controller!.value.isInitialized || _controller!.value.isTakingPicture || _isCapturing) {
       return;
     }
 
+    // 2. INSTANT FEEDBACK: Haptic + Animation immediately
+    HapticFeedback.heavyImpact();
+    setState(() => _isCapturing = true); // Set capturing flag
+    _scanAnimationController.forward(from: 0.0);
+    _captureController.forward();
+
     try {
-      setState(() => _isCapturing = true);
-      HapticFeedback.heavyImpact();
+      // 3. Take picture in background (hardware call)
+      final XFile image = await _controller!.takePicture();
 
-      // Start scan animation
-      _scanAnimationController.forward(from: 0.0);
+      // 4. Post-process: center-crop to square and resize to 2048x2048
+      try {
+        final file = File(image.path);
+        final bytes = await file.readAsBytes();
+        final decoded = img.decodeImage(bytes);
+        if (decoded != null) {
+          // Center-crop to square
+          final minDim = math.min(decoded.width, decoded.height);
+          final cropX = ((decoded.width - minDim) / 2).round();
+          final cropY = ((decoded.height - minDim) / 2).round();
+          final cropped = img.copyCrop(decoded, x: cropX, y: cropY, width: minDim, height: minDim);
 
-      await _captureController.forward();
-      await _controller!.takePicture();
+          // Resize to 2048x2048
+          final resized = img.copyResize(cropped, width: 2048, height: 2048, interpolation: img.Interpolation.cubic);
 
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Material scanned: $_selectedMaterial',
-              style: GoogleFonts.robotoMono(
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            duration: const Duration(seconds: 2),
-            backgroundColor: const Color(0xFF1a1a1a),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+          // Encode as PNG and write to a new file
+          final outBytes = img.encodePng(resized);
+          final outFile = File('${file.parent.path}/${DateTime.now().millisecondsSinceEpoch}_2048.png');
+          await outFile.writeAsBytes(outBytes);
+
+          // Delete the original raw capture to save space
+          if (await file.exists()) {
+            await file.delete();
+          }
+
+          if (mounted) {
+            setState(() {
+              _capturedImages.add(outFile.path);
+            });
+          }
+        } else {
+          // Fallback if decoding fails
+          if (mounted) {
+            setState(() {
+              _capturedImages.add(image.path);
+            });
+          }
+        }
+      } catch (e) {
+        debugPrint('Error processing image to 2048: $e');
+        if (mounted) {
+          setState(() {
+            _capturedImages.add(image.path);
+          });
+        }
       }
-
-      await Future.delayed(const Duration(milliseconds: 400));
-      await _captureController.reverse();
-      _scanAnimationController.reset();
-      setState(() => _isCapturing = false);
     } catch (e) {
       debugPrint('Error capturing photo: $e');
-      setState(() => _isCapturing = false);
-      _captureController.reset();
-      _scanAnimationController.reset();
+    } finally {
+      // 5. Reset UI State and Animations
+      if (mounted) {
+
+        // FIX: Remove 'await' here. The reverse animation will start immediately,
+        // but the code won't wait for its completion. This makes the button clickable sooner.
+        _captureController.reverse();
+
+        _scanAnimationController.reset();
+
+        // This is the CRUCIAL line. It resets the _isCapturing flag immediately,
+        // making the button active even while the capture animation is still fading out.
+        setState(() => _isCapturing = false);
+      }
     }
+  }
+
+  void _showMaterialToast() {
+    // Toast removed per user request
   }
 
   @override
   Widget build(BuildContext context) {
-    // Make system bars appropriate for dark theme
+    final colors = Provider.of<ThemeProvider>(context).colors;
+
     SystemChrome.setSystemUIOverlayStyle(
-      const SystemUiOverlayStyle(
-        systemNavigationBarColor: Color(0xFF000000), // Solid black for Android nav bar
-        systemNavigationBarIconBrightness: Brightness.light,
+      SystemUiOverlayStyle(
+        systemNavigationBarColor: colors.background,
+        systemNavigationBarIconBrightness: colors.statusBarBrightness,
         statusBarColor: Colors.transparent,
-        statusBarIconBrightness: Brightness.light,
+        statusBarIconBrightness: colors.statusBarBrightness,
       ),
     );
 
     return Scaffold(
-      backgroundColor: const Color(0xFF1A1A1A), // Dark background like Not Boring
+      backgroundColor: colors.background,
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(20),
-          child: Container(
-            decoration: BoxDecoration(
-              color: const Color(0xFF2C2C2C), // Frame color
-              borderRadius: BorderRadius.circular(40),
-              border: Border.all(
-                color: const Color(0xFF444444),
-                width: 1,
-              ),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.4),
-                  blurRadius: 12,
-                  offset: const Offset(0, 6),
-                ),
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.9),
-                  blurRadius: 8,
-                  offset: const Offset(0, 4),
-                  spreadRadius: -2,
-                  blurStyle: BlurStyle.inner,
-                ),
-              ],
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Stack(
-                children: [
-                  // Main content
-                  Column(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: Stack(
+          children: [
+            Column(
               children: [
-                // Top HUD - Technical Info
-                Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      // Left: Material type
-                      GestureDetector(
-                        onTap: _toggleMaterialSelector,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 6,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFea580c),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(
-                              color: const Color(0xFFc2410c),
-                              width: 1,
-                            ),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withOpacity(0.3),
-                                blurRadius: 4,
-                                offset: const Offset(0, 2),
-                              ),
-                            ],
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                Icons.label_outline,
-                                color: Colors.white,
-                                size: 14,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(
-                                _selectedMaterial,
-                                style: GoogleFonts.robotoMono(
-                                  color: Colors.white,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 1.2,
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              Icon(
-                                _materialSelectorExpanded
-                                    ? Icons.keyboard_arrow_up
-                                    : Icons.keyboard_arrow_down,
-                                color: Colors.white,
-                                size: 16,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-
-                      // Right: Format & Settings
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.end,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.6),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.1),
-                                width: 1,
-                              ),
-                            ),
-                            child: Text(
-                              '$_resolutionInfo · $_fpsInfo',
-                              style: GoogleFonts.robotoMono(
-                                color: Colors.white.withOpacity(0.9),
-                                fontSize: 10,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            '⚡ Neural Capture',
-                            style: GoogleFonts.robotoMono(
-                              color: const Color(0xFFfbbf24).withOpacity(0.8),
-                              fontSize: 9,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.5,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
+                TopControls(
+                  onBack: () {
+                    HapticFeedback.lightImpact();
+                    Navigator.pop(context);
+                  },
+                  selectedMaterial: _selectedMaterial,
+                  aspectRatio: _aspectRatio,
+                  flashOn: _flashOn,
+                  onMaterialSelector: _toggleMaterialSelector,
+                  onAspectRatioChange: (ratio) {
+                    HapticFeedback.lightImpact();
+                    setState(() => _aspectRatio = ratio);
+                  },
+                  onFlashToggle: _toggleFlash,
                 ),
-
-                // Material selector dropdown
-                if (_materialSelectorExpanded)
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    margin: const EdgeInsets.symmetric(horizontal: 16),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1a1a1a).withOpacity(0.95),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: Colors.white.withOpacity(0.1),
-                        width: 1,
-                      ),
-                    ),
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: _materialTypes.map((type) {
-                        final isSelected = _selectedMaterial == type;
-                        return GestureDetector(
-                          onTap: () {
-                            HapticFeedback.lightImpact();
-                            setState(() => _selectedMaterial = type);
-                            _toggleMaterialSelector();
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: isSelected
-                                  ? const Color(0xFFea580c)
-                                  : const Color(0xFF282828),
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                color: isSelected
-                                    ? const Color(0xFFc2410c)
-                                    : const Color(0xFF444444),
-                                width: 1,
-                              ),
-                            ),
-                            child: Text(
-                              type,
-                              style: GoogleFonts.robotoMono(
-                                color: isSelected
-                                    ? Colors.white
-                                    : Colors.white.withOpacity(0.7),
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                                letterSpacing: 1.2,
-                              ),
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                  ),
-
-                const Spacer(),
-
-                // Center: Focus Box
-                Center(
-                  child: AnimatedBuilder(
-                    animation: _focusAnimation,
-                    builder: (context, child) {
-                      return Opacity(
-                        opacity: _focusAnimation.value,
-                        child: Container(
-                          width: 100,
-                          height: 100,
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                              color: const Color(0xFFfbbf24),
-                              width: 2,
-                            ),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Stack(
-                            children: [
-                              // Corner brackets
-                              Positioned(
-                                top: -1,
-                                left: -1,
-                                child: Container(
-                                  width: 16,
-                                  height: 16,
-                                  decoration: const BoxDecoration(
-                                    border: Border(
-                                      top: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                      left: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              Positioned(
-                                top: -1,
-                                right: -1,
-                                child: Container(
-                                  width: 16,
-                                  height: 16,
-                                  decoration: const BoxDecoration(
-                                    border: Border(
-                                      top: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                      right: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              Positioned(
-                                bottom: -1,
-                                left: -1,
-                                child: Container(
-                                  width: 16,
-                                  height: 16,
-                                  decoration: const BoxDecoration(
-                                    border: Border(
-                                      bottom: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                      left: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              Positioned(
-                                bottom: -1,
-                                right: -1,
-                                child: Container(
-                                  width: 16,
-                                  height: 16,
-                                  decoration: const BoxDecoration(
-                                    border: Border(
-                                      bottom: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                      right: BorderSide(
-                                        color: Color(0xFFfbbf24),
-                                        width: 2,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
+                const SizedBox(height: 12),
+                ResolutionInfo(resolutionInfo: _resolutionInfo, fpsInfo: _fpsInfo),
+                const SizedBox(height: 16),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Stack(
+                      children: [
+                        CameraView(
+                          isInitialized: _isInitialized,
+                          controller: _controller,
+                          aspectRatio: _aspectRatio,
+                          focusAnimation: _focusAnimation,
                         ),
-                      );
-                    },
-                  ),
-                ),
-
-                const Spacer(),
-
-                // Scan animation - strong camera flash/flicker
-                if (_isCapturing)
-                  Positioned.fill(
-                    child: AnimatedBuilder(
-                      animation: _scanLineAnimation,
-                      builder: (context, child) {
-                        // Strong flash at the start, fades out quickly
-                        double opacity = 0.0;
-                        if (_scanLineAnimation.value < 0.1) {
-                          // Flash up very quickly to full white
-                          opacity = _scanLineAnimation.value / 0.1;
-                        } else if (_scanLineAnimation.value < 0.3) {
-                          // Fade out
-                          opacity = (0.3 - _scanLineAnimation.value) / 0.2;
-                        }
-
-                        return IgnorePointer(
-                          child: Container(
-                            color: Colors.white.withOpacity(opacity),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-
-                // Bottom: Controls
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.black.withOpacity(0),
-                        Colors.black.withOpacity(0.8),
+                        FlashAnimation(
+                          isCapturing: _isCapturing,
+                          scanLineAnimation: _scanLineAnimation,
+                        ),
                       ],
                     ),
                   ),
-                  child: Column(
-                    children: [
-                      // Exposure controls
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          _TactileButton(
-                            icon: Icons.remove,
-                            onTap: () async {
-                              setState(() {
-                                _exposureValue =
-                                    (_exposureValue - 0.3).clamp(-3.0, 3.0);
-                              });
-                              HapticFeedback.lightImpact();
-                              await _applyExposure();
-                            },
-                          ),
-                          const SizedBox(width: 12),
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 16,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withOpacity(0.6),
-                              borderRadius: BorderRadius.circular(20),
-                              border: Border.all(
-                                color: Colors.white.withOpacity(0.1),
-                                width: 1,
-                              ),
-                            ),
-                            child: Text(
-                              'EV ${_exposureValue > 0 ? '+' : ''}${_exposureValue == 0 ? '0.0' : _exposureValue.toFixed(1)}',
-                              style: GoogleFonts.robotoMono(
-                                color: Colors.white,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          _TactileButton(
-                            icon: Icons.add,
-                            onTap: () async {
-                              setState(() {
-                                _exposureValue =
-                                    (_exposureValue + 0.3).clamp(-3.0, 3.0);
-                              });
-                              HapticFeedback.lightImpact();
-                              await _applyExposure();
-                            },
-                          ),
-                        ],
-                      ),
-
-                      const SizedBox(height: 16),
-
-                      // Zoom controls
-                      if (_availableZoomLevels.length > 1)
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: _availableZoomLevels.map((zoom) {
-                            final isSelected = _currentZoom == zoom;
-                            return Padding(
-                              padding: const EdgeInsets.symmetric(horizontal: 4),
-                              child: GestureDetector(
-                                onTap: () => _setZoom(zoom),
-                                child: Container(
-                                  width: 48,
-                                  height: 48,
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    color: isSelected
-                                        ? const Color(0xFFea580c)
-                                        : Colors.black.withOpacity(0.6),
-                                    border: Border.all(
-                                      color: isSelected
-                                          ? const Color(0xFFc2410c)
-                                          : Colors.white.withOpacity(0.2),
-                                      width: isSelected ? 2 : 1,
-                                    ),
-                                    boxShadow: isSelected
-                                        ? [
-                                            BoxShadow(
-                                              color: const Color(0xFFea580c)
-                                                  .withOpacity(0.3),
-                                              blurRadius: 8,
-                                              spreadRadius: 1,
-                                            ),
-                                          ]
-                                        : null,
-                                  ),
-                                  child: Center(
-                                    child: Text(
-                                      '${zoom.toInt()}×',
-                                      style: GoogleFonts.robotoMono(
-                                        color: Colors.white,
-                                        fontSize: 14,
-                                        fontWeight: isSelected
-                                            ? FontWeight.w700
-                                            : FontWeight.w500,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            );
-                          }).toList(),
-                        ),
-
-                      if (_availableZoomLevels.length > 1)
-                        const SizedBox(height: 16),
-
-                      // Main control row
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          // Gallery
-                          _ControlButton(
-                            icon: Icons.photo_library,
-                            onTap: _pickFromGallery,
-                          ),
-
-                          // Shutter button
-                          GestureDetector(
-                            onTap: _capturePhoto,
-                            child: Container(
-                              width: 80,
-                              height: 80,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: const Color(0xFFea580c),
-                                border: Border.all(
-                                  color: const Color(0xFF7c2d12),
-                                  width: 4,
-                                ),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: const Color(0xFFea580c)
-                                        .withOpacity(0.4),
-                                    blurRadius: 20,
-                                    spreadRadius: 2,
-                                  ),
-                                ],
-                              ),
-                              child: Container(
-                                margin: const EdgeInsets.all(6),
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: Colors.black.withOpacity(0.1),
-                                ),
-                              ),
-                            ),
-                          ),
-
-                          // Flash toggle
-                          _ControlButton(
-                            icon:
-                                _flashOn ? Icons.flash_on : Icons.flash_off,
-                            onTap: _toggleFlash,
-                            isActive: _flashOn,
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
                 ),
+                const SizedBox(height: 20),
+                BottomControls(
+                  availableZoomLevels: _availableZoomLevels,
+                  currentZoom: _currentZoom,
+                  exposureValue: _exposureValue,
+                  minExposure: _minExposure,
+                  maxExposure: _maxExposure,
+                  capturedImages: _capturedImages,
+                  onGalleryTap: _pickFromGallery,
+                  onCaptureTap: _capturePhoto,
+                  onZoomChange: _setZoom,
+                  onExposureChange: (value) {
+                    HapticFeedback.selectionClick();
+                    setState(() => _exposureValue = value);
+                    _applyExposure();
+                  },
+                  onImagesTap: _openCapturedImages,
+                ),
+                const SizedBox(height: 20),
               ],
             ),
+            if (_materialSelectorExpanded)
+              MaterialSelectorOverlay(
+                materialTypes: _materialTypes,
+                selectedMaterial: _selectedMaterial,
+                onMaterialSelect: (type) {
+                  HapticFeedback.lightImpact();
+                  setState(() {
+                    _selectedMaterial = type;
+                    _materialSelectorExpanded = false;
+                  });
+                  _showMaterialToast();
+                },
+                onClose: () {
+                  setState(() => _materialSelectorExpanded = false);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// --- Component: Top Controls ---
+class TopControls extends StatelessWidget {
+  final VoidCallback onBack;
+  final String selectedMaterial;
+  final String aspectRatio;
+  final bool flashOn;
+  final VoidCallback onMaterialSelector;
+  final Function(String) onAspectRatioChange;
+  final VoidCallback onFlashToggle;
+
+  const TopControls({
+    super.key,
+    required this.onBack,
+    required this.selectedMaterial,
+    required this.aspectRatio,
+    required this.flashOn,
+    required this.onMaterialSelector,
+    required this.onAspectRatioChange,
+    required this.onFlashToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      color: Colors.transparent,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          GestureDetector(
+            onTap: onBack,
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: const Color(0xFF262626),
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFF3A3A3A)),
+              ),
+              child: const Icon(Icons.arrow_back, size: 20, color: Colors.white),
+            ),
+          ),
+          GestureDetector(
+            onTap: onMaterialSelector,
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: const Color(0xFF262626),
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFF3A3A3A)),
+              ),
+              child: const Icon(Icons.label_outline, size: 20, color: Colors.white),
+            ),
+          ),
+          AspectRatioSelector(
+            aspectRatio: aspectRatio,
+            onAspectRatioChange: onAspectRatioChange,
+          ),
+          FlashToggle(flashOn: flashOn, onToggle: onFlashToggle),
+        ],
+      ),
+    );
+  }
+}
+
+// --- Component: Aspect Ratio Selector ---
+class AspectRatioSelector extends StatelessWidget {
+  final String aspectRatio;
+  final Function(String) onAspectRatioChange;
+
+  const AspectRatioSelector({
+    super.key,
+    required this.aspectRatio,
+    required this.onAspectRatioChange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF262626),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.05), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: ['1:1', '3:4', '9:16', 'Full'].map((ratio) {
+          final isSelected = aspectRatio == ratio;
+          return GestureDetector(
+            onTap: () => onAspectRatioChange(ratio),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.white.withOpacity(0.1) : Colors.transparent,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                ratio,
+                style: GoogleFonts.robotoMono(
+                  color: isSelected ? Colors.white : Colors.grey[600],
+                  fontSize: 10,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// --- Component: Flash Toggle ---
+class FlashToggle extends StatelessWidget {
+  final bool flashOn;
+  final VoidCallback onToggle;
+
+  const FlashToggle({
+    super.key,
+    required this.flashOn,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Provider.of<ThemeProvider>(context).colors;
+    return GestureDetector(
+      onTap: onToggle,
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: flashOn ? colors.accent : colors.surface,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: flashOn
+                ? colors.accent.withOpacity(0.3)
+                : Colors.white.withOpacity(0.05),
+            width: 1,
+          ),
+          boxShadow: flashOn
+              ? [
+            BoxShadow(
+              color: colors.accent.withOpacity(0.5),
+              blurRadius: 15,
+              spreadRadius: 2,
+            ),
+          ]
+              : null,
+        ),
+        child: Icon(
+          flashOn ? Icons.flash_on : Icons.flash_off,
+          color: Colors.white,
+          size: 20,
+        ),
+      ),
+    );
+  }
+}
+
+// --- Component: Resolution Info ---
+class ResolutionInfo extends StatelessWidget {
+  final String resolutionInfo;
+  final String fpsInfo;
+
+  const ResolutionInfo({
+    super.key,
+    required this.resolutionInfo,
+    required this.fpsInfo,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(
+          resolutionInfo,
+          style: GoogleFonts.robotoMono(
+            color: Colors.white,
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 1.5,
+          ),
+        ),
+        SizedBox(width: 8),
+        Text(
+          '•',
+          style: TextStyle(
+            color: Colors.grey[600],
+            fontSize: 12,
+          ),
+        ),
+        SizedBox(width: 8),
+        Text(
+          fpsInfo,
+          style: GoogleFonts.robotoMono(
+            color: Colors.grey[600],
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 1.2,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Component: Camera View ---
+class CameraView extends StatelessWidget {
+  final bool isInitialized;
+  final CameraController? controller;
+  final String aspectRatio;
+  final Animation<double> focusAnimation;
+
+  const CameraView({
+    super.key,
+    required this.isInitialized,
+    required this.controller,
+    required this.aspectRatio,
+    required this.focusAnimation,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    double aspectRatioValue = 3 / 4;
+    if (aspectRatio == '1:1') {
+      aspectRatioValue = 1 / 1;
+    } else if (aspectRatio == '9:16') {
+      aspectRatioValue = 9 / 16;
+    }
+
+    return Center(
+      child: aspectRatio == 'Full'
+          ? _buildFullCameraView()
+          : AspectRatio(
+        aspectRatio: aspectRatioValue,
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(
+              color: Colors.white.withOpacity(0.1),
+              width: 2,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.6),
+                blurRadius: 20,
+                spreadRadius: 5,
+              ),
+            ],
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: _buildCameraContent(),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFullCameraView() {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.black,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.1),
+          width: 2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.6),
+            blurRadius: 20,
+            spreadRadius: 5,
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: _buildCameraContent(),
+    );
+  }
+
+  Widget _buildCameraContent() {
+    if (!isInitialized || controller == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            CircularProgressIndicator(
+              color: Colors.white.withOpacity(0.5),
+              strokeWidth: 2,
+            ),
+            SizedBox(height: 16),
+            Text(
+              'Initializing camera...',
+              style: GoogleFonts.robotoMono(
+                color: Colors.grey[600],
+                fontSize: 12,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        CameraPreview(controller!),
+        Center(
+          child: AnimatedBuilder(
+            animation: focusAnimation,
+            builder: (context, child) {
+              return Transform.scale(
+                scale: focusAnimation.value,
+                child: Container(
+                  width: 120,
+                  height: 120,
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.6),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Component: Flash Animation ---
+class FlashAnimation extends StatelessWidget {
+  final bool isCapturing;
+  final Animation<double> scanLineAnimation;
+
+  const FlashAnimation({
+    super.key,
+    required this.isCapturing,
+    required this.scanLineAnimation,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isCapturing) return SizedBox.shrink();
+
+    return AnimatedBuilder(
+      animation: scanLineAnimation,
+      builder: (context, child) {
+        double whiteOpacity;
+        if (scanLineAnimation.value < 0.8) {
+          whiteOpacity = 0.3;
+        } else {
+          // Normalize the last 20% (from 0.8 to 1.0) into a 0.0 to 1.0 scale
+          double fadeProgress = (scanLineAnimation.value - 0.8) * 5.0;
+          whiteOpacity = 0.3 * (1.0 - fadeProgress);
+        }
+
+        return Stack(
+          children: [
+            Container(
+              color: Colors.white.withOpacity(whiteOpacity),
+            ),
+            Positioned(
+              top: scanLineAnimation.value * MediaQuery.of(context).size.height * 0.6,
+              left: 0,
+              right: 0,
+              child: Container(
+                height: 2,
+                decoration: BoxDecoration(
+                  color: Colors.red,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.red.withOpacity(0.8),
+                      blurRadius: 10,
+                      spreadRadius: 3,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+// --- Component: Bottom Controls ---
+class BottomControls extends StatelessWidget {
+  final List<double> availableZoomLevels;
+  final double currentZoom;
+  final double exposureValue;
+  final double minExposure;
+  final double maxExposure;
+  final List<String> capturedImages;
+  final VoidCallback onGalleryTap;
+  final VoidCallback onCaptureTap;
+  final Function(double) onZoomChange;
+  final Function(double) onExposureChange;
+  final VoidCallback onImagesTap;
+
+  const BottomControls({
+    super.key,
+    required this.availableZoomLevels,
+    required this.currentZoom,
+    required this.exposureValue,
+    required this.minExposure,
+    required this.maxExposure,
+    required this.capturedImages,
+    required this.onGalleryTap,
+    required this.onCaptureTap,
+    required this.onZoomChange,
+    required this.onExposureChange,
+    required this.onImagesTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: Column(
+        children: [
+          ZoomSelector(
+            availableZoomLevels: availableZoomLevels,
+            currentZoom: currentZoom,
+            onZoomChange: onZoomChange,
+          ),
+          const SizedBox(height: 16),
+          ExposureControl(
+            exposureValue: exposureValue,
+            minExposure: minExposure,
+            maxExposure: maxExposure,
+            onExposureChange: onExposureChange,
+          ),
+          const SizedBox(height: 20),
+          CaptureControls(
+            capturedImages: capturedImages,
+            onGalleryTap: onGalleryTap,
+            onCaptureTap: onCaptureTap,
+            onImagesTap: onImagesTap,
           ),
         ],
       ),
@@ -813,97 +906,340 @@ class _ScanScreenState extends State<ScanScreen>
   }
 }
 
-// Helper extension for double formatting
-extension DoubleFormat on double {
-  String toFixed(int decimals) {
-    return toStringAsFixed(decimals);
-  }
-}
+// --- Component: Zoom Selector ---
+class ZoomSelector extends StatelessWidget {
+  final List<double> availableZoomLevels;
+  final double currentZoom;
+  final Function(double) onZoomChange;
 
-// Tactile button widget (small adjustment controls)
-class _TactileButton extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-
-  const _TactileButton({
-    required this.icon,
-    required this.onTap,
+  const ZoomSelector({
+    super.key,
+    required this.availableZoomLevels,
+    required this.currentZoom,
+    required this.onZoomChange,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 36,
-        height: 36,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Colors.black.withOpacity(0.6),
-          border: Border.all(
-            color: Colors.white.withOpacity(0.1),
-            width: 1,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.3),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
+    return Container(
+      padding: EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: const Color(0xFF262626),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.05), width: 1),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: availableZoomLevels.map((zoom) {
+          final isSelected = (currentZoom - zoom).abs() < 0.01;
+          return GestureDetector(
+            onTap: () => onZoomChange(zoom),
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              margin: EdgeInsets.symmetric(horizontal: 2),
+              decoration: BoxDecoration(
+                color: isSelected ? Colors.white.withOpacity(0.1) : Colors.transparent,
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                '${zoom.toStringAsFixed(0)}x',
+                style: GoogleFonts.robotoMono(
+                  color: isSelected ? Colors.white : Colors.grey[600],
+                  fontSize: 12,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                ),
+              ),
             ),
-          ],
-        ),
-        child: Icon(
-          icon,
-          color: Colors.white,
-          size: 18,
-        ),
+          );
+        }).toList(),
       ),
     );
   }
 }
 
-// Control button widget (main controls)
-class _ControlButton extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-  final bool isActive;
+// --- Component: Exposure Control ---
+class ExposureControl extends StatelessWidget {
+  final double exposureValue;
+  final double minExposure;
+  final double maxExposure;
+  final Function(double) onExposureChange;
 
-  const _ControlButton({
-    required this.icon,
-    required this.onTap,
-    this.isActive = false,
+  const ExposureControl({
+    super.key,
+    required this.exposureValue,
+    required this.minExposure,
+    required this.maxExposure,
+    required this.onExposureChange,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 56,
-        height: 56,
-        decoration: BoxDecoration(
-          color: isActive
-              ? const Color(0xFFea580c)
-              : const Color(0xFF282828),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isActive
-                ? const Color(0xFFc2410c)
-                : const Color(0xFF444444),
-            width: 1,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.4),
-              blurRadius: 6,
-              offset: const Offset(0, 3),
+    return Row(
+      children: [
+        Icon(Icons.brightness_6, color: Colors.grey[600], size: 18),
+        SizedBox(width: 12),
+        Expanded(
+          child: SliderTheme(
+            data: SliderThemeData(
+              activeTrackColor: Colors.white,
+              inactiveTrackColor: Colors.white.withOpacity(0.1),
+              thumbColor: Colors.white,
+              overlayColor: Colors.white.withOpacity(0.2),
+              trackHeight: 3,
+              thumbShape: RoundSliderThumbShape(enabledThumbRadius: 8),
             ),
-          ],
+            child: Slider(
+              value: exposureValue,
+              min: minExposure,
+              max: maxExposure,
+              onChanged: onExposureChange,
+            ),
+          ),
         ),
-        child: Icon(
-          icon,
-          color: isActive ? Colors.white : Colors.white.withOpacity(0.8),
-          size: 24,
+        SizedBox(width: 12),
+        SizedBox(
+          width: 40,
+          child: Text(
+            exposureValue.toStringAsFixed(1),
+            style: GoogleFonts.robotoMono(
+              color: Colors.grey[600],
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+            textAlign: TextAlign.end,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Component: Capture Controls ---
+class CaptureControls extends StatelessWidget {
+  final List<String> capturedImages;
+  final VoidCallback onGalleryTap;
+  final VoidCallback onCaptureTap;
+  final VoidCallback onImagesTap;
+
+  const CaptureControls({
+    super.key,
+    required this.capturedImages,
+    required this.onGalleryTap,
+    required this.onCaptureTap,
+    required this.onImagesTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Provider.of<ThemeProvider>(context).colors;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+      children: [
+        GestureDetector(
+          onTap: onGalleryTap,
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: colors.surface,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withOpacity(0.1), width: 2),
+            ),
+            child: Icon(Icons.photo_library, color: Colors.white, size: 24),
+          ),
+        ),
+        GestureDetector(
+          onTap: onCaptureTap,
+          child: Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: colors.accent,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withOpacity(0.2), width: 4),
+              boxShadow: [
+                BoxShadow(
+                  color: colors.accent.withOpacity(0.5),
+                  blurRadius: 20,
+                  spreadRadius: 3,
+                ),
+              ],
+            ),
+            child: Icon(Icons.camera_alt, color: Colors.white, size: 32),
+          ),
+        ),
+        GestureDetector(
+          onTap: onImagesTap,
+          child: Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: colors.surface,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white.withOpacity(0.1), width: 2),
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                Icon(Icons.photo, color: Colors.white, size: 24),
+                if (capturedImages.isNotEmpty)
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: Container(
+                      padding: EdgeInsets.all(4),
+                      decoration: BoxDecoration(
+                        color: colors.accent,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: colors.accent.withOpacity(0.5),
+                            blurRadius: 8,
+                            spreadRadius: 1,
+                          ),
+                        ],
+                      ),
+                      constraints: BoxConstraints(minWidth: 18, minHeight: 18),
+                      child: Center(
+                        child: Text(
+                          '${capturedImages.length}',
+                          style: GoogleFonts.robotoMono(
+                            color: Colors.white,
+                            fontSize: 9,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// --- Component: Material Selector Overlay ---
+class MaterialSelectorOverlay extends StatelessWidget {
+  final List<String> materialTypes;
+  final String selectedMaterial;
+  final Function(String) onMaterialSelect;
+  final VoidCallback onClose;
+
+  const MaterialSelectorOverlay({
+    super.key,
+    required this.materialTypes,
+    required this.selectedMaterial,
+    required this.onMaterialSelect,
+    required this.onClose,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Provider.of<ThemeProvider>(context).colors;
+    return GestureDetector(
+      onTap: onClose,
+      child: Container(
+        color: Colors.black.withOpacity(0.8),
+        child: Center(
+          child: GestureDetector(
+            onTap: () {},
+            child: Container(
+              margin: EdgeInsets.symmetric(horizontal: 32),
+              padding: EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: colors.surface,
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: Colors.white.withOpacity(0.1), width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.6),
+                    blurRadius: 30,
+                    spreadRadius: 10,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'SELECT MATERIAL',
+                        style: GoogleFonts.robotoMono(
+                          color: Colors.grey[600],
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 2,
+                        ),
+                      ),
+                      GestureDetector(
+                        onTap: onClose,
+                        child: Icon(Icons.close, color: Colors.grey[600], size: 20),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 20),
+                  ...materialTypes.map((material) {
+                    final isSelected = material == selectedMaterial;
+                    return GestureDetector(
+                      onTap: () => onMaterialSelect(material),
+                      child: Container(
+                        margin: EdgeInsets.only(bottom: 12),
+                        padding: EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                        decoration: BoxDecoration(
+                          color: isSelected
+                              ? Colors.white.withOpacity(0.1)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: isSelected
+                                ? Colors.white.withOpacity(0.2)
+                                : Colors.transparent,
+                            width: 1,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: isSelected ? colors.accent : Colors.grey[700],
+                                shape: BoxShape.circle,
+                                boxShadow: isSelected
+                                    ? [
+                                  BoxShadow(
+                                    color: colors.accent.withOpacity(0.5),
+                                    blurRadius: 8,
+                                    spreadRadius: 1,
+                                  ),
+                                ]
+                                    : null,
+                              ),
+                            ),
+                            SizedBox(width: 16),
+                            Text(
+                              material,
+                              style: GoogleFonts.robotoMono(
+                                color: isSelected ? Colors.white : Colors.grey[600],
+                                fontSize: 14,
+                                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    );
+                  }).toList(),
+                ],
+              ),
+            ),
+          ),
         ),
       ),
     );

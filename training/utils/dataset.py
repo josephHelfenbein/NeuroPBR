@@ -209,6 +209,107 @@ class PBRDataset(Dataset):
 
         return input_renders, pbr_maps
 
+
+class DistillationShardDataset(Dataset):
+    """
+    Dataset for loading pre-computed distillation shards.
+    
+    Each shard is a .pt file containing:
+    - inputs: (B, 3, 3, H, W)
+    - targets: (B, 4, 3, H, W)
+    - teacher_outputs: Dict[str, Tensor]
+    - indices: List[int]
+    """
+    
+    def __init__(
+        self,
+        shards_dir: str,
+        split: Optional[Literal["train", "val"]] = None,
+        val_ratio: float = 0.1,
+        seed: int = 42
+    ):
+        self.shards_dir = Path(shards_dir)
+        if not self.shards_dir.exists():
+            raise FileNotFoundError(f"Shards directory not found: {self.shards_dir}")
+            
+        # Find all shards
+        self.shard_paths = sorted(list(self.shards_dir.glob("shard_*.pt")))
+        if not self.shard_paths:
+            raise FileNotFoundError(f"No .pt shards found in {self.shards_dir}")
+            
+        # Build index: global_idx -> (shard_idx, local_idx)
+        # We need to open shards to know their size if they vary, 
+        # but usually they are fixed size except the last one.
+        # To be safe and fast, we can scan them once.
+        self.index_map = []
+        
+        print(f"Scanning {len(self.shard_paths)} shards...")
+        for shard_idx, p in enumerate(self.shard_paths):
+            # We can read just the indices or metadata if possible, 
+            # but torch.load loads the whole file usually.
+            try:
+                # Map location cpu to avoid gpu memory usage during scan
+                data = torch.load(p, map_location="cpu", weights_only=False) 
+                num_samples = len(data["indices"])
+                for i in range(num_samples):
+                    self.index_map.append((shard_idx, i))
+            except Exception as e:
+                print(f"Error loading shard {p}: {e}")
+                
+        # Split train/val
+        # We shuffle the global indices to split, but for access efficiency 
+        # we might want to keep shard locality. 
+        # However, for training, random access is needed anyway.
+        
+        all_indices = list(range(len(self.index_map)))
+        random.seed(seed)
+        random.shuffle(all_indices)
+        
+        if split is not None:
+            num_val = int(len(all_indices) * val_ratio)
+            if split == "val":
+                self.indices = all_indices[:num_val]
+            else:
+                self.indices = all_indices[num_val:]
+        else:
+            self.indices = all_indices
+            
+        self.cached_shard_idx = -1
+        self.cached_data = None
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        global_idx = self.indices[idx]
+        shard_idx, local_idx = self.index_map[global_idx]
+        
+        # Load shard if not cached
+        if self.cached_shard_idx != shard_idx:
+            self.cached_data = torch.load(
+                self.shard_paths[shard_idx], 
+                map_location="cpu",
+                weights_only=False
+            )
+            self.cached_shard_idx = shard_idx
+            
+        # Extract data
+        # inputs: (3, 3, H, W)
+        inputs = self.cached_data["inputs"][local_idx]
+        
+        # targets: (4, 3, H, W) -> unpack to pbr_maps format
+        # The PBRDataset returns pbr_maps as (4, 3, H, W) stacked.
+        # Our saved targets are already (B, 4, 3, H, W), so we get (4, 3, H, W).
+        pbr_maps = self.cached_data["targets"][local_idx]
+        
+        # teacher_outputs: Dict[str, Tensor]
+        teacher_pred = {
+            k: v[local_idx] for k, v in self.cached_data["teacher_outputs"].items()
+        }
+        
+        return inputs, pbr_maps, teacher_pred
+
+
 '''
 batch_size=  # Per GPU! Total = 16 * 8 = 128
 num_workers= # 8 workers per GPU = 64 workers total
@@ -234,21 +335,30 @@ def get_dataloader(
         val_ratio=0.1,  # Validation split ratio
         image_size=(2048, 2048),  # Input image size
     seed=42,  # Seed for reproducible splits
-        metadata_path: Optional[str] = None
+        metadata_path: Optional[str] = None,
+        shards_dir: Optional[str] = None
 ):
-    ds = PBRDataset(
-        input_dir=input_dir,
-        output_dir=output_dir,
-        metadata_path=metadata_path,
-        transform_mean=transform_mean,
-        transform_std=transform_std,
-        image_size=image_size,
-        use_dirty=use_dirty,
-        curriculum_mode=curriculum_mode,
-        split=split,
-        val_ratio=val_ratio,
-        seed=seed
-    )
+    if shards_dir:
+        ds = DistillationShardDataset(
+            shards_dir=shards_dir,
+            split=split,
+            val_ratio=val_ratio,
+            seed=seed
+        )
+    else:
+        ds = PBRDataset(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            metadata_path=metadata_path,
+            transform_mean=transform_mean,
+            transform_std=transform_std,
+            image_size=image_size,
+            use_dirty=use_dirty,
+            curriculum_mode=curriculum_mode,
+            split=split,
+            val_ratio=val_ratio,
+            seed=seed
+        )
 
     return DataLoader(
         ds,

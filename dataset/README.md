@@ -6,28 +6,81 @@ Contains scripts and resources for building and managing datasets.
 - Stores generated multi-view IBL renders and ground-truth PBR maps.
 - Used by the `renderer/` to generate synthetic training samples.
 
-## Exporting MatSynth via Hugging Face
+## Processing Dataset (Export, Clean, Upload)
 
-The repository includes `dataset/export_matsynth.py`, which streams the public `gvecchio/MatSynth` dataset from Hugging Face and materializes it on disk—no external Git submodule required.
+The `dataset/process_dataset.py` script consolidates exporting, cleaning, and uploading functionality into a single tool.
 
+It can:
+1.  **Export** the MatSynth dataset from Hugging Face to a local directory or directly to Google Cloud Storage (GCS).
+2.  **Clean** and normalize the dataset (standardizing names to albedo, metallic, roughness, normal).
+3.  **Upload** the cleaned dataset to GCS.
+
+**Note:** When using the `--clean` flag, the script processes images **in-memory**. It streams data from Hugging Face, cleans/resizes it in RAM, and writes *only* the final cleaned files to disk or GCS. Raw files are not saved to disk unless you explicitly export them without cleaning.
+
+### Usage Examples
+
+**Export raw data locally:**
 ```bash
-pip install datasets pillow
-python dataset/export_matsynth.py \
-  --dst dataset/matsynth_raw \
-  --split train \
-  --limit 500
+python dataset/process_dataset.py \
+  --raw-dir dataset/matsynth_raw \
+  --limit 500 \
+  --start 0
 ```
 
-Script highlights:
+**Export raw data directly to GCS:**
+```bash
+python dataset/process_dataset.py \
+  --gcs \
+  --bucket main-testing \
+  --prefix raw \
+  --limit 4000
+```
 
-- Uses `datasets.load_dataset(..., streaming=True)` to avoid downloading the full archive.
-- Exports the core channels (`basecolor`, `normal`, `roughness`, `metallic`) plus auxiliary maps when available.
-- Writes per-material folders (`mat_00000`, `mat_00001`, …) so they can be passed directly into the cleaner or renderer pipelines.
-- Adds the optional MatSynth metadata JSON per material when available.
+**Stream, clean in-memory, and save locally:**
+```bash
+python dataset/process_dataset.py \
+  --clean \
+  --clean-dir dataset/matsynth_clean \
+  --limit 100
+```
+
+**Stream, clean in-memory, and upload directly to GCS:**
+```bash
+python dataset/process_dataset.py \
+  --clean \
+  --gcs \
+  --bucket main-testing \
+  --prefix clean_data
+```
+
+**Clean existing raw data on disk:**
+```bash
+python dataset/process_dataset.py \
+  --clean \
+  --skip-export \
+  --raw-dir dataset/matsynth_raw \
+  --clean-dir dataset/matsynth_clean
+```
+
+### CLI Options
+
+- `--clean`: Enable cleaning step.
+- `--gcs`: Enable GCS upload (direct export if not cleaning, or upload after cleaning).
+- `--raw-dir`: Directory for raw export (default: `matsynth_raw`).
+- `--clean-dir`: Directory for cleaned data (default: `matsynth_clean`).
+- `--bucket`: GCS bucket name.
+- `--prefix`: GCS prefix.
+- `--limit`: Max materials to export.
+- `--start`: Start index.
+- `--split`: Dataset split (default: `train`).
+- `--skip-export`: Skip the export step (use existing data in `--raw-dir`).
+- `--resize`: Resize cleaned images (default: 2048).
+- `--flatten`: Flatten cleaned output.
+- `--manifest`: Manifest file name.
 
 ## Cleaning and Normalizing PBR Texture Sets
 
-Use the Python script `dataset/clean_dataset.py` to scan a source directory recursively, detect common PBR map files, and create a cleaned dataset containing only the supported maps:
+The `dataset/clean_dataset.py` script is still available for standalone cleaning tasks, though `process_dataset.py` wraps its functionality. It scans a source directory recursively, detects common PBR map files, and creates a cleaned dataset containing only the supported maps:
 
 - albedo
 - metallic
@@ -43,31 +96,7 @@ The script normalizes names and optionally flattens output. By default it writes
 
 Use `--keep-ext` if you prefer to preserve original file extensions and skip PNG conversion. The cleaner supports copying or creating symlinks and can generate a manifest JSON.
 
-### Quick start
-
-```bash
-cd dataset
-
-# Create & activate a virtual environment (Linux/WSL2)
-python3 -m venv .venv
-source .venv/bin/activate
-pip install datasets pillow
-
-# 1) Export MatSynth locally (see section above)
-python export_matsynth.py --dst matsynth_raw --limit 500
-
-# 2) Clean and normalize the exported materials for the renderer
-python clean_dataset.py \
-  --src matsynth_raw \
-  --dst matsynth_clean \
-  --require-all \
-  --manifest matsynth_clean/manifest.json
-
-# Optional: keep original extensions instead of PNG
-python clean_dataset.py --src <src> --dst <dst> --keep-ext
-```
-
-### CLI options
+### CLI options (clean_dataset.py)
 
 - `--src`: Source directory to scan recursively
 - `--dst`: Destination directory for the cleaned dataset
@@ -81,7 +110,7 @@ python clean_dataset.py --src <src> --dst <dst> --keep-ext
 - `--keep-ext`: Keep original file extensions; otherwise the cleaner converts outputs to PNG and fixes names
 - `--manifest`: Optional path to write a JSON manifest of included materials and map paths
 
-### Detection heuristics
+### Detection heuristics (clean_dataset.py)
 
 The script matches filenames using common synonyms:
 

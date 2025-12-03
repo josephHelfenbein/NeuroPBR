@@ -10,6 +10,21 @@ C++/CUDA renderer for generating synthetic training data using image-based light
 
 The renderer is built using **C++17** and **CUDA**, implementing a standard PBR pipeline optimized for high-throughput data generation.
 
+### Multithreaded Pipeline & GPU Batching
+To maximize GPU utilization and minimize I/O bottlenecks, the renderer uses a 3-stage multithreaded pipeline connected by thread-safe queues. The depth of this pipeline (the "batch size") is dynamically calculated at runtime based on available resources.
+
+1.  **Loader Thread:** Reads material textures (Albedo, Normal, Roughness, Metallic) from disk, packs them, and uploads them directly into pre-allocated GPU memory slots.
+2.  **Render Thread:** Consumes requests, executes the CUDA rendering kernels on the pre-loaded data, and downloads the results.
+3.  **Writer Thread:** Saves the rendered images to disk as PNGs and recycles the GPU memory slots for new requests.
+
+### Dynamic Resource Management
+The renderer automatically detects available **System RAM** and **GPU VRAM** to determine the optimal batch size:
+-   **CPU Batch Limit:** Calculated to ensure enough RAM for loading textures and buffering output frames.
+-   **GPU Batch Limit:** Calculated to ensure all in-flight materials fit within VRAM (approx. 224MB per slot for 2K textures).
+-   **Pre-allocation:** The renderer pre-allocates all necessary GPU buffers at startup based on the determined batch size, eliminating runtime allocation overhead and fragmentation.
+
+This ensures the renderer runs at maximum throughput on high-end systems while remaining stable on hardware with limited memory.
+
 ### Shading Model
 It uses the **Cook-Torrance** microfacet specular shading model, which is the industry standard for PBR:
 - **Distribution (D):** Trowbridge-Reitz (GGX)
@@ -69,16 +84,17 @@ The binary will be written to `bin/neuropbr_renderer`.
 ### Command-line usage
 
 ```bash
-./bin/neuropbr_renderer <materials_dir> <num_samples>
+./bin/neuropbr_renderer <materials_dir> <num_samples> [--continuing]
 ```
 
 - `<materials_dir>` – Path to the cleaned material dataset (each material folder must contain `albedo.png`, `normal.png`, `roughness.png`, `metallic.png` and be uniquely named).
 - `<num_samples>` – Number of samples to render; each sample produces three views and writes to `output/clean` or `output/dirty` plus `output/render_metadata.json`.
+- `--continuing` / `-c` – Optional flag. If set, the renderer scans the output directory for the highest existing sample index and starts numbering new samples from there. It also detects any incomplete samples (missing views) and retries them before starting new renders.
 
 Example (from `renderer/`):
 
 ```bash
-./bin/neuropbr_renderer ../dataset/matsynth_clean 2000
+./bin/neuropbr_renderer ../dataset/matsynth_clean 2000 --continuing
 ```
 
 Ensure `assets/hdris` contain the required textures before rendering.

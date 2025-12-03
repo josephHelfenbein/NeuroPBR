@@ -3,7 +3,7 @@ import 'package:provider/provider.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'package:path_provider/path_provider.dart';
-import 'scan_screen_new.dart';
+import 'scan_screen.dart';
 import '../theme/theme_provider.dart';
 import 'tags_screen.dart'; // ADD THIS
 import 'settings_screen.dart'; // ADD THIS

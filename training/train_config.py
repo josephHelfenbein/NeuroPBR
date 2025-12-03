@@ -168,7 +168,7 @@ class TrainingConfig:
     val_batches: Optional[int] = None  # None = validate on full val set
 
     # Checkpointing
-    save_every_n_epochs: int = 5
+    save_every_n_epochs: int = 1
     save_best_only: bool = False
     checkpoint_dir: str = "./checkpoints"
 

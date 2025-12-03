@@ -91,7 +91,7 @@ bool Renderer::buildFrameDescriptor(uint32_t materialId, FrameDescriptor &outDes
                                              preview_.showNormals ? 1.0f : 0.0f,
                                              preview_.showWireframe ? 1.0f : 0.0f};
 
-    outDescriptor.frame.iblParams = {lighting_.intensity, 0.0f, environment_.lodCount, 0.0f};
+    outDescriptor.frame.iblParams = {lighting_.intensity, lighting_.rotation, environment_.lodCount, 0.0f};
     outDescriptor.frame.toneMapping = {static_cast<float>(preview_.toneMapping), lighting_.exposure, 0.0f, 0.0f};
 
     return true;
@@ -202,7 +202,7 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     proj[15] = 0.0f;
 
     uniforms.cameraPosFov = {effectivePos[0], effectivePos[1], effectivePos[2], fovRad};
-    uniforms.resolutionExposure = {static_cast<float>(config_.width), static_cast<float>(config_.height), 0.0f, 0.0f};
+    uniforms.resolutionExposure = {static_cast<float>(config_.width), static_cast<float>(config_.height), lighting_.exposure, 0.0f};
 }
 
 Renderer *npbrCreateRenderer(const RendererConfig &config) { return new Renderer(config); }

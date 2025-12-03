@@ -174,7 +174,13 @@ FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChanne
     if (!rawData) {
         const char* reason = stbi_failure_reason();
         stbi_set_flip_vertically_on_load(0);
-        throw std::runtime_error(reason ? reason : "Failed to load PNG image");
+        std::string msg = "Failed to load PNG image: " + utf8Path;
+        if (reason) {
+            msg += " (Reason: ";
+            msg += reason;
+            msg += ")";
+        }
+        throw std::runtime_error(msg);
     }
 
     if (actualChannels <= 0) {
@@ -256,30 +262,20 @@ void writePNGImage(const std::filesystem::path& filePath, const float4* frameDat
     stbi_flip_vertically_on_write(0);
 }
 
-void appendRenderMetadata(const std::filesystem::path& metadataPath,
-                          const std::string& renderFilename,
-                          const std::string& materialName) {
-    if (metadataPath.has_parent_path()) {
-        std::error_code ec;
-        std::filesystem::create_directories(metadataPath.parent_path(), ec);
-        if (ec) {
-            throw std::runtime_error("Failed to create metadata directory: " + ec.message());
-        }
-    }
-
-    std::map<std::string, std::string> entries;
-
+void loadMetadata(const std::filesystem::path& metadataPath, std::map<std::string, std::string>& entries) {
     if (std::filesystem::exists(metadataPath)) {
         std::ifstream in(metadataPath, std::ios::in);
-        if (!in) {
-            throw std::runtime_error("Failed to open metadata file for read: " + metadataPath.string());
+        if (in) {
+            std::string existingContent((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            parseExistingMetadata(existingContent, entries);
         }
-        std::string existingContent((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        parseExistingMetadata(existingContent, entries);
     }
+}
 
-    std::string sampleKey = std::filesystem::path(renderFilename).filename().string();
-    entries[sampleKey] = materialName;
+void saveMetadata(const std::filesystem::path& metadataPath, const std::map<std::string, std::string>& entries) {
+    if (metadataPath.has_parent_path()) {
+        std::filesystem::create_directories(metadataPath.parent_path());
+    }
 
     std::ofstream out(metadataPath, std::ios::trunc);
     if (!out) {
@@ -298,4 +294,16 @@ void appendRenderMetadata(const std::filesystem::path& metadataPath,
         ++idx;
     }
     out << "}\n";
+}
+
+void appendRenderMetadata(const std::filesystem::path& metadataPath,
+                          const std::string& renderFilename,
+                          const std::string& materialName) {
+    std::map<std::string, std::string> entries;
+    loadMetadata(metadataPath, entries);
+
+    std::string sampleKey = std::filesystem::path(renderFilename).filename().string();
+    entries[sampleKey] = materialName;
+
+    saveMetadata(metadataPath, entries);
 }
