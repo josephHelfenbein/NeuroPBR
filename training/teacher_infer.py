@@ -126,7 +126,19 @@ def run_inference(
         # Older PyTorch versions don't have weights_only argument (and default to False)
         ckpt = torch.load(checkpoint_path, map_location=device)
 
-    model.load_state_dict(ckpt["generator_state_dict"])
+    state_dict = ckpt["generator_state_dict"]
+    
+    # Sanitize state_dict keys (remove _orig_mod. or module. prefixes from torch.compile/DDP)
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        name = k
+        if name.startswith("_orig_mod."):
+            name = name[10:]
+        elif name.startswith("module."):
+            name = name[7:]
+        new_state_dict[name] = v
+        
+    model.load_state_dict(new_state_dict)
     model.eval()
 
     # 2) Build dataset (no train/val split, use all samples once)
