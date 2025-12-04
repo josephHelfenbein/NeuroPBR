@@ -293,6 +293,10 @@ class _ScanScreenNewState extends State<ScanScreenNew>
 
     HapticFeedback.lightImpact();
 
+    // IMPORTANT: Stop the camera before navigating to free memory for inference
+    // This prevents OOM crashes during CoreML PBR generation
+    await _stopCamera();
+
     // We use 'await' to pause here until the user comes back
     final updatedList = await Navigator.push(
       context,
@@ -301,11 +305,40 @@ class _ScanScreenNewState extends State<ScanScreenNew>
       ),
     );
 
+    // When they return, restart the camera
+    if (mounted) {
+      await _initializeCamera();
+    }
+
     // When they return, we check if they sent back a list
     if (updatedList != null && updatedList is List<String> && mounted) {
       setState(() {
         _capturedImages = updatedList;
       });
+    }
+  }
+
+  /// Stops the camera and releases resources to free memory
+  Future<void> _stopCamera() async {
+    if (_controller != null) {
+      // Turn off flash if it's on
+      if (_flashOn) {
+        try {
+          await _controller!.setFlashMode(FlashMode.off);
+        } catch (e) {
+          debugPrint('Error turning off flash: $e');
+        }
+      }
+      
+      await _controller!.dispose();
+      _controller = null;
+      
+      if (mounted) {
+        setState(() {
+          _isInitialized = false;
+          _flashOn = false;
+        });
+      }
     }
   }
 
