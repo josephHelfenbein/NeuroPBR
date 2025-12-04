@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
@@ -9,6 +10,25 @@ import 'dart:math' as math;
 import 'package:image/image.dart' as img;
 import 'captured_images_screen.dart';
 import '../theme/theme_provider.dart';
+
+/// Isolate function for heavy image processing
+/// Must be a top-level function for compute()
+Future<Uint8List?> _processImageInBackground(Uint8List bytes) async {
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) return null;
+
+  // Center-crop to square
+  final minDim = math.min(decoded.width, decoded.height);
+  final cropX = ((decoded.width - minDim) / 2).round();
+  final cropY = ((decoded.height - minDim) / 2).round();
+  final cropped = img.copyCrop(decoded, x: cropX, y: cropY, width: minDim, height: minDim);
+
+  // Resize to 2048x2048
+  final resized = img.copyResize(cropped, width: 2048, height: 2048, interpolation: img.Interpolation.cubic);
+
+  // Encode as JPEG (much faster than PNG, ~10x faster)
+  return Uint8List.fromList(img.encodeJpg(resized, quality: 95));
+}
 
 class ScanScreenNew extends StatefulWidget {
   const ScanScreenNew({super.key});
@@ -37,7 +57,7 @@ class _ScanScreenNewState extends State<ScanScreenNew>
   double _minZoom = 1.0;
   double _maxZoom = 1.0;
   List<double> _availableZoomLevels = [1.0];
-  String _aspectRatio = 'Full';
+  final String _aspectRatio = '1:1';
   List<String> _capturedImages = [];
 
   late AnimationController _focusController;
@@ -225,52 +245,55 @@ class _ScanScreenNewState extends State<ScanScreenNew>
     try {
       final List<XFile> images = await picker.pickMultiImage();
       if (images.isNotEmpty && mounted) {
-        // Process each picked image: center-crop to square and resize to 2048x2048
+        // Show loading indicator
+        setState(() => _isCapturing = true);
+        
+        // Process each picked image in background
         for (final XFile image in images) {
           try {
             final file = File(image.path);
             final bytes = await file.readAsBytes();
-            final decoded = img.decodeImage(bytes);
-            if (decoded != null) {
-              // Center-crop to square
-              final minDim = math.min(decoded.width, decoded.height);
-              final cropX = ((decoded.width - minDim) / 2).round();
-              final cropY = ((decoded.height - minDim) / 2).round();
-              final cropped = img.copyCrop(decoded, x: cropX, y: cropY, width: minDim, height: minDim);
-
-              // Resize to 2048x2048
-              final resized = img.copyResize(cropped, width: 2048, height: 2048, interpolation: img.Interpolation.cubic);
-
-              // Encode as PNG and write to a new file in temp directory
-              final outBytes = img.encodePng(resized);
+            
+            // Process in background isolate
+            final processedBytes = await compute(_processImageInBackground, bytes);
+            
+            if (processedBytes != null) {
               final tempDir = await Directory.systemTemp.createTemp('neuropbr_');
-              final outFile = File('${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}_2048.png');
-              await outFile.writeAsBytes(outBytes);
+              final outFile = File('${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}_2048.jpg');
+              await outFile.writeAsBytes(processedBytes);
 
-              setState(() {
-                _capturedImages.add(outFile.path);
-              });
+              if (mounted) {
+                setState(() {
+                  _capturedImages.add(outFile.path);
+                });
+              }
             } else {
-              // Fallback if decoding fails - copy to temp and add
+              // Fallback if processing fails
+              if (mounted) {
+                setState(() {
+                  _capturedImages.add(image.path);
+                });
+              }
+            }
+          } catch (e) {
+            debugPrint('Error processing gallery image: $e');
+            if (mounted) {
               setState(() {
                 _capturedImages.add(image.path);
               });
             }
-          } catch (e) {
-            debugPrint('Error processing gallery image: $e');
-            setState(() {
-              _capturedImages.add(image.path);
-            });
           }
         }
 
         if (mounted) {
+          setState(() => _isCapturing = false);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
                 'Added ${images.length} image${images.length > 1 ? 's' : ''}',
                 style: GoogleFonts.robotoMono(
                   fontWeight: FontWeight.w500,
+                  color: Colors.white,
                 ),
               ),
               duration: const Duration(seconds: 2),
@@ -282,6 +305,7 @@ class _ScanScreenNewState extends State<ScanScreenNew>
       }
     } catch (e) {
       debugPrint('Error picking image: $e');
+      if (mounted) setState(() => _isCapturing = false);
     }
   }
 
@@ -308,40 +332,31 @@ class _ScanScreenNewState extends State<ScanScreenNew>
 
   Future<void> _capturePhoto() async {
     // 1. Hardware Check & Initial Guard
-    // We add _isCapturing to the check to prevent double-tapping while the UI is locked
     if (_controller == null || !_controller!.value.isInitialized || _controller!.value.isTakingPicture || _isCapturing) {
       return;
     }
 
     // 2. INSTANT FEEDBACK: Haptic + Animation immediately
     HapticFeedback.heavyImpact();
-    setState(() => _isCapturing = true); // Set capturing flag
+    setState(() => _isCapturing = true);
     _scanAnimationController.forward(from: 0.0);
     _captureController.forward();
 
     try {
-      // 3. Take picture in background (hardware call)
+      // 3. Take picture (hardware call)
       final XFile image = await _controller!.takePicture();
 
-      // 4. Post-process: center-crop to square and resize to 2048x2048
+      // 4. Process in background isolate
       try {
         final file = File(image.path);
         final bytes = await file.readAsBytes();
-        final decoded = img.decodeImage(bytes);
-        if (decoded != null) {
-          // Center-crop to square
-          final minDim = math.min(decoded.width, decoded.height);
-          final cropX = ((decoded.width - minDim) / 2).round();
-          final cropY = ((decoded.height - minDim) / 2).round();
-          final cropped = img.copyCrop(decoded, x: cropX, y: cropY, width: minDim, height: minDim);
-
-          // Resize to 2048x2048
-          final resized = img.copyResize(cropped, width: 2048, height: 2048, interpolation: img.Interpolation.cubic);
-
-          // Encode as PNG and write to a new file
-          final outBytes = img.encodePng(resized);
-          final outFile = File('${file.parent.path}/${DateTime.now().millisecondsSinceEpoch}_2048.png');
-          await outFile.writeAsBytes(outBytes);
+        
+        // Heavy processing happens in background
+        final processedBytes = await compute(_processImageInBackground, bytes);
+        
+        if (processedBytes != null) {
+          final outFile = File('${file.parent.path}/${DateTime.now().millisecondsSinceEpoch}_2048.jpg');
+          await outFile.writeAsBytes(processedBytes);
 
           // Delete the original raw capture to save space
           if (await file.exists()) {
@@ -354,7 +369,7 @@ class _ScanScreenNewState extends State<ScanScreenNew>
             });
           }
         } else {
-          // Fallback if decoding fails
+          // Fallback if processing fails
           if (mounted) {
             setState(() {
               _capturedImages.add(image.path);
@@ -374,15 +389,8 @@ class _ScanScreenNewState extends State<ScanScreenNew>
     } finally {
       // 5. Reset UI State and Animations
       if (mounted) {
-
-        // FIX: Remove 'await' here. The reverse animation will start immediately,
-        // but the code won't wait for its completion. This makes the button clickable sooner.
         _captureController.reverse();
-
         _scanAnimationController.reset();
-
-        // This is the CRUCIAL line. It resets the _isCapturing flag immediately,
-        // making the button active even while the capture animation is still fading out.
         setState(() => _isCapturing = false);
       }
     }
@@ -418,13 +426,8 @@ class _ScanScreenNewState extends State<ScanScreenNew>
                     Navigator.pop(context);
                   },
                   selectedMaterial: _selectedMaterial,
-                  aspectRatio: _aspectRatio,
                   flashOn: _flashOn,
                   onMaterialSelector: _toggleMaterialSelector,
-                  onAspectRatioChange: (ratio) {
-                    HapticFeedback.lightImpact();
-                    setState(() => _aspectRatio = ratio);
-                  },
                   onFlashToggle: _toggleFlash,
                 ),
                 const SizedBox(height: 12),
@@ -438,7 +441,6 @@ class _ScanScreenNewState extends State<ScanScreenNew>
                         CameraView(
                           isInitialized: _isInitialized,
                           controller: _controller,
-                          aspectRatio: _aspectRatio,
                           focusAnimation: _focusAnimation,
                         ),
                         FlashAnimation(
@@ -497,20 +499,16 @@ class _ScanScreenNewState extends State<ScanScreenNew>
 class TopControls extends StatelessWidget {
   final VoidCallback onBack;
   final String selectedMaterial;
-  final String aspectRatio;
   final bool flashOn;
   final VoidCallback onMaterialSelector;
-  final Function(String) onAspectRatioChange;
   final VoidCallback onFlashToggle;
 
   const TopControls({
     super.key,
     required this.onBack,
     required this.selectedMaterial,
-    required this.aspectRatio,
     required this.flashOn,
     required this.onMaterialSelector,
-    required this.onAspectRatioChange,
     required this.onFlashToggle,
   });
 
@@ -548,60 +546,8 @@ class TopControls extends StatelessWidget {
               child: const Icon(Icons.label_outline, size: 20, color: Colors.white),
             ),
           ),
-          AspectRatioSelector(
-            aspectRatio: aspectRatio,
-            onAspectRatioChange: onAspectRatioChange,
-          ),
           FlashToggle(flashOn: flashOn, onToggle: onFlashToggle),
         ],
-      ),
-    );
-  }
-}
-
-// --- Component: Aspect Ratio Selector ---
-class AspectRatioSelector extends StatelessWidget {
-  final String aspectRatio;
-  final Function(String) onAspectRatioChange;
-
-  const AspectRatioSelector({
-    super.key,
-    required this.aspectRatio,
-    required this.onAspectRatioChange,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(4),
-      decoration: BoxDecoration(
-        color: const Color(0xFF262626),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: Colors.white.withOpacity(0.05), width: 1),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: ['1:1', '3:4', '9:16', 'Full'].map((ratio) {
-          final isSelected = aspectRatio == ratio;
-          return GestureDetector(
-            onTap: () => onAspectRatioChange(ratio),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: isSelected ? Colors.white.withOpacity(0.1) : Colors.transparent,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Text(
-                ratio,
-                style: GoogleFonts.robotoMono(
-                  color: isSelected ? Colors.white : Colors.grey[600],
-                  fontSize: 10,
-                  fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
-                ),
-              ),
-            ),
-          );
-        }).toList(),
       ),
     );
   }
@@ -707,31 +653,21 @@ class ResolutionInfo extends StatelessWidget {
 class CameraView extends StatelessWidget {
   final bool isInitialized;
   final CameraController? controller;
-  final String aspectRatio;
   final Animation<double> focusAnimation;
 
   const CameraView({
     super.key,
     required this.isInitialized,
     required this.controller,
-    required this.aspectRatio,
     required this.focusAnimation,
   });
 
   @override
   Widget build(BuildContext context) {
-    double aspectRatioValue = 3 / 4;
-    if (aspectRatio == '1:1') {
-      aspectRatioValue = 1 / 1;
-    } else if (aspectRatio == '9:16') {
-      aspectRatioValue = 9 / 16;
-    }
-
+    // Locked to 1:1 aspect ratio
     return Center(
-      child: aspectRatio == 'Full'
-          ? _buildFullCameraView()
-          : AspectRatio(
-        aspectRatio: aspectRatioValue,
+      child: AspectRatio(
+        aspectRatio: 1.0,
         child: Container(
           decoration: BoxDecoration(
             color: Colors.black,
@@ -752,28 +688,6 @@ class CameraView extends StatelessWidget {
           child: _buildCameraContent(),
         ),
       ),
-    );
-  }
-
-  Widget _buildFullCameraView() {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.black,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(
-          color: Colors.white.withOpacity(0.1),
-          width: 2,
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.6),
-            blurRadius: 20,
-            spreadRadius: 5,
-          ),
-        ],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: _buildCameraContent(),
     );
   }
 
