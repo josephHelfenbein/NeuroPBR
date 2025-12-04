@@ -1,11 +1,15 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-from PIL import Image
+from PIL import Image, ImageFile
 from pathlib import Path
 from torchvision import transforms
 from typing import Tuple, List, Optional, Literal
 import json
 import random
+import warnings
+
+# Allow loading of truncated images - prevents crashes on partially written files
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 class PBRDataset(Dataset):
     """
@@ -165,26 +169,49 @@ class PBRDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def _load_image(self, path: Path):
-        """Load and transform an image."""
-        img = Image.open(path).convert('RGB')
+    def _load_image(self, path: Path, retry_count: int = 3):
+        """Load and transform an image with robust error handling."""
+        last_error = None
         
-        # Verify native resolution
-        if img.size != (2048, 2048):
-             # Only warn if not 2048, or assert if strict. 
-             # User requested: "Verify image dimensions are correct (assert shape)"
-             # But let's check if image_size is passed.
-             pass
+        for attempt in range(retry_count):
+            try:
+                # Open and immediately load the image to catch truncation errors early
+                img = Image.open(path)
+                img.load()  # Force load to detect truncated files
+                img = img.convert('RGB')
+                
+                # Verify native resolution
+                if img.size != (2048, 2048):
+                    # Only warn if not 2048, or assert if strict. 
+                    # User requested: "Verify image dimensions are correct (assert shape)"
+                    # But let's check if image_size is passed.
+                    pass
 
-        if self.transform:
-            img = self.transform(img)
-            
-        # Verify tensor shape after transform
-        expected_shape = (self.image_size[0], self.image_size[1])
-        if img.shape[1:] != expected_shape:
-             raise ValueError(f"Image at {path} has incorrect dimensions {img.shape[1:]}. Expected {expected_shape}.")
+                if self.transform:
+                    img = self.transform(img)
+                    
+                # Verify tensor shape after transform
+                expected_shape = (self.image_size[0], self.image_size[1])
+                if img.shape[1:] != expected_shape:
+                    raise ValueError(f"Image at {path} has incorrect dimensions {img.shape[1:]}. Expected {expected_shape}.")
 
-        return img
+                return img
+                
+            except (OSError, IOError) as e:
+                last_error = e
+                if attempt < retry_count - 1:
+                    # Brief pause before retry (file might still be written)
+                    import time
+                    time.sleep(0.1 * (attempt + 1))
+                    continue
+                    
+        # All retries failed - raise with clear error message
+        raise OSError(
+            f"Failed to load image after {retry_count} attempts: {path}\n"
+            f"Original error: {last_error}\n"
+            f"This may indicate a corrupted or truncated image file. "
+            f"Consider running a dataset validation script to identify bad files."
+        )
 
     def __getitem__(self, idx: int):
         sample_name, material_name, source = self.samples[idx]
