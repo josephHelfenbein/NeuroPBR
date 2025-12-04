@@ -274,11 +274,12 @@ class PBRModelHandler {
             
             // Use JPEG for much faster encoding (5-10x faster than PNG)
             // Quality 0.90 is visually nearly identical to PNG
-            if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-               let jpegData = ciContext.jpegRepresentation(of: ciImage, colorSpace: colorSpace, options: [
-                   kCGImageDestinationLossyCompressionQuality: jpegQuality
-               ]) {
-                return jpegData
+            if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) {
+                // CIContext.jpegRepresentation doesn't take options dict, quality is set at context level
+                // Use UIImage conversion for JPEG with quality control
+                if let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) {
+                    return UIImage(cgImage: cgImage).jpegData(compressionQuality: jpegQuality)
+                }
             }
             
             // Fallback to PNG if JPEG fails
