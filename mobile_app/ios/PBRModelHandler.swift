@@ -2,30 +2,19 @@ import Foundation
 import CoreML
 import UIKit
 import Flutter
-import Accelerate
+import UniformTypeIdentifiers
 
 @available(iOS 16.0, *)
 class PBRModelHandler {
     
-    // Shared CIContext with Metal for GPU-accelerated rendering
-    private let ciContext: CIContext = {
-        if let device = MTLCreateSystemDefaultDevice() {
-            return CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
-        }
-        return CIContext(options: [.useSoftwareRenderer: false, .cacheIntermediates: false])
-    }()
-    
     // Cached model instance (loading is expensive)
     private var cachedModel: pbr_model?
-    
-    // Pre-allocated pixel buffer pool for reuse
-    private var bufferPool: CVPixelBufferPool?
     
     // Model input size
     private let modelSize = 2048
     
-    // JPEG quality for outputs (0.85 is good balance of quality/speed)
-    private let jpegQuality: CGFloat = 0.90
+    // JPEG quality for outputs
+    private let jpegQuality: CGFloat = 0.92
     
     private func getModel() throws -> pbr_model {
         if let model = cachedModel {
@@ -33,96 +22,81 @@ class PBRModelHandler {
         }
         
         let config = MLModelConfiguration()
-        // Use CPU + Neural Engine, avoid GPU to reduce memory pressure
-        config.computeUnits = .cpuAndNeuralEngine
+        // Use all compute units - the 9 GPU preprocessing ops are negligible
+        // and unified memory on iPhone means GPU vs CPU doesn't matter for memory
+        config.computeUnits = .all
+        
+        // Allow low precision accumulation for better performance
+        config.allowLowPrecisionAccumulationOnGPU = true
         
         let model = try pbr_model(configuration: config)
         cachedModel = model
         return model
     }
-    
-    // Get or create a reusable pixel buffer pool
-    private func getBufferPool() -> CVPixelBufferPool? {
-        if let pool = bufferPool {
-            return pool
-        }
-        
-        let poolAttributes: [CFString: Any] = [
-            kCVPixelBufferPoolMinimumBufferCountKey: 3
-        ]
-        
-        let bufferAttributes: [CFString: Any] = [
-            kCVPixelBufferWidthKey: modelSize,
-            kCVPixelBufferHeightKey: modelSize,
-            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferCGImageCompatibilityKey: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
-        ]
-        
-        var pool: CVPixelBufferPool?
-        CVPixelBufferPoolCreate(kCFAllocatorDefault,
-                                poolAttributes as CFDictionary,
-                                bufferAttributes as CFDictionary,
-                                &pool)
-        bufferPool = pool
-        return pool
-    }
-    
-    // MAIN FUNCTION CALLED BY FLUTTER
+    // --- MAIN METHOD: Generate PBR Textures ---
     func generatePBR(call: FlutterMethodCall, result: @escaping FlutterResult) {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
+            // Hint to release any cached memory before heavy operation
+            #if DEBUG
+            print("[PBRModelHandler] Starting inference, triggering memory cleanup")
+            #endif
+            
             autoreleasepool {
                 do {
-                    // 1. Parse arguments (raw bytes from Flutter)
+                    // 1. Parse arguments and immediately extract data
                     guard let args = call.arguments as? [String: Any],
-                          let v1Data = (args["view1"] as? FlutterStandardTypedData)?.data,
-                          let v2Data = (args["view2"] as? FlutterStandardTypedData)?.data,
-                          let v3Data = (args["view3"] as? FlutterStandardTypedData)?.data else {
+                          let outputDir = args["outputDir"] as? String else {
+                        DispatchQueue.main.async {
+                            result(FlutterError(code: "INVALID_ARGS", message: "Missing outputDir", details: nil))
+                        }
+                        return
+                    }
+                    
+                    // Extract image data - we'll release each after creating its buffer
+                    guard let v1TypedData = args["view1"] as? FlutterStandardTypedData,
+                          let v2TypedData = args["view2"] as? FlutterStandardTypedData,
+                          let v3TypedData = args["view3"] as? FlutterStandardTypedData else {
                         DispatchQueue.main.async {
                             result(FlutterError(code: "INVALID_ARGS", message: "Missing image data", details: nil))
                         }
                         return
                     }
+                    
+                    // Create output directory if needed
+                    let fileManager = FileManager.default
+                    if !fileManager.fileExists(atPath: outputDir) {
+                        try fileManager.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
+                    }
 
-                    // 2. Load Core ML model (cached)
+                    // 2. Load model FIRST (before creating buffers)
+                    // This ensures model memory is allocated before we add input buffers
                     let model = try self.getModel()
 
-                    // 3. Process all three images in parallel for speed
+                    // 3. Process input images SEQUENTIALLY to reduce peak memory
+                    // Create buffer, then immediately release source Data
                     var buffer1: CVPixelBuffer?
                     var buffer2: CVPixelBuffer?
                     var buffer3: CVPixelBuffer?
                     
-                    let bufferGroup = DispatchGroup()
-                    let bufferQueue = DispatchQueue(label: "buffer.processing", attributes: .concurrent)
-                    
-                    bufferGroup.enter()
-                    bufferQueue.async {
-                        autoreleasepool {
-                            buffer1 = self.buffer(from: v1Data)
-                        }
-                        bufferGroup.leave()
+                    // Process view1 - extract data and release typed data reference
+                    autoreleasepool {
+                        let data = v1TypedData.data
+                        buffer1 = self.createBuffer(from: data)
                     }
                     
-                    bufferGroup.enter()
-                    bufferQueue.async {
-                        autoreleasepool {
-                            buffer2 = self.buffer(from: v2Data)
-                        }
-                        bufferGroup.leave()
+                    // Process view2
+                    autoreleasepool {
+                        let data = v2TypedData.data
+                        buffer2 = self.createBuffer(from: data)
                     }
                     
-                    bufferGroup.enter()
-                    bufferQueue.async {
-                        autoreleasepool {
-                            buffer3 = self.buffer(from: v3Data)
-                        }
-                        bufferGroup.leave()
+                    // Process view3
+                    autoreleasepool {
+                        let data = v3TypedData.data
+                        buffer3 = self.createBuffer(from: data)
                     }
-                    
-                    bufferGroup.wait()
                     
                     guard let b1 = buffer1, let b2 = buffer2, let b3 = buffer3 else {
                         DispatchQueue.main.async {
@@ -134,64 +108,38 @@ class PBRModelHandler {
                     // 4. Run Inference
                     let prediction = try model.prediction(view1: b1, view2: b2, view3: b3)
                     
-                    // Clear input buffers immediately after inference
+                    // IMMEDIATELY release input buffers after inference
                     buffer1 = nil
                     buffer2 = nil
                     buffer3 = nil
 
-                    // 5. Extract all outputs in parallel for speed
-                    var albedoData: Data?
-                    var normalData: Data?
-                    var roughnessData: Data?
-                    var metallicData: Data?
+                    // 5. Write outputs DIRECTLY to disk, one at a time
+                    // This avoids holding all 4 outputs in memory simultaneously
                     
-                    let outputGroup = DispatchGroup()
-                    let outputQueue = DispatchQueue(label: "output.processing", attributes: .concurrent)
-                    
-                    outputGroup.enter()
-                    outputQueue.async {
-                        autoreleasepool {
-                            albedoData = self.data(from: prediction.albedo)
-                        }
-                        outputGroup.leave()
-                    }
-                    
-                    outputGroup.enter()
-                    outputQueue.async {
-                        autoreleasepool {
-                            normalData = self.data(from: prediction.normal)
-                        }
-                        outputGroup.leave()
-                    }
-                    
-                    outputGroup.enter()
-                    outputQueue.async {
-                        autoreleasepool {
-                            roughnessData = self.data(from: prediction.roughness)
-                        }
-                        outputGroup.leave()
-                    }
-                    
-                    outputGroup.enter()
-                    outputQueue.async {
-                        autoreleasepool {
-                            metallicData = self.data(from: prediction.metallic)
-                        }
-                        outputGroup.leave()
-                    }
-                    
-                    outputGroup.wait()
-
-                    // 6. Return to Flutter
-                    let response: [String: Any] = [
-                        "albedo": albedoData ?? Data(),
-                        "normal": normalData ?? Data(),
-                        "roughness": roughnessData ?? Data(),
-                        "metallic": metallicData ?? Data()
+                    let outputPaths: [String: String] = [
+                        "albedo": "\(outputDir)/albedo.jpg",
+                        "normal": "\(outputDir)/normal.jpg",
+                        "roughness": "\(outputDir)/roughness.jpg",
+                        "metallic": "\(outputDir)/metallic.jpg"
                     ]
                     
+                    // Process each output sequentially to minimize memory
+                    autoreleasepool {
+                        self.writeBufferToFile(prediction.albedo, path: outputPaths["albedo"]!)
+                    }
+                    autoreleasepool {
+                        self.writeBufferToFile(prediction.normal, path: outputPaths["normal"]!)
+                    }
+                    autoreleasepool {
+                        self.writeBufferToFile(prediction.roughness, path: outputPaths["roughness"]!)
+                    }
+                    autoreleasepool {
+                        self.writeBufferToFile(prediction.metallic, path: outputPaths["metallic"]!)
+                    }
+
+                    // 6. Return success with paths (no image data in memory!)
                     DispatchQueue.main.async {
-                        result(response)
+                        result(outputPaths)
                     }
 
                 } catch {
@@ -203,96 +151,94 @@ class PBRModelHandler {
         }
     }
 
-    // --- HELPER: Fast Data -> CVPixelBuffer using CGImage directly ---
-    private func buffer(from imageData: Data) -> CVPixelBuffer? {
+    // --- HELPER: Data -> CVPixelBuffer ---
+    private func createBuffer(from imageData: Data) -> CVPixelBuffer? {
         autoreleasepool {
-            // Use CGImageSource for faster decoding than UIImage
-            guard let imageSource = CGImageSourceCreateWithData(imageData as CFData, nil),
-                  let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, [
-                    kCGImageSourceShouldCache: false,
-                    kCGImageSourceShouldAllowFloat: false
-                  ] as CFDictionary) else {
-                // Fallback to UIImage if CGImageSource fails
-                guard let image = UIImage(data: imageData),
-                      let cgImage = image.cgImage else { return nil }
-                return createBuffer(from: cgImage)
-            }
+            guard let image = UIImage(data: imageData),
+                  let cgImage = image.cgImage else { return nil }
             
-            return createBuffer(from: cgImage)
-        }
-    }
-    
-    private func createBuffer(from cgImage: CGImage) -> CVPixelBuffer? {
-        // Try to get buffer from pool first (reuses memory)
-        var pxBuffer: CVPixelBuffer?
-        
-        if let pool = getBufferPool() {
-            CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pxBuffer)
-        }
-        
-        // Fallback to direct creation if pool fails
-        if pxBuffer == nil {
+            // Create pixel buffer with Metal compatibility for efficient Neural Engine transfer
+            // Using IOSurface allows zero-copy sharing between CPU, GPU, and Neural Engine
             let options: [CFString: Any] = [
                 kCVPixelBufferCGImageCompatibilityKey: true,
                 kCVPixelBufferCGBitmapContextCompatibilityKey: true,
-                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                kCVPixelBufferMetalCompatibilityKey: true  // Enable Metal compatibility
             ]
             
-            CVPixelBufferCreate(kCFAllocatorDefault,
+            var pxBuffer: CVPixelBuffer?
+            let status = CVPixelBufferCreate(
+                kCFAllocatorDefault,
                 modelSize, modelSize,
                 kCVPixelFormatType_32BGRA,
                 options as CFDictionary,
-                &pxBuffer)
+                &pxBuffer
+            )
+            
+            guard status == kCVReturnSuccess, let buffer = pxBuffer else { return nil }
+
+            CVPixelBufferLockBaseAddress(buffer, [])
+            defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+            
+            guard let context = CGContext(
+                data: CVPixelBufferGetBaseAddress(buffer),
+                width: modelSize,
+                height: modelSize,
+                bitsPerComponent: 8,
+                bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            ) else { return nil }
+            
+            // Use default interpolation (faster than high quality, still good enough)
+            context.interpolationQuality = .default
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: modelSize, height: modelSize))
+
+            return buffer
         }
-        
-        guard let buffer = pxBuffer else { return nil }
-
-        CVPixelBufferLockBaseAddress(buffer, [])
-        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
-        
-        guard let context = CGContext(
-            data: CVPixelBufferGetBaseAddress(buffer),
-            width: modelSize,
-            height: modelSize,
-            bitsPerComponent: 8,
-            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-        ) else { return nil }
-        
-        // High-quality interpolation for resize
-        context.interpolationQuality = .high
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: modelSize, height: modelSize))
-
-        return buffer
     }
 
-    // --- HELPER: CVPixelBuffer -> Data using fast JPEG encoding ---
-    private func data(from buffer: CVPixelBuffer) -> Data? {
+    // --- HELPER: Write CVPixelBuffer directly to file as JPEG ---
+    private func writeBufferToFile(_ buffer: CVPixelBuffer, path: String) {
         autoreleasepool {
-            let ciImage = CIImage(cvPixelBuffer: buffer)
+            // Lock buffer for reading
+            CVPixelBufferLockBaseAddress(buffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
             
-            // Use JPEG for much faster encoding (5-10x faster than PNG)
-            // Quality 0.90 is visually nearly identical to PNG
-            if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) {
-                // CIContext.jpegRepresentation doesn't take options dict, quality is set at context level
-                // Use UIImage conversion for JPEG with quality control
-                if let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) {
-                    return UIImage(cgImage: cgImage).jpegData(compressionQuality: jpegQuality)
-                }
-            }
+            let width = CVPixelBufferGetWidth(buffer)
+            let height = CVPixelBufferGetHeight(buffer)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
             
-            // Fallback to PNG if JPEG fails
-            if let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) {
-                return UIImage(cgImage: cgImage).pngData()
-            }
-            return nil
+            guard let baseAddress = CVPixelBufferGetBaseAddress(buffer) else { return }
+            
+            // Create CGImage directly from buffer data
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            guard let context = CGContext(
+                data: baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            ) else { return }
+            
+            guard let cgImage = context.makeImage() else { return }
+            
+            // Write JPEG directly to file using ImageIO (memory efficient)
+            let url = URL(fileURLWithPath: path)
+            guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
+            
+            let options: [CFString: Any] = [
+                kCGImageDestinationLossyCompressionQuality: jpegQuality
+            ]
+            
+            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
+            CGImageDestinationFinalize(destination)
         }
     }
     
-    // Call this to free memory if needed
     func clearCache() {
         cachedModel = nil
-        bufferPool = nil
     }
 }

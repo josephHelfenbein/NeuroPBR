@@ -165,15 +165,21 @@ def convert_to_coreml(
         ct.ImageType(name="normal", color_layout=ct.colorlayout.RGB)
     ]
 
-    # Conversion options
-    pipeline_option = ct.PassPipeline.CLEANUP
+    # Build optimized pass pipeline for memory efficiency
+    # This enables operation fusion which reduces intermediate buffers
+    pass_pipeline = ct.PassPipeline.DEFAULT
+    
+    # Add additional optimization passes for memory efficiency
+    pass_pipeline.insert_pass(0, "common::add_int16_cast")  # Use smaller int types where possible
+    
     if use_const_elimination:
-        pipeline_option = ct.PassPipeline()
-        pipeline_option.set_options("common::const_elimination", {"skip_const_by_size": "1e6"})
+        pass_pipeline.set_options("common::const_elimination", {"skip_const_by_size": "1e6"})
 
     precision = ct.precision.FLOAT16 if use_fp16 else ct.precision.FLOAT32
 
     print(f"Converting to CoreML (Precision: {precision})...")
+    print("Enabling operation fusion for memory optimization...")
+    
     mlmodel = ct.convert(
         model=traced_model,
         source='pytorch',
@@ -183,6 +189,7 @@ def convert_to_coreml(
         convert_to="mlprogram",
         compute_precision=precision,
         skip_model_load=skip_model_load,
+        pass_pipeline=pass_pipeline,
     )
 
     print(f"Saving to {output_path}...")

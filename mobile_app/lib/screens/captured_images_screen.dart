@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:neuro_pbr/screens/main_tab_screen.dart';
 import 'package:provider/provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../theme/theme_provider.dart';
 import '../theme/app_theme.dart';
 import 'dart:typed_data';
@@ -681,32 +682,61 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
     setState(() {
       _isLoading = true;
     });
+    
+    // Keep screen on during generation
+    await WakelockPlus.enable();
 
     try {
       // 1. Convert selected indices to File objects
-      // We sort indices to ensure consistent order (optional, but good practice)
       final List<int> sortedIndices = _selectedIndices.toList()..sort();
 
       final File v1 = File(_images[sortedIndices[0]]);
       final File v2 = File(_images[sortedIndices[1]]);
       final File v3 = File(_images[sortedIndices[2]]);
 
-      // 2. Call the AI Service
-      final results = await _pbrService.generatePBRMaps(
+      // 2. Prepare output directory BEFORE calling AI
+      final Directory appDocDir = await getApplicationDocumentsDirectory();
+      final Directory materialsBaseDir = Directory('${appDocDir.path}/Materials');
+      if (!await materialsBaseDir.exists()) {
+        await materialsBaseDir.create(recursive: true);
+      }
+      
+      String safeName = customName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+      Directory newMaterialDir = Directory('${materialsBaseDir.path}/$safeName');
+      
+      if (await newMaterialDir.exists()) {
+        await newMaterialDir.delete(recursive: true);
+      }
+      await newMaterialDir.create(recursive: true);
+
+      // 3. Call AI - it writes directly to disk (no memory round-trip!)
+      await _pbrService.generatePBRMaps(
         view1: v1,
         view2: v2,
         view3: v3,
+        outputDir: newMaterialDir.path,
       );
 
-      // 3. Save to Disk
-      await _saveMapsToDisk(results, customName);
+      // 4. Create info.json (textures are already saved by native code)
+      String materialTag = "Misc";
+      if (_selectedIndices.isNotEmpty) {
+        materialTag = _imageTags[_selectedIndices.first] ?? "Misc";
+      }
+      
+      final File infoFile = File('${newMaterialDir.path}/info.json');
+      final Map<String, String> infoData = {
+        'name': customName,
+        'tag': materialTag,
+        'date_created': DateTime.now().toIso8601String(),
+      };
+      await infoFile.writeAsString(jsonEncode(infoData));
 
-      // 4. Success Feedback
+      // 5. Success Feedback
       if (mounted) {
         HapticFeedback.mediumImpact();
         Navigator.of(context).pushAndRemoveUntil(
           MaterialPageRoute(builder: (context) => const MainTabScreen()),
-              (Route<dynamic> route) => false, // 'false' means: Remove ALL previous routes
+              (Route<dynamic> route) => false,
         );
       }
 
@@ -715,12 +745,15 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
         HapticFeedback.vibrate();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Error: $e"),
+            content: Text("Error: $e", style: const TextStyle(color: Colors.white)),
             backgroundColor: Colors.red,
           ),
         );
       }
     } finally {
+      // Allow screen to dim again
+      await WakelockPlus.disable();
+      
       if (mounted) {
         setState(() {
           _isLoading = false;
@@ -731,71 +764,10 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
 
   Future<bool> _doesNameExist(String rawName) async {
     final Directory appDocDir = await getApplicationDocumentsDirectory();
-    // Sanitize the name exactly like we do in the save function
     final String safeName = rawName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
     final Directory materialDir = Directory('${appDocDir.path}/Materials/$safeName');
 
     return await materialDir.exists();
-  }
-
-  Future<void> _saveMapsToDisk(Map<String, Uint8List> maps, String userGivenName) async {
-    try {
-      // 1. Get the base "Materials" directory
-      final Directory appDocDir = await getApplicationDocumentsDirectory();
-      final Directory materialsBaseDir = Directory('${appDocDir.path}/Materials');
-
-      if (!await materialsBaseDir.exists()) {
-        await materialsBaseDir.create(recursive: true);
-      }
-
-      // 2. Sanitize Name (Remove characters that break file systems)
-      String safeName = userGivenName.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
-
-      // Use the first selected tag as the material tag, or default to "Misc"
-      String materialTag = "Misc";
-      if (_selectedIndices.isNotEmpty) {
-        materialTag = _imageTags[_selectedIndices.first] ?? "Misc";
-      }
-
-      // 3. Create the specific folder for this material
-      Directory newMaterialDir = Directory('${materialsBaseDir.path}/$safeName');
-
-      // duplicate check logic
-      if (await newMaterialDir.exists()) {
-        // This creates a recursive override if somehow the user bypasses the dialog,
-        // but in normal use, this line should never be hit.
-        await newMaterialDir.delete(recursive: true);
-      }
-
-      await newMaterialDir.create(recursive: true);
-
-      // 4. Save the Texture Images
-      for (var entry in maps.entries) {
-        final String mapName = entry.key; // "albedo", "normal", etc.
-        final Uint8List data = entry.value;
-
-        if (data.isNotEmpty) {
-          // Save as "albedo.jpg", "normal.jpg" - model outputs JPEG for speed
-          final File file = File(p.join(newMaterialDir.path, '$mapName.jpg'));
-          await file.writeAsBytes(data);
-        }
-      }
-
-      // 5. CRITICAL: Create info.json
-      // Your loader specifically checks for this file!
-      final File infoFile = File('${newMaterialDir.path}/info.json');
-      final Map<String, String> infoData = {
-        'name': userGivenName, // The pretty name the user typed
-        'tag': materialTag,
-        'date_created': DateTime.now().toIso8601String(),
-      };
-
-      await infoFile.writeAsString(jsonEncode(infoData));
-
-    } catch (e) {
-      print("Error saving material to filesystem: $e");
-      throw e; // Rethrow so the UI knows it failed
-    }
   }
 
   Future<void> _showNameDialog() async {

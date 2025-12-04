@@ -4,6 +4,7 @@ import 'package:camera/camera.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'dart:io';
 import 'captured_images_screen.dart';
 import '../theme/theme_provider.dart';
@@ -59,6 +60,9 @@ class _ScanScreenNewState extends State<ScanScreenNew>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    
+    // Keep screen on while camera is active
+    WakelockPlus.enable();
 
     _focusController = AnimationController(
       vsync: this,
@@ -93,6 +97,9 @@ class _ScanScreenNewState extends State<ScanScreenNew>
 
   @override
   void dispose() {
+    // Allow screen to dim again
+    WakelockPlus.disable();
+    
     WidgetsBinding.instance.removeObserver(this);
     _controller?.dispose();
     _focusController.dispose();
