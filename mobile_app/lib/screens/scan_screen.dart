@@ -1,34 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart';
 import 'package:camera/camera.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'dart:io';
-import 'dart:math' as math;
-import 'package:image/image.dart' as img;
 import 'captured_images_screen.dart';
 import '../theme/theme_provider.dart';
-
-/// Isolate function for heavy image processing
-/// Must be a top-level function for compute()
-Future<Uint8List?> _processImageInBackground(Uint8List bytes) async {
-  final decoded = img.decodeImage(bytes);
-  if (decoded == null) return null;
-
-  // Center-crop to square
-  final minDim = math.min(decoded.width, decoded.height);
-  final cropX = ((decoded.width - minDim) / 2).round();
-  final cropY = ((decoded.height - minDim) / 2).round();
-  final cropped = img.copyCrop(decoded, x: cropX, y: cropY, width: minDim, height: minDim);
-
-  // Resize to 2048x2048
-  final resized = img.copyResize(cropped, width: 2048, height: 2048, interpolation: img.Interpolation.cubic);
-
-  // Encode as JPEG (much faster than PNG, ~10x faster)
-  return Uint8List.fromList(img.encodeJpg(resized, quality: 95));
-}
+import '../services/native_image_processor.dart';
 
 class ScanScreenNew extends StatefulWidget {
   const ScanScreenNew({super.key});
@@ -248,32 +227,25 @@ class _ScanScreenNewState extends State<ScanScreenNew>
         // Show loading indicator
         setState(() => _isCapturing = true);
         
-        // Process each picked image in background
+        // Process each picked image using native Swift processor
         for (final XFile image in images) {
           try {
-            final file = File(image.path);
-            final bytes = await file.readAsBytes();
+            // Use native Swift processor (much faster than Dart)
+            final processedPath = await NativeImageProcessor.processImageFile(
+              image.path,
+              targetSize: 2048,
+              quality: 0.92,
+            );
             
-            // Process in background isolate
-            final processedBytes = await compute(_processImageInBackground, bytes);
-            
-            if (processedBytes != null) {
-              final tempDir = await Directory.systemTemp.createTemp('neuropbr_');
-              final outFile = File('${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}_2048.jpg');
-              await outFile.writeAsBytes(processedBytes);
-
-              if (mounted) {
-                setState(() {
-                  _capturedImages.add(outFile.path);
-                });
-              }
-            } else {
-              // Fallback if processing fails
-              if (mounted) {
-                setState(() {
-                  _capturedImages.add(image.path);
-                });
-              }
+            if (processedPath != null && mounted) {
+              setState(() {
+                _capturedImages.add(processedPath);
+              });
+            } else if (mounted) {
+              // Fallback: use original if processing fails
+              setState(() {
+                _capturedImages.add(image.path);
+              });
             }
           } catch (e) {
             debugPrint('Error processing gallery image: $e');
@@ -346,38 +318,30 @@ class _ScanScreenNewState extends State<ScanScreenNew>
       // 3. Take picture (hardware call)
       final XFile image = await _controller!.takePicture();
 
-      // 4. Process in background isolate
+      // 4. Process using native Swift processor (fast!)
       try {
-        final file = File(image.path);
-        final bytes = await file.readAsBytes();
-        
-        // Heavy processing happens in background
-        final processedBytes = await compute(_processImageInBackground, bytes);
-        
-        if (processedBytes != null) {
-          final outFile = File('${file.parent.path}/${DateTime.now().millisecondsSinceEpoch}_2048.jpg');
-          await outFile.writeAsBytes(processedBytes);
+        final processedPath = await NativeImageProcessor.processImageFile(
+          image.path,
+          targetSize: 2048,
+          quality: 0.92,
+        );
 
-          // Delete the original raw capture to save space
-          if (await file.exists()) {
-            await file.delete();
-          }
+        // Delete the original raw capture to save space
+        final originalFile = File(image.path);
+        if (await originalFile.exists()) {
+          await originalFile.delete();
+        }
 
-          if (mounted) {
-            setState(() {
-              _capturedImages.add(outFile.path);
-            });
-          }
-        } else {
-          // Fallback if processing fails
-          if (mounted) {
-            setState(() {
-              _capturedImages.add(image.path);
-            });
-          }
+        if (processedPath != null && mounted) {
+          setState(() {
+            _capturedImages.add(processedPath);
+          });
+        } else if (mounted) {
+          // Fallback if processing fails - shouldn't happen
+          debugPrint('Native processing returned null');
         }
       } catch (e) {
-        debugPrint('Error processing image to 2048: $e');
+        debugPrint('Error processing image: $e');
         if (mounted) {
           setState(() {
             _capturedImages.add(image.path);

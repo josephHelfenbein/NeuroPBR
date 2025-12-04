@@ -775,8 +775,8 @@ class _CapturedImagesScreenState extends State<CapturedImagesScreen> {
         final Uint8List data = entry.value;
 
         if (data.isNotEmpty) {
-          // Save as "albedo.png", "normal.png" matching your loader's expectation
-          final File file = File(p.join(newMaterialDir.path, '$mapName.png'));
+          // Save as "albedo.jpg", "normal.jpg" - model outputs JPEG for speed
+          final File file = File(p.join(newMaterialDir.path, '$mapName.jpg'));
           await file.writeAsBytes(data);
         }
       }

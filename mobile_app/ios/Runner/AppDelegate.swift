@@ -15,6 +15,11 @@ import UIKit
     if let registrar = self.registrar(forPlugin: "NeuropbrMetalRendererPlugin") {
       NeuropbrMetalRendererPlugin.register(with: registrar)
     }
+    
+    // --- IMAGE PROCESSOR SETUP ---
+    if let imageProcessorRegistrar = self.registrar(forPlugin: "ImageProcessorPlugin") {
+      ImageProcessorPlugin.register(with: imageProcessorRegistrar)
+    }
 
     // --- CORE ML SETUP ---
 
