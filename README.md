@@ -169,6 +169,8 @@ For iOS deployment, train a lightweight student model via knowledge distillation
       --shard-output-size 1024
     ```
 2.  **Train Student**: Train the MobileNetV3-based model on these shards.
+
+    **Option A: ViT bottleneck (recommended):**
     ```bash
     python student/train.py \
       --config configs/mobilenetv3_512.py \
@@ -176,6 +178,17 @@ For iOS deployment, train a lightweight student model via knowledge distillation
       --input-dir ./data/input \
       --output-dir ./data/output
     ```
+
+    **Option B: ConvAttn bottleneck (experimental, higher resolution potential):**
+    ```bash
+    python student/train.py \
+      --config configs/convattn_student.py \
+      --shards-dir ./data/shards_1024 \
+      --input-dir ./data/input \
+      --output-dir ./data/output
+    ```
+    ConvAttn uses PLK (Pre-computed Large Kernel) from the ESC paper instead of ViT attention, enabling O(N) memory scaling for higher ANE resolutions.
+
 3.  **Convert to Core ML**: Export the trained student for iOS.
     A pre-compiled model is already included in the repository at `mobile_app/ios/pbr_model.mlpackage`. Run this command (requires macOS) only if you want to replace it with your own trained model.
     ```bash
@@ -194,6 +207,10 @@ For iOS deployment, train a lightweight student model via knowledge distillation
     Use `--palettization` to enable 8-bit weight clustering (smaller model, may reduce quality).
 
     Use `--no-fp16` to disable FP16 if you see artifacts.
+
+    Use `--test-resolution <int>` to convert at a custom resolution for ANE memory testing. Bypasses SR head by default (output = input resolution).
+
+    Use `--use-sr` with `--test-resolution` to keep the SR head active (output = input × SR scale).
 
 See `training/README.md` for full distillation instructions.
 

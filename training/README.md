@@ -430,8 +430,18 @@ For mobile deployment (Core ML), we train a lightweight "Student" model (MobileN
 
 | Config | Input Size | Output Size | Use Case |
 |--------|-----------|-------------|----------|
-| `mobilenetv3_512.py` | 512×512 | 1024×1024 (SR 2×) | **Recommended for iPhone** |
+| `mobilenetv3_512.py` | 512×512 | 1024×1024 (SR 2×) | **Recommended for iPhone** (ViT bottleneck) |
+| `convattn_student.py` | 1024×1024 | 1024×1024 (No SR) | **Alternative for iPhone** (PLK bottleneck, higher resolution potential) |
 | `mobilenetv3_2048.py` | 2048×2048 | 2048×2048 | Desktop/high-memory devices |
+
+#### Architecture Comparison
+
+| Architecture | Bottleneck | Memory Scaling | Max ANE Resolution | Notes |
+|--------------|------------|----------------|-------------------|-------|
+| MobileNetV3 + ViT | Vision Transformer | O(N²) | ~512→1024 | Proven quality, attention-based |
+| MobileNetV3 + ConvAttn | PLK (Pre-computed Large Kernel) | O(N) | ~1024→1024 (estimated) | Based on ESC paper, linear memory |
+
+The **ConvAttn** architecture uses Pre-computed Large Kernels (PLK) instead of Vision Transformer attention. This trades some representational power for O(N) memory scaling, enabling higher resolutions on Apple Neural Engine.
 
 ### 1. Generate Distillation Shards
 Instead of running the heavy teacher model during training (which is slow and VRAM-heavy), we pre-compute the teacher's outputs and save them as "shards" (.pt files).
@@ -465,6 +475,8 @@ python teacher_infer.py \
 ### 2. Train Student Model
 Train the student model using the pre-computed shards. This is much faster and uses less VRAM.
 
+#### Option A: ViT Student (Recommended)
+
 **For iPhone deployment (512 input → 1024 output):**
 
 ```bash
@@ -475,6 +487,28 @@ python student/train.py \
   --output-dir ./data/output \
   --checkpoint-dir ./checkpoints_student
 ```
+
+#### Option B: ConvAttn Student (Experimental)
+
+Uses PLK (Pre-computed Large Kernel) bottleneck instead of ViT attention. May enable higher resolutions on ANE due to O(N) memory scaling.
+
+**For iPhone deployment (512 input → 1024 output via 4× SR):**
+
+```bash
+python student/train.py \
+  --config configs/convattn_student.py \
+  --shards-dir ./data/shards_1024 \
+  --input-dir ./data/input \
+  --output-dir ./data/output \
+  --checkpoint-dir ./checkpoints_convattn
+```
+
+**Training Notes:**
+- ConvAttn typically converges in **50-70 epochs** (config default: 60)
+- Uses the same distillation shards as ViT student
+- The PLK kernel size is 17×17 with 3 blocks
+
+#### Option C: High-Resolution (Desktop)
 
 **For high-resolution training (2048 input → 2048 output):**
 
@@ -528,6 +562,19 @@ On-device, outputs are further upscaled from 1024 to 2048 using Lanczos resampli
 **Converter Flags:**
 - `--no-fp16`: Disable FP16 quantization (use if you see artifacts).
 - `--palettization`: Enable 8-bit weight clustering (smaller model, may reduce quality).
+- `--test-resolution <int>`: Convert at a custom resolution (e.g., 768) for ANE memory testing. By default, this bypasses the SR head so output equals input resolution.
+- `--use-sr`: When used with `--test-resolution`, keeps the trained SR head active. Output resolution = input × SR scale (e.g., `--test-resolution 384 --use-sr` → 384×2 = 768 output).
+
+**Example: Test ANE Memory Limits**
+```bash
+# Test 768×768 without SR (validates ANE memory budget)
+python3 training/coreml/converter.py checkpoints/best_student.pth \
+  --test-resolution 768 --output pbr_768_test.mlpackage
+
+# Test 512×512 input with SR head (512→1024 output)
+python3 training/coreml/converter.py checkpoints/best_student.pth \
+  --test-resolution 512 --use-sr --output pbr_512_sr.mlpackage
+```
 
 ### 5. Run Core ML Inference (CLI)
 You can test the compiled `.mlpackage` on macOS using the provided inference script. This is useful for verifying the model's output without deploying to a device.

@@ -99,6 +99,7 @@ def convert_to_coreml(
     skip_model_load=False,
     use_fp16=True,
     use_palettization=False,
+    _override_resolution=None,  # Internal: (H, W) tuple to override resolution
 ):
     """
     Convert PyTorch model to CoreML format.
@@ -109,6 +110,7 @@ def convert_to_coreml(
        skip_model_load: Set True if running on incompatible OS
        use_fp16: Set False if having artifacts
        use_palettization: Set True to apply 8-bit weight palettization (reduces size but may affect quality)
+       _override_resolution: Internal use - tuple (H, W) to override default 512×512
     """
 
     # Get normalization values
@@ -123,10 +125,15 @@ def convert_to_coreml(
     # Pass normalization params to wrapper to bake them into the model graph
     wrapped_model = MultiViewWrapper(model.eval(), mean, std)
     
-    # OPTIMIZATION: Use 512x512 input size for mobile
-    # This is the maximum size that fits in iPhone memory.
-    # The model outputs at 512x512, upscaled to 2048x2048 on-device.
-    H, W = 512, 512
+    # Resolution setting
+    if _override_resolution:
+        H, W = _override_resolution
+        print(f"Using override resolution: {H}×{W}")
+    else:
+        # OPTIMIZATION: Use 512x512 input size for mobile
+        # This is the maximum size that fits in iPhone memory.
+        # The model outputs at 512x512, upscaled to 2048x2048 on-device.
+        H, W = 512, 512
     
     # Modify encoder's first conv to use stride=1 instead of stride=2
     # This maintains reasonable internal resolution for 512x512 input
@@ -289,22 +296,115 @@ def convert_to_coreml(
     
     return mlmodel
 
+def convert_to_coreml_custom_resolution(
+    model,
+    config,
+    input_resolution: int = 768,
+    output_resolution: int = 768,
+    output_path="pbr_model.mlpackage",
+    skip_model_load=False,
+    use_fp16=True,
+    use_palettization=False,
+):
+    """
+    Convert model to CoreML with custom resolution (for ANE memory testing).
+    
+    This bypasses the SR head to allow testing different resolutions without
+    the 2x or 4x upscaling factor. Useful for validating ANE memory limits.
+    
+    Args:
+        model: PyTorch model
+        config: Model configuration
+        input_resolution: Input resolution (e.g., 768 for 768×768)
+        output_resolution: Output resolution (must equal input if bypassing SR)
+        output_path: Path to save the .mlpackage
+        skip_model_load: Skip loading model for size-only checks
+        use_fp16: Use FP16 precision
+        use_palettization: Apply 8-bit weight palettization
+    """
+    import torch.nn as nn
+    
+    H, W = input_resolution, input_resolution
+    
+    # Bypass the SR head by replacing it with Identity
+    # This makes output resolution = decoder output = input resolution
+    if hasattr(model, 'decoder') and hasattr(model.decoder, 'sr_head'):
+        print(f"Bypassing SR head (replacing with Identity)")
+        model.decoder.sr_head = nn.Identity()
+    elif hasattr(model, 'sr_head'):
+        print(f"Bypassing SR head (replacing with Identity)")
+        model.sr_head = nn.Identity()
+    else:
+        print("WARNING: Could not find SR head to bypass")
+    
+    print(f"Testing resolution: {H}×{W} input → {output_resolution}×{output_resolution} output")
+    print(f"This test validates ANE memory model predictions.")
+    
+    # The rest follows the standard conversion flow
+    return convert_to_coreml(
+        model=model,
+        config=config,
+        output_path=output_path,
+        skip_model_load=skip_model_load,
+        use_fp16=use_fp16,
+        use_palettization=use_palettization,
+        _override_resolution=(H, W),  # Pass override to convert_to_coreml
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert NeuroPBR checkpoint to CoreML")
     parser.add_argument("checkpoint", type=str, help="Path to .pth checkpoint")
     parser.add_argument("--output", type=str, default="pbr_model.mlpackage", help="Output path")
     parser.add_argument("--no-fp16", action="store_true", help="Disable FP16 quantization")
     parser.add_argument("--palettization", action="store_true", help="Enable 8-bit weight palettization (smaller model, may reduce quality)")
+    parser.add_argument("--test-resolution", type=int, default=None, 
+                        help="Test ANE memory at custom resolution (e.g., 768). Bypasses SR head by default.")
+    parser.add_argument("--use-sr", action="store_true",
+                        help="Keep the SR head when using --test-resolution (output = input × SR scale).")
     
     args = parser.parse_args()
     
     model, config = load_model_from_checkpoint(args.checkpoint)
     
-    convert_to_coreml(
-        model=model,
-        config=config,
-        output_path=args.output,
-        use_fp16=not args.no_fp16,
-        use_palettization=args.palettization
-    )
+    if args.test_resolution:
+        # Memory test mode: custom resolution
+        print(f"\n=== ANE MEMORY TEST MODE ===")
+        print(f"Testing input resolution: {args.test_resolution}×{args.test_resolution}")
+        if args.use_sr:
+            # Keep SR head - output will be upscaled
+            sr_scale = getattr(config.model, 'decoder_sr_scale', 2)
+            output_res = args.test_resolution * sr_scale
+            print(f"SR head enabled ({sr_scale}×): output = {output_res}×{output_res}")
+            print()
+            convert_to_coreml(
+                model=model,
+                config=config,
+                output_path=args.output,
+                use_fp16=not args.no_fp16,
+                use_palettization=args.palettization,
+                _override_resolution=(args.test_resolution, args.test_resolution),
+            )
+        else:
+            # Bypass SR head - output = input resolution
+            print(f"SR head bypassed: output = {args.test_resolution}×{args.test_resolution}")
+            print()
+            convert_to_coreml_custom_resolution(
+                model=model,
+                config=config,
+                input_resolution=args.test_resolution,
+                output_resolution=args.test_resolution,
+                output_path=args.output,
+                use_fp16=not args.no_fp16,
+                use_palettization=args.palettization,
+            )
+    else:
+        # Standard conversion
+        convert_to_coreml(
+            model=model,
+            config=config,
+            output_path=args.output,
+            use_fp16=not args.no_fp16,
+            use_palettization=args.palettization,
+        )
     print("Done!")

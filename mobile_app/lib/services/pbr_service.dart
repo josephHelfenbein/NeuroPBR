@@ -8,12 +8,32 @@ class PBRService {
   static const MethodChannel _platform =
   MethodChannel('com.NeuroPBR/pbr_generator');
   
-  // Target size for model input (512 for memory efficiency on iPhone)
-  static const int _modelInputSize = 512;
+  // Cached model input size (read from model on first call)
+  static int? _cachedModelInputSize;
+  
+  // Default fallback size if model query fails
+  static const int _defaultModelInputSize = 512;
+
+  /// Get the expected input size from the CoreML model
+  /// Caches the result for subsequent calls
+  Future<int> getModelInputSize() async {
+    if (_cachedModelInputSize != null) {
+      return _cachedModelInputSize!;
+    }
+    
+    try {
+      final int size = await _platform.invokeMethod('getModelInputSize');
+      _cachedModelInputSize = size;
+      return size;
+    } on PlatformException catch (e) {
+      print("Failed to get model input size: '${e.message}'. Using default.");
+      return _defaultModelInputSize;
+    }
+  }
 
   /// Resize image to target size for model input
   /// Uses high-quality Lanczos interpolation
-  Future<Uint8List> _resizeImageToModelSize(File imageFile) async {
+  Future<Uint8List> _resizeImageToModelSize(File imageFile, int targetSize) async {
     final Uint8List bytes = await imageFile.readAsBytes();
     final img.Image? image = img.decodeImage(bytes);
     if (image == null) {
@@ -29,8 +49,8 @@ class PBRService {
     // Resize to model size using cubic interpolation
     final img.Image resized = img.copyResize(
       cropped,
-      width: _modelInputSize,
-      height: _modelInputSize,
+      width: targetSize,
+      height: targetSize,
       interpolation: img.Interpolation.cubic,
     );
     
@@ -47,11 +67,14 @@ class PBRService {
     required String outputDir,
   }) async {
     try {
-      // Read and resize input images to model size (512x512)
+      // Get the model's expected input size
+      final int modelInputSize = await getModelInputSize();
+      
+      // Read and resize input images to model size
       // This reduces memory usage significantly for iPhone
-      final Uint8List bytes1 = await _resizeImageToModelSize(view1);
-      final Uint8List bytes2 = await _resizeImageToModelSize(view2);
-      final Uint8List bytes3 = await _resizeImageToModelSize(view3);
+      final Uint8List bytes1 = await _resizeImageToModelSize(view1, modelInputSize);
+      final Uint8List bytes2 = await _resizeImageToModelSize(view2, modelInputSize);
+      final Uint8List bytes3 = await _resizeImageToModelSize(view3, modelInputSize);
 
       // Call native - it will write directly to disk and return paths
       final Map<Object?, Object?> result = await _platform.invokeMethod(

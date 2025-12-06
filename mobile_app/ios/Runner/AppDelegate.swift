@@ -40,16 +40,25 @@ import UIKit
     pbrChannel.setMethodCallHandler({
       [weak self] (call: FlutterMethodCall, result: @escaping FlutterResult) -> Void in
 
-      guard call.method == "generatePBR" else {
+      switch call.method {
+      case "generatePBR":
+        if #available(iOS 17.0, *) {
+          // Delegate to the handler which parses args and runs the model
+          self?.pbrHandler?.generatePBR(call: call, result: result)
+        } else {
+          result(FlutterError(code: "OS_OBSOLETE", message: "Requires iOS 17+", details: nil))
+        }
+        
+      case "getModelInputSize":
+        if #available(iOS 17.0, *) {
+          // Get the expected input size from the model description
+          self?.pbrHandler?.getModelInputSize(result: result)
+        } else {
+          result(512) // Fallback for older iOS
+        }
+        
+      default:
         result(FlutterMethodNotImplemented)
-        return
-      }
-
-      if #available(iOS 17.0, *) {
-        // Delegate to the handler which parses args and runs the model
-        self?.pbrHandler?.generatePBR(call: call, result: result)
-      } else {
-        result(FlutterError(code: "OS_OBSOLETE", message: "Requires iOS 17+", details: nil))
       }
     })
 

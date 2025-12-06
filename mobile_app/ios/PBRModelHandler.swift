@@ -14,11 +14,56 @@ class PBRModelHandler {
     // This prevents ANE context thrashing and memory leaks from repeated loads
     private static var cachedModel: pbr_model?
     
-    // Model input size (512 for memory efficiency on iPhone, upscaled to 2048 on output)
-    private let modelSize = 512
+    // Cached model input size (read from model description)
+    private static var cachedInputSize: Int?
     
     // CIContext for efficient image writing (thread-safe, reusable)
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    
+    /// Get the model's expected input size from its input description
+    /// Falls back to 512 if unable to read from model
+    var modelInputSize: Int {
+        if let cached = PBRModelHandler.cachedInputSize {
+            return cached
+        }
+        
+        // Try to read from loaded model
+        if let model = PBRModelHandler.cachedModel {
+            if let size = Self.extractInputSize(from: model) {
+                PBRModelHandler.cachedInputSize = size
+                return size
+            }
+        }
+        
+        // Default fallback
+        return 512
+    }
+    
+    /// Extract input size from model's input description
+    private static func extractInputSize(from model: pbr_model) -> Int? {
+        // Get the model description
+        let description = model.model.modelDescription
+        
+        // Look for the first image input (view1, view2, or view3)
+        for (name, featureDesc) in description.inputDescriptionsByName {
+            if featureDesc.type == .image,
+               let imageConstraint = featureDesc.imageConstraint {
+                let width = imageConstraint.pixelsWide
+                let height = imageConstraint.pixelsHigh
+                
+                #if DEBUG
+                print("[PBRModelHandler] Model input '\(name)' expects \(width)×\(height)")
+                #endif
+                
+                // Assume square inputs, use width
+                if width > 0 {
+                    return width
+                }
+            }
+        }
+        
+        return nil
+    }
     
     private func getModel() throws -> pbr_model {
         if let model = PBRModelHandler.cachedModel {
@@ -35,8 +80,42 @@ class PBRModelHandler {
         
         let model = try pbr_model(configuration: config)
         PBRModelHandler.cachedModel = model
+        
+        // Cache the input size from the model
+        if let size = Self.extractInputSize(from: model) {
+            PBRModelHandler.cachedInputSize = size
+            #if DEBUG
+            print("[PBRModelHandler] Cached model input size: \(size)×\(size)")
+            #endif
+        }
+        
         return model
     }
+    
+    // --- METHOD: Get model input size ---
+    /// Returns the expected input size for the model (read from model description)
+    /// Loads the model if not already loaded to read the size
+    func getModelInputSize(result: @escaping FlutterResult) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+            
+            do {
+                // Ensure model is loaded so we can read its input description
+                _ = try self.getModel()
+                let size = self.modelInputSize
+                
+                DispatchQueue.main.async {
+                    result(size)
+                }
+            } catch {
+                // Fallback to default if model fails to load
+                DispatchQueue.main.async {
+                    result(512)
+                }
+            }
+        }
+    }
+    
     // --- MAIN METHOD: Generate PBR Textures ---
     func generatePBR(call: FlutterMethodCall, result: @escaping FlutterResult) {
         // 1. Extract arguments immediately on the main thread
@@ -192,6 +271,8 @@ class PBRModelHandler {
             guard let image = UIImage(data: imageData),
                   let cgImage = image.cgImage else { return nil }
             
+            let inputSize = modelInputSize
+            
             // Create pixel buffer with Metal compatibility for efficient Neural Engine transfer
             // Using IOSurface allows zero-copy sharing between CPU, GPU, and Neural Engine
             let options: [CFString: Any] = [
@@ -204,7 +285,7 @@ class PBRModelHandler {
             var pxBuffer: CVPixelBuffer?
             let status = CVPixelBufferCreate(
                 kCFAllocatorDefault,
-                modelSize, modelSize,
+                inputSize, inputSize,
                 kCVPixelFormatType_32BGRA,
                 options as CFDictionary,
                 &pxBuffer
@@ -217,8 +298,8 @@ class PBRModelHandler {
             
             guard let context = CGContext(
                 data: CVPixelBufferGetBaseAddress(buffer),
-                width: modelSize,
-                height: modelSize,
+                width: inputSize,
+                height: inputSize,
                 bitsPerComponent: 8,
                 bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
                 space: CGColorSpaceCreateDeviceRGB(),
@@ -227,7 +308,7 @@ class PBRModelHandler {
             
             // Use default interpolation (faster than high quality, still good enough)
             context.interpolationQuality = .default
-            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: modelSize, height: modelSize))
+            context.draw(cgImage, in: CGRect(x: 0, y: 0, width: inputSize, height: inputSize))
 
             return buffer
         }
