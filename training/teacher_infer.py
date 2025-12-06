@@ -26,6 +26,7 @@ from tqdm import tqdm
 from contextlib import nullcontext
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from train import MultiViewPBRGenerator
@@ -112,7 +113,20 @@ def run_inference(
     out_dir: str = "teacher_shards",
     shard_size: int = 256,
     batch_size: int = 4,
+    shard_output_size: int = None,
 ):
+    """
+    Run teacher inference and save shards.
+    
+    Args:
+        config: Training config
+        checkpoint_path: Path to teacher checkpoint
+        out_dir: Output directory for shards
+        shard_size: Number of samples per shard
+        batch_size: Inference batch size
+        shard_output_size: If set, downsample teacher outputs to this size (e.g., 1024).
+                          This saves disk space and matches student output resolution.
+    """
     out_dir_path = Path(out_dir)
     out_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -231,7 +245,18 @@ def run_inference(
                 # shard_targets.append(targets_batch[i].unsqueeze(0))
                 
                 for k in shard_outputs:
-                    shard_outputs[k].append(pred[k][i].unsqueeze(0).cpu())
+                    output_tensor = pred[k][i].unsqueeze(0)
+                    
+                    # Downsample to shard_output_size if specified
+                    if shard_output_size is not None and output_tensor.shape[-1] != shard_output_size:
+                        output_tensor = F.interpolate(
+                            output_tensor,
+                            size=(shard_output_size, shard_output_size),
+                            mode='bilinear',
+                            align_corners=False
+                        )
+                    
+                    shard_outputs[k].append(output_tensor.cpu())
 
                 # When shard is full, write to disk
                 if len(shard_samples) == shard_size:
@@ -341,6 +366,12 @@ def parse_args():
         default=4,
         help="Inference batch size. Default 4.",
     )
+    parser.add_argument(
+        "--shard-output-size",
+        type=int,
+        default=None,
+        help="Downsample teacher outputs to this size before saving (e.g., 1024 for 512 student with SR 2x).",
+    )
 
     return parser.parse_args()
 
@@ -386,4 +417,5 @@ if __name__ == "__main__":
         out_dir=out_dir,
         shard_size=args.shard_size,
         batch_size=args.batch_size,
+        shard_output_size=args.shard_output_size,
     )

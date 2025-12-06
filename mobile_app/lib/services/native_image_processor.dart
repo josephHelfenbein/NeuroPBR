@@ -46,9 +46,9 @@ class NativeImageProcessor {
       
       if (processedBytes == null) return null;
       
-      // Save to temp file
+      // Save to temp file (PNG for lossless quality)
       final tempDir = await Directory.systemTemp.createTemp('neuropbr_');
-      final outFile = File('${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}.jpg');
+      final outFile = File('${tempDir.path}/${DateTime.now().millisecondsSinceEpoch}.png');
       await outFile.writeAsBytes(processedBytes);
       
       return outFile.path;

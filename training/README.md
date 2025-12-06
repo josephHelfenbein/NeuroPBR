@@ -426,74 +426,119 @@ with torch.no_grad():
 
 For mobile deployment (Core ML), we train a lightweight "Student" model (MobileNetV3 + Small ViT) to mimic the heavy "Teacher" model (ResNet + Large ViT).
 
+### Training Configurations
+
+| Config | Input Size | Output Size | Use Case |
+|--------|-----------|-------------|----------|
+| `mobilenetv3_512.py` | 512×512 | 1024×1024 (SR 2×) | **Recommended for iPhone** |
+| `mobilenetv3_2048.py` | 2048×2048 | 2048×2048 | Desktop/high-memory devices |
+
 ### 1. Generate Distillation Shards
 Instead of running the heavy teacher model during training (which is slow and VRAM-heavy), we pre-compute the teacher's outputs and save them as "shards" (.pt files).
 
 **Note:** Shards now only store the teacher's predictions (in float16) to save disk space. The original inputs and targets are loaded from the PNG dataset on-the-fly during student training.
 
+**For 512×512 student training, generate shards at 1024×1024** (matching the student's SR output):
+
 ```bash
-# Generate shards from a trained teacher checkpoint
+# Generate 1024×1024 shards from a trained teacher (recommended)
 python teacher_infer.py \
   --checkpoint checkpoints/best_model.pth \
-  --input-dir ./data/input \
-  --output-dir ./data/output \
-  --shards-dir ./data/shards \
-  --shard-size 8
+  --data-root ./data \
+  --shards-dir ./data/shards_1024 \
+  --shard-output-size 1024
 ```
-*   `--shard-size 8`: Keeps shard files manageable (~64MB) for 2048x2048 resolution.
-*   `--output-dir`: Required to verify dataset integrity, even though targets aren't saved to shards.
+
+**For 2048×2048 student training:**
+
+```bash
+# Generate 2048×2048 shards (full resolution)
+python teacher_infer.py \
+  --checkpoint checkpoints/best_model.pth \
+  --data-root ./data \
+  --shards-dir ./data/shards_2048
+```
+
+*   `--shard-output-size 1024`: Downsamples teacher outputs to 1024×1024 before saving (75% smaller files).
+*   `--shard-size 8`: Keeps shard files manageable.
 
 ### 2. Train Student Model
 Train the student model using the pre-computed shards. This is much faster and uses less VRAM.
 
+**For iPhone deployment (512 input → 1024 output):**
+
 ```bash
-# Train using the mobile-optimized config
 python student/train.py \
-  --config configs/mobilenetv3_2048.py \
-  --shards-dir ./data/shards \
+  --config configs/mobilenetv3_512.py \
+  --shards-dir ./data/shards_1024 \
   --input-dir ./data/input \
   --output-dir ./data/output \
   --checkpoint-dir ./checkpoints_student
 ```
-*   `--input-dir` and `--output-dir` are **required** here because the student loader reads the original PNGs from disk while fetching teacher predictions from the shards.
+
+**For high-resolution training (2048 input → 2048 output):**
+
+```bash
+python student/train.py \
+  --config configs/mobilenetv3_2048.py \
+  --shards-dir ./data/shards_2048 \
+  --input-dir ./data/input \
+  --output-dir ./data/output \
+  --checkpoint-dir ./checkpoints_student
+```
+
+*   `--input-dir` and `--output-dir` are **required** because the student loader reads the original PNGs from disk while fetching teacher predictions from the shards.
+*   The dataset automatically resizes inputs to `image_size` and targets to `output_size` from the config.
 
 ### 3. Core ML Optimization
-The `configs/mobilenetv3_2048.py` configuration is specifically tuned for Apple Neural Engine (ANE):
-*   **Encoder**: MobileNetV3-Large with Stride 2 (reduces latent size to 64x64).
+The `configs/mobilenetv3_512.py` configuration is specifically tuned for Apple Neural Engine (ANE):
+*   **Encoder**: MobileNetV3-Large with lightweight transformer fusion.
 *   **Transformer**: Reduced dimension (256) and depth (2) to fit memory bandwidth constraints.
-*   **Resolution**: 2048x2048 input/output.
+*   **Input Resolution**: 512×512 model inputs for memory efficiency.
+*   **Output Resolution**: 1024×1024 via trained SR head (2× upscale).
+*   **SR Head**: Trained neural upscaler from 512 to 1024 (preserved, not stripped).
+*   **Final Output**: 2048×2048 via Lanczos upscaling on-device.
+*   **Output Format**: Lossless PNG files (preferred for artist/texture workflows).
 
-This pipeline produces a model capable of running on iPhone 13 Pro and newer.
+This pipeline produces a model capable of running on iPhone 12 and newer (iOS 17+ required).
 
 ### 4. Convert to Core ML
 Once the student model is trained, convert it to a `.mlpackage` for iOS deployment using the provided converter script.
 
-**Note:** A pre-compiled model is already included in the repository at `mobile_app/ios/Runner/pbr_model.mlpackage`. Use this script only if you have trained a new student model and want to deploy it.
+**Note:** A pre-compiled model is already included in the repository at `mobile_app/ios/pbr_model.mlpackage`. Use this script only if you have trained a new student model and want to deploy it.
 
 ```bash
 # Run on macOS (requires coremltools)
 python3 training/coreml/converter.py \
   checkpoints/best_student.pth \
-  --output mobile_app/ios/Runner/pbr_model.mlpackage
+  --output mobile_app/ios/pbr_model.mlpackage
 ```
 
 This script automatically:
 1. Detects the student architecture.
-2. Strips training artifacts (like `_orig_mod` prefixes from `torch.compile`).
-3. Traces the model with dummy inputs.
-4. Applies the correct normalization (ImageNet stats) directly into the Core ML model.
-5. Exports a Float16 quantized model ready for the app.
+2. Keeps the trained Super-Resolution head (512→1024 neural upscaling).
+3. Configures 512×512 input for optimal iPhone memory usage.
+4. Applies ImageNet normalization directly into the Core ML graph.
+5. Applies constant elimination and dead code elimination.
+6. Exports with FP16 precision (palettization disabled by default for quality).
+7. Sets minimum deployment target to iOS 17 for best ANE compatibility.
+
+On-device, outputs are further upscaled from 1024 to 2048 using Lanczos resampling.
+
+**Converter Flags:**
+- `--no-fp16`: Disable FP16 quantization (use if you see artifacts).
+- `--palettization`: Enable 8-bit weight clustering (smaller model, may reduce quality).
 
 ### 5. Run Core ML Inference (CLI)
 You can test the compiled `.mlpackage` on macOS using the provided inference script. This is useful for verifying the model's output without deploying to a device.
 
 ```bash
 python3 training/coreml/run_inference.py \
-  mobile_app/ios/Runner/pbr_model.mlpackage \
+  mobile_app/ios/pbr_model.mlpackage \
   --input path/to/folder_with_3_images \
   --output inference_results
 ```
 
 *   **Input**: A folder containing at least 3 images (png/jpg). The script will use the first 3 sorted alphabetically.
 *   **Output**: Saves `albedo.png`, `normal.png`, `roughness.png`, and `metallic.png` to the specified output directory.
-*   **Note**: The script automatically handles resizing inputs to 2048x2048 to match the model's requirements.
+*   **Note**: The script resizes inputs to 512×512, the model upscales to 1024×1024 via the trained SR head, then outputs are upscaled to 2048×2048 via Lanczos.

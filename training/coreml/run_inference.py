@@ -36,12 +36,13 @@ def run_inference(model_path, input_dir, output_dir):
     print(f"Loading model: {model_path}")
     model = ct.models.MLModel(model_path)
     
-    # Get expected input size from model metadata if possible, else default to 2048
-    # (For now we assume 2048 as per training config)
-    target_size = (2048, 2048)
+    # Model expects 512x512 input (memory-optimized for iPhone)
+    # Outputs will be upscaled to 2048x2048
+    input_size = (512, 512)
+    output_size = (2048, 2048)
     
-    print("Preparing inputs...")
-    inputs = load_inputs(input_dir, size=target_size)
+    print(f"Preparing inputs (resizing to {input_size[0]}x{input_size[1]})...")
+    inputs = load_inputs(input_dir, size=input_size)
     
     print("Running prediction...")
     outputs = model.predict(inputs)
@@ -49,10 +50,14 @@ def run_inference(model_path, input_dir, output_dir):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"Saving outputs to {output_dir}...")
+    print(f"Saving outputs to {output_dir} (upscaling to {output_size[0]}x{output_size[1]})...")
     for key, value in outputs.items():
         if isinstance(value, Image.Image):
             out_path = output_dir / f"{key}.png"
+            
+            # Upscale to 2048x2048 using Lanczos resampling (matches iOS app behavior)
+            if value.size != output_size:
+                value = value.resize(output_size, Image.Resampling.LANCZOS)
             
             # Note on Normal Map:
             # The model output for 'normal' is configured with scale=0.5, bias=0.5.

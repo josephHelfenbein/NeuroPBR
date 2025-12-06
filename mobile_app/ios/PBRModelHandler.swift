@@ -3,21 +3,25 @@ import CoreML
 import UIKit
 import Flutter
 import UniformTypeIdentifiers
+import CoreImage
+import ImageIO
 
-@available(iOS 16.0, *)
+@available(iOS 17.0, *)
 class PBRModelHandler {
     
     // Cached model instance (loading is expensive)
-    private var cachedModel: pbr_model?
+    // We use a static instance to ensure the model is loaded only once across the app lifecycle
+    // This prevents ANE context thrashing and memory leaks from repeated loads
+    private static var cachedModel: pbr_model?
     
-    // Model input size
-    private let modelSize = 2048
+    // Model input size (512 for memory efficiency on iPhone, upscaled to 2048 on output)
+    private let modelSize = 512
     
-    // JPEG quality for outputs
-    private let jpegQuality: CGFloat = 0.92
+    // CIContext for efficient image writing (thread-safe, reusable)
+    private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     
     private func getModel() throws -> pbr_model {
-        if let model = cachedModel {
+        if let model = PBRModelHandler.cachedModel {
             return model
         }
         
@@ -30,11 +34,36 @@ class PBRModelHandler {
         config.allowLowPrecisionAccumulationOnGPU = true
         
         let model = try pbr_model(configuration: config)
-        cachedModel = model
+        PBRModelHandler.cachedModel = model
         return model
     }
     // --- MAIN METHOD: Generate PBR Textures ---
     func generatePBR(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        // 1. Extract arguments immediately on the main thread
+        // This allows us to NOT capture 'call' in the closure, so we can release input data progressively
+        guard let args = call.arguments as? [String: Any],
+              let outputDir = args["outputDir"] as? String,
+              let v1Data = args["view1"] as? FlutterStandardTypedData,
+              let v2Data = args["view2"] as? FlutterStandardTypedData,
+              let v3Data = args["view3"] as? FlutterStandardTypedData else {
+            result(FlutterError(code: "INVALID_ARGS", message: "Missing outputDir or image data", details: nil))
+            return
+        }
+        
+        // Create a mutable container for inputs to allow releasing them one by one
+        // We use a class to ensure reference semantics in the closure
+        class InputContainer {
+            var v1: FlutterStandardTypedData?
+            var v2: FlutterStandardTypedData?
+            var v3: FlutterStandardTypedData?
+            init(v1: FlutterStandardTypedData, v2: FlutterStandardTypedData, v3: FlutterStandardTypedData) {
+                self.v1 = v1
+                self.v2 = v2
+                self.v3 = v3
+            }
+        }
+        let inputs = InputContainer(v1: v1Data, v2: v2Data, v3: v3Data)
+        
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
@@ -45,25 +74,6 @@ class PBRModelHandler {
             
             autoreleasepool {
                 do {
-                    // 1. Parse arguments and immediately extract data
-                    guard let args = call.arguments as? [String: Any],
-                          let outputDir = args["outputDir"] as? String else {
-                        DispatchQueue.main.async {
-                            result(FlutterError(code: "INVALID_ARGS", message: "Missing outputDir", details: nil))
-                        }
-                        return
-                    }
-                    
-                    // Extract image data - we'll release each after creating its buffer
-                    guard let v1TypedData = args["view1"] as? FlutterStandardTypedData,
-                          let v2TypedData = args["view2"] as? FlutterStandardTypedData,
-                          let v3TypedData = args["view3"] as? FlutterStandardTypedData else {
-                        DispatchQueue.main.async {
-                            result(FlutterError(code: "INVALID_ARGS", message: "Missing image data", details: nil))
-                        }
-                        return
-                    }
-                    
                     // Create output directory if needed
                     let fileManager = FileManager.default
                     if !fileManager.fileExists(atPath: outputDir) {
@@ -80,22 +90,28 @@ class PBRModelHandler {
                     var buffer2: CVPixelBuffer?
                     var buffer3: CVPixelBuffer?
                     
-                    // Process view1 - extract data and release typed data reference
+                    // Process view1
                     autoreleasepool {
-                        let data = v1TypedData.data
-                        buffer1 = self.createBuffer(from: data)
+                        if let data = inputs.v1?.data {
+                            buffer1 = self.createBuffer(from: data)
+                        }
+                        inputs.v1 = nil // Release input data immediately
                     }
                     
                     // Process view2
                     autoreleasepool {
-                        let data = v2TypedData.data
-                        buffer2 = self.createBuffer(from: data)
+                        if let data = inputs.v2?.data {
+                            buffer2 = self.createBuffer(from: data)
+                        }
+                        inputs.v2 = nil // Release input data immediately
                     }
                     
                     // Process view3
                     autoreleasepool {
-                        let data = v3TypedData.data
-                        buffer3 = self.createBuffer(from: data)
+                        if let data = inputs.v3?.data {
+                            buffer3 = self.createBuffer(from: data)
+                        }
+                        inputs.v3 = nil // Release input data immediately
                     }
                     
                     guard let b1 = buffer1, let b2 = buffer2, let b3 = buffer3 else {
@@ -106,7 +122,17 @@ class PBRModelHandler {
                     }
 
                     // 4. Run Inference
+                    #if DEBUG
+                    let start = CFAbsoluteTimeGetCurrent()
+                    print("[PBRModelHandler] Starting prediction...")
+                    #endif
+                    
                     let prediction = try model.prediction(view1: b1, view2: b2, view3: b3)
+                    
+                    #if DEBUG
+                    let duration = CFAbsoluteTimeGetCurrent() - start
+                    print("[PBRModelHandler] Prediction took \(String(format: "%.2f", duration))s")
+                    #endif
                     
                     // IMMEDIATELY release input buffers after inference
                     buffer1 = nil
@@ -117,13 +143,17 @@ class PBRModelHandler {
                     // This avoids holding all 4 outputs in memory simultaneously
                     
                     let outputPaths: [String: String] = [
-                        "albedo": "\(outputDir)/albedo.jpg",
-                        "normal": "\(outputDir)/normal.jpg",
-                        "roughness": "\(outputDir)/roughness.jpg",
-                        "metallic": "\(outputDir)/metallic.jpg"
+                        "albedo": "\(outputDir)/albedo.png",
+                        "normal": "\(outputDir)/normal.png",
+                        "roughness": "\(outputDir)/roughness.png",
+                        "metallic": "\(outputDir)/metallic.png"
                     ]
                     
                     // Process each output sequentially to minimize memory
+                    #if DEBUG
+                    let writeStart = CFAbsoluteTimeGetCurrent()
+                    #endif
+                    
                     autoreleasepool {
                         self.writeBufferToFile(prediction.albedo, path: outputPaths["albedo"]!)
                     }
@@ -136,6 +166,11 @@ class PBRModelHandler {
                     autoreleasepool {
                         self.writeBufferToFile(prediction.metallic, path: outputPaths["metallic"]!)
                     }
+                    
+                    #if DEBUG
+                    let writeDuration = CFAbsoluteTimeGetCurrent() - writeStart
+                    print("[PBRModelHandler] Writing/Upscaling took \(String(format: "%.2f", writeDuration))s")
+                    #endif
 
                     // 6. Return success with paths (no image data in memory!)
                     DispatchQueue.main.async {
@@ -198,47 +233,45 @@ class PBRModelHandler {
         }
     }
 
-    // --- HELPER: Write CVPixelBuffer directly to file as JPEG ---
+    // --- HELPER: Write CVPixelBuffer directly to file as PNG ---
     private func writeBufferToFile(_ buffer: CVPixelBuffer, path: String) {
         autoreleasepool {
-            // Lock buffer for reading
-            CVPixelBufferLockBaseAddress(buffer, .readOnly)
-            defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+            // Use CIContext to write directly from CVPixelBuffer to PNG
+            // Model outputs at 1024x1024 (SR head does internal upscaling from 512)
+            var ciImage = CIImage(cvPixelBuffer: buffer)
             
-            let width = CVPixelBufferGetWidth(buffer)
-            let height = CVPixelBufferGetHeight(buffer)
-            let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+            // Upscale from 1024 to 2048 using Lanczos for final output
+            if CVPixelBufferGetWidth(buffer) < 2048 {
+                let scale = 2048.0 / CGFloat(CVPixelBufferGetWidth(buffer))
+                
+                // Use Lanczos resampling for high-quality upscaling
+                let filter = CIFilter(name: "CILanczosScaleTransform")!
+                filter.setValue(ciImage, forKey: kCIInputImageKey)
+                filter.setValue(scale, forKey: kCIInputScaleKey)
+                filter.setValue(1.0, forKey: "inputAspectRatio")
+                
+                if let output = filter.outputImage {
+                    ciImage = output
+                }
+            }
             
-            guard let baseAddress = CVPixelBufferGetBaseAddress(buffer) else { return }
-            
-            // Create CGImage directly from buffer data
-            let colorSpace = CGColorSpaceCreateDeviceRGB()
-            guard let context = CGContext(
-                data: baseAddress,
-                width: width,
-                height: height,
-                bitsPerComponent: 8,
-                bytesPerRow: bytesPerRow,
-                space: colorSpace,
-                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
-            ) else { return }
-            
-            guard let cgImage = context.makeImage() else { return }
-            
-            // Write JPEG directly to file using ImageIO (memory efficient)
             let url = URL(fileURLWithPath: path)
-            guard let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return }
             
-            let options: [CFString: Any] = [
-                kCGImageDestinationLossyCompressionQuality: jpegQuality
-            ]
-            
-            CGImageDestinationAddImage(destination, cgImage, options as CFDictionary)
-            CGImageDestinationFinalize(destination)
+            do {
+                // Use the shared CIContext to write PNG directly to disk (lossless, preferred for textures)
+                try ciContext.writePNGRepresentation(
+                    of: ciImage,
+                    to: url,
+                    format: .RGBA8,
+                    colorSpace: ciImage.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+                )
+            } catch {
+                print("[PBRModelHandler] Error writing file: \(error)")
+            }
         }
     }
     
     func clearCache() {
-        cachedModel = nil
+        PBRModelHandler.cachedModel = nil
     }
 }

@@ -30,8 +30,8 @@ import UIKit
     let pbrChannel = FlutterMethodChannel(name: "com.NeuroPBR/pbr_generator",
       binaryMessenger: controller.binaryMessenger)
 
-    // Init the Model (Safely check for iOS 16)
-    if #available(iOS 16.0, *) {
+    // Init the Model (Safely check for iOS 17)
+    if #available(iOS 17.0, *) {
       print("Initializing PBR Model...")
       self.pbrHandler = PBRModelHandler()
     }
@@ -45,11 +45,11 @@ import UIKit
         return
       }
 
-      if #available(iOS 16.0, *) {
+      if #available(iOS 17.0, *) {
         // Delegate to the handler which parses args and runs the model
         self?.pbrHandler?.generatePBR(call: call, result: result)
       } else {
-        result(FlutterError(code: "OS_OBSOLETE", message: "Requires iOS 15+", details: nil))
+        result(FlutterError(code: "OS_OBSOLETE", message: "Requires iOS 17+", details: nil))
       }
     })
 

@@ -10,12 +10,19 @@ The mobile app serves as the primary interface for the NeuroPBR pipeline in the 
 
 - **Multi-View Capture**: Guided UI for taking the three required input images for material reconstruction.
 - **On-Device Inference**: Runs a Core ML version of the Student model to generate PBR maps locally without needing a server connection.
+- **Memory-Optimized Pipeline**: 
+  - Inputs are resized to 512×512 for efficient inference on iPhone ANE.
+  - Model includes trained SR head for 512→1024 neural upscaling (better than generic interpolation).
+  - Final outputs upscaled from 1024 to 2048×2048 using Lanczos resampling.
+  - All textures are saved as lossless PNG files (preferred for artist workflows).
+  - Requires iOS 17+ for optimal Apple Neural Engine compatibility.
+  - Student model trained at matching 512×512 resolution eliminates domain mismatch.
 - **Real-Time Metal Renderer**:
   - Uses a custom C++ and Metal PBR IBL renderer.
   - Exposed to Flutter via an Objective-C++ bridge (`MetalBridge.mm`).
   - Supports high-fidelity previewing with environment lighting.
   - Uses precomputed environment maps (KTX format) for fast loading.
-- **Material Export**: Save or share the generated PBR texture maps.
+- **Material Export**: Save or share the generated PBR texture maps as PNG files.
 
 ## Architecture
 
@@ -43,10 +50,10 @@ The app is built with **Flutter** for the UI and logic, but relies heavily on na
     ```
 
 2.  **Setup iOS Project**:
-    *   The repository includes a pre-compiled Core ML model at `ios/Runner/pbr_model.mlpackage`, so no extra setup is needed to run the default model. If you trained a custom model, ensure it replaces this file.
+    *   The repository includes a pre-compiled Core ML model at `ios/pbr_model.mlpackage`, so no extra setup is needed to run the default model. If you trained a custom model, ensure it replaces this file.
     *   Open `ios/Runner.xcworkspace` in Xcode.
     *   Ensure `pbr_model.mlpackage` is added to the "Runner" target (drag and drop it into the project navigator if missing).
-    *   **Important**: Ensure `PBRModelHandler.swift` is added to the "Runner" target in Xcode. If you see "Cannot find type 'PBRModelHandler'", right-click the Runner group in Xcode -> "Add Files to 'Runner'..." and select `ios/Runner/PBRModelHandler.swift`.
+    *   **Important**: Ensure `PBRModelHandler.swift` and `ImageProcessor.swift` from `ios/` are added to the "Runner" target in Xcode. If you see "Cannot find type 'PBRModelHandler'", right-click the Runner group in Xcode -> "Add Files to 'Runner'..." and select the Swift files from the `ios/` directory (not `ios/Runner/`).
     ```bash
     cd ios
     pod install

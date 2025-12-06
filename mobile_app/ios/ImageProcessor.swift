@@ -11,8 +11,8 @@ class ImageProcessor {
     private init() {}
     
     /// Process image: center-crop to square and resize to targetSize
-    /// Returns JPEG data at specified quality
-    func processImage(data: Data, targetSize: Int = 2048, jpegQuality: CGFloat = 0.92) -> Data? {
+    /// Returns PNG data (lossless, preferred for textures)
+    func processImage(data: Data, targetSize: Int = 2048) -> Data? {
         autoreleasepool {
             guard let image = UIImage(data: data),
                   let cgImage = image.cgImage else {
@@ -57,8 +57,8 @@ class ImageProcessor {
                 return nil
             }
             
-            // Encode as JPEG
-            return resizedImage.jpegData(compressionQuality: jpegQuality)
+            // Encode as PNG (lossless, preferred for texture workflows)
+            return resizedImage.pngData()
         }
     }
 }
@@ -99,12 +99,10 @@ class ImageProcessorPlugin: NSObject, FlutterPlugin {
             }
             
             let targetSize = args["targetSize"] as? Int ?? 2048
-            let quality = args["quality"] as? Double ?? 0.92
             
             if let processedData = ImageProcessor.shared.processImage(
                 data: imageData,
-                targetSize: targetSize,
-                jpegQuality: CGFloat(quality)
+                targetSize: targetSize
             ) {
                 DispatchQueue.main.async {
                     result(FlutterStandardTypedData(bytes: processedData))
@@ -129,7 +127,6 @@ class ImageProcessorPlugin: NSObject, FlutterPlugin {
             }
             
             let targetSize = args["targetSize"] as? Int ?? 2048
-            let quality = args["quality"] as? Double ?? 0.92
             
             var processedImages: [FlutterStandardTypedData] = []
             
@@ -137,8 +134,7 @@ class ImageProcessorPlugin: NSObject, FlutterPlugin {
                 autoreleasepool {
                     if let processedData = ImageProcessor.shared.processImage(
                         data: imageTypedData.data,
-                        targetSize: targetSize,
-                        jpegQuality: CGFloat(quality)
+                        targetSize: targetSize
                     ) {
                         processedImages.append(FlutterStandardTypedData(bytes: processedData))
                     }

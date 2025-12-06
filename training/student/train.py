@@ -238,6 +238,34 @@ class DistillationLoss(nn.Module):
         return total_loss, loss_info
 
 
+def _resize_dict_tensors(tensor_dict: Dict[str, torch.Tensor], target_size: Tuple[int, int]) -> Dict[str, torch.Tensor]:
+    """
+    Resize all tensors in a dict to target_size.
+    Used to match teacher/target resolution to student output resolution.
+    
+    Args:
+        tensor_dict: Dict of tensors with shape (B, C, H, W)
+        target_size: (H, W) to resize to
+    
+    Returns:
+        Dict with resized tensors
+    """
+    resized = {}
+    for key, tensor in tensor_dict.items():
+        if tensor.shape[-2:] != target_size:
+            # Use bilinear for smooth downsampling, area for better quality
+            mode = 'bilinear' if tensor.shape[-1] > target_size[-1] else 'bilinear'
+            resized[key] = F.interpolate(
+                tensor, 
+                size=target_size, 
+                mode=mode, 
+                align_corners=False if mode == 'bilinear' else None
+            )
+        else:
+            resized[key] = tensor
+    return resized
+
+
 class Trainer:
     """Trainer for student model with knowledge distillation."""
 
@@ -520,8 +548,16 @@ class Trainer:
                 # Student forward
                 student_pred = self.student(input_renders)
 
+                # Get student output size (may differ from teacher/target due to SR head)
+                student_size = student_pred["albedo"].shape[-2:]
+                
+                # Resize teacher predictions and targets to match student output size
+                # This handles training at lower resolution than shards (e.g., 512 input → 1024 output vs 2048 shards)
+                teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
+                target_resized = _resize_dict_tensors(target, student_size)
+
                 # Distillation loss
-                loss, loss_info = self.criterion(student_pred, teacher_pred, target)
+                loss, loss_info = self.criterion(student_pred, teacher_pred_resized, target_resized)
 
             # Backward
             if self.scaler:
@@ -641,13 +677,18 @@ class Trainer:
                 teacher_pred = self.teacher(input_renders)
             
             student_pred = self.student(input_renders)  # Student runs independently
+            
+            # Resize teacher/target to match student output size
+            student_size = student_pred["albedo"].shape[-2:]
+            teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
+            target_resized = _resize_dict_tensors(target, student_size)
 
             # Compute loss
-            _, loss_info = self.criterion(student_pred, teacher_pred, target)
+            _, loss_info = self.criterion(student_pred, teacher_pred_resized, target_resized)
             total_loss += loss_info["loss_total"]
 
-            # Compute metrics (student vs ground truth)
-            batch_metrics = compute_pbr_metrics(student_pred, target, include_angular=True)
+            # Compute metrics (student vs ground truth at student resolution)
+            batch_metrics = compute_pbr_metrics(student_pred, target_resized, include_angular=True)
             for key, val in batch_metrics.items():
                 if key not in all_metrics:
                     all_metrics[key] = []
@@ -662,8 +703,8 @@ class Trainer:
                 if log_images:
                     if self.writer:
                         log_input_renders(self.writer, input_renders, epoch, prefix="val")
-                        log_images_to_tensorboard(self.writer, student_pred, target, epoch, prefix="val_student")
-                        log_images_to_tensorboard(self.writer, teacher_pred, target, epoch, prefix="val_teacher")
+                        log_images_to_tensorboard(self.writer, student_pred, target_resized, epoch, prefix="val_student")
+                        log_images_to_tensorboard(self.writer, teacher_pred_resized, target_resized, epoch, prefix="val_teacher")
                     first_batch_logged = True
 
             num_batches += 1
@@ -908,6 +949,7 @@ def main(args):
         split="train",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,
+        output_size=config.data.output_size,
         seed=config.training.seed,
         shards_dir=args.shards_dir
     )
@@ -928,6 +970,7 @@ def main(args):
         split="val",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,
+        output_size=config.data.output_size,
         seed=config.training.seed,
         shards_dir=args.shards_dir
     )

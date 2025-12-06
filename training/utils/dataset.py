@@ -46,6 +46,7 @@ class PBRDataset(Dataset):
         transform_mean: List,
         transform_std: List,
         image_size: Tuple[int, int] = (2048, 2048),
+        output_size: Optional[Tuple[int, int]] = None,  # If None, same as image_size
         use_dirty: bool = False,
         curriculum_mode: int = 0,
         split: Optional[Literal["train", "val"]] = None,
@@ -72,7 +73,9 @@ class PBRDataset(Dataset):
             raise FileNotFoundError(f"Dirty render directory not found: {self.dirty_dir}")
 
         self.image_size = image_size
+        self.output_size = output_size if output_size is not None else image_size
         
+        # Transform for input renders
         transform_list = []
         # Add resize if requested size differs from native 2048x2048
         if self.image_size != (2048, 2048):
@@ -87,6 +90,19 @@ class PBRDataset(Dataset):
         ])
         
         self.transform = transforms.Compose(transform_list)
+        
+        # Transform for target PBR maps (may be different size)
+        target_transform_list = []
+        if self.output_size != (2048, 2048):
+            target_transform_list.append(transforms.Resize(self.output_size))
+        target_transform_list.extend([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=transform_mean,
+                std=transform_std
+            )
+        ])
+        self.target_transform = transforms.Compose(target_transform_list)
 
         self.render_files = ['0.png', '1.png', '2.png']
         self.pbr_files = ['albedo.png', 'roughness.png', 'metallic.png', 'normal.png']
@@ -169,8 +185,13 @@ class PBRDataset(Dataset):
     def __len__(self):
         return len(self.samples)
 
-    def _load_image(self, path: Path, retry_count: int = 3):
+    def _load_image(self, path: Path, transform=None, expected_size=None, retry_count: int = 3):
         """Load and transform an image with robust error handling."""
+        if transform is None:
+            transform = self.transform
+        if expected_size is None:
+            expected_size = self.image_size
+            
         last_error = None
         
         for attempt in range(retry_count):
@@ -187,13 +208,12 @@ class PBRDataset(Dataset):
                     # But let's check if image_size is passed.
                     pass
 
-                if self.transform:
-                    img = self.transform(img)
+                if transform:
+                    img = transform(img)
                     
                 # Verify tensor shape after transform
-                expected_shape = (self.image_size[0], self.image_size[1])
-                if img.shape[1:] != expected_shape:
-                    raise ValueError(f"Image at {path} has incorrect dimensions {img.shape[1:]}. Expected {expected_shape}.")
+                if img.shape[1:] != expected_size:
+                    raise ValueError(f"Image at {path} has incorrect dimensions {img.shape[1:]}. Expected {expected_size}.")
 
                 return img
                 
@@ -222,15 +242,15 @@ class PBRDataset(Dataset):
         else:
             render_dir = self.clean_dir
 
-        # Load 3 input renders (clean or dirty)
+        # Load 3 input renders (clean or dirty) at image_size
         input_renders = torch.stack([
-            self._load_image(render_dir / sample_name / f)
+            self._load_image(render_dir / sample_name / f, self.transform, self.image_size)
             for f in self.render_files
         ])  # [3, C, H, W]
 
-        # Load 4 ground truth PBR maps
+        # Load 4 ground truth PBR maps at output_size
         pbr_maps = torch.stack([
-            self._load_image(self.output_dir / material_name / f)
+            self._load_image(self.output_dir / material_name / f, self.target_transform, self.output_size)
             for f in self.pbr_files
         ])  # [4, C, H, W]
 
@@ -257,6 +277,7 @@ class DistillationShardDataset(Dataset):
         transform_mean: List,
         transform_std: List,
         image_size: Tuple[int, int] = (2048, 2048),
+        output_size: Optional[Tuple[int, int]] = None,  # If None, same as image_size
         use_dirty: bool = False,
         curriculum_mode: int = 0,
         # Split args
@@ -277,6 +298,7 @@ class DistillationShardDataset(Dataset):
             transform_mean=transform_mean,
             transform_std=transform_std,
             image_size=image_size,
+            output_size=output_size,
             use_dirty=use_dirty,
             curriculum_mode=curriculum_mode,
             split=None, # We handle splitting via shard indices
@@ -386,6 +408,7 @@ def get_dataloader(
         split=None,  # "train" or "val" or None
         val_ratio=0.1,  # Validation split ratio
         image_size=(2048, 2048),  # Input image size
+        output_size=None,  # Target image size (if different from input, e.g., for SR training)
     seed=42,  # Seed for reproducible splits
         metadata_path: Optional[str] = None,
         shards_dir: Optional[str] = None
@@ -399,6 +422,7 @@ def get_dataloader(
             transform_mean=transform_mean,
             transform_std=transform_std,
             image_size=image_size,
+            output_size=output_size,
             use_dirty=use_dirty,
             curriculum_mode=curriculum_mode,
             split=split,
@@ -413,6 +437,7 @@ def get_dataloader(
             transform_mean=transform_mean,
             transform_std=transform_std,
             image_size=image_size,
+            output_size=output_size,
             use_dirty=use_dirty,
             curriculum_mode=curriculum_mode,
             split=split,

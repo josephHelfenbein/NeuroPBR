@@ -160,21 +160,40 @@ Refer to `training/README.md` for the loss breakdown, advanced configs, and trou
 
 For iOS deployment, train a lightweight student model via knowledge distillation:
 
-1.  **Generate Shards**: Pre-compute teacher outputs.
+1.  **Generate Shards**: Pre-compute teacher outputs at 1024×1024 (matching student SR output).
     ```bash
-    python teacher_infer.py --checkpoint checkpoints/best_model.pth --shards-dir ./data/shards ...
+    python teacher_infer.py \
+      --checkpoint checkpoints/best_model.pth \
+      --data-root ./data \
+      --shards-dir ./data/shards_1024 \
+      --shard-output-size 1024
     ```
 2.  **Train Student**: Train the MobileNetV3-based model on these shards.
     ```bash
-    python student/train.py --config configs/mobilenetv3_2048.py --shards-dir ./data/shards ...
+    python student/train.py \
+      --config configs/mobilenetv3_512.py \
+      --shards-dir ./data/shards_1024 \
+      --input-dir ./data/input \
+      --output-dir ./data/output
     ```
 3.  **Convert to Core ML**: Export the trained student for iOS.
-    A pre-compiled model is already included in the repository at `mobile_app/ios/Runner/pbr_model.mlpackage`. Run this command (requires macOS) only if you want to replace it with your own trained model.
+    A pre-compiled model is already included in the repository at `mobile_app/ios/pbr_model.mlpackage`. Run this command (requires macOS) only if you want to replace it with your own trained model.
     ```bash
     python3 training/coreml/converter.py \
       checkpoints/best_student.pth \
-      --output mobile_app/ios/Runner/pbr_model.mlpackage
+      --output mobile_app/ios/pbr_model.mlpackage
     ```
+    The converter applies several optimizations for mobile:
+    - **512×512 input**: Memory-optimized for iPhone ANE.
+    - **Trained SR head**: Neural upscaling from 512 to 1024 (better than generic interpolation).
+    - **Lanczos upscaling**: Final 1024 to 2048 upscale on-device.
+    - **FP16 precision**: Halves model size and improves ANE performance.
+    - **Constant elimination**: Folds constant operations for faster inference.
+    - **iOS 17 target**: Ensures best compatibility with Apple Neural Engine.
+
+    Use `--palettization` to enable 8-bit weight clustering (smaller model, may reduce quality).
+
+    Use `--no-fp16` to disable FP16 if you see artifacts.
 
 See `training/README.md` for full distillation instructions.
 
