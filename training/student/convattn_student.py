@@ -292,6 +292,9 @@ class ConvAttnDistillationLoss(nn.Module):
                         mode='bilinear',
                         align_corners=False
                     )
+                    # Re-normalize normals after interpolation
+                    if key == "normal":
+                        target_val = F.normalize(target_val, p=2, dim=1, eps=1e-8)
                 
                 loss = loss + F.l1_loss(pred_val, target_val)
         

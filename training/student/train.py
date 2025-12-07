@@ -36,7 +36,7 @@ from train_config import TrainConfig, get_default_config
 from models.encoders.unet import UNetMobileNetV3Encoder
 from models.decoders.unet import UNetDecoderHeads
 from models.transformers.vision_transformer import ViTCrossViewFusion
-from losses.losses import HybridLoss
+from losses.losses import HybridLoss, NormalConsistencyLoss
 from utils.dataset import get_dataloader
 
 # Import ConvAttn student generator
@@ -183,6 +183,9 @@ class DistillationLoss(nn.Module):
                 "gan_loss_type": "hinge"
             }
         self.hard_loss = HybridLoss(hard_loss_config)
+        
+        # Angular loss for normals (unit vectors need cosine similarity, not MSE)
+        self.normal_loss = NormalConsistencyLoss(normalize_pred=True)
 
     def _apply_temperature(self, x: torch.Tensor, temperature: float) -> torch.Tensor:
         """
@@ -199,6 +202,39 @@ class DistillationLoss(nn.Module):
         # Apply temperature scaling
         soft_probs = torch.sigmoid(logits / temperature)
         return soft_probs
+
+    def _angular_loss(
+        self,
+        student_normal: torch.Tensor,
+        teacher_normal: torch.Tensor,
+        eps: float = 1e-8
+    ) -> torch.Tensor:
+        """
+        Compute angular loss between student and teacher normal maps.
+        
+        Uses cosine similarity: loss = 1 - cos(angle)
+        This is appropriate for unit vectors where direction matters.
+        
+        Args:
+            student_normal: Student predicted normals (B, 3, H, W)
+            teacher_normal: Teacher predicted normals (B, 3, H, W)
+            eps: Small value for numerical stability
+            
+        Returns:
+            Scalar angular loss (0 = identical, 2 = opposite)
+        """
+        # Normalize both to unit vectors
+        student_norm = F.normalize(student_normal, p=2, dim=1, eps=eps)
+        teacher_norm = F.normalize(teacher_normal, p=2, dim=1, eps=eps)
+        
+        # Cosine similarity: dot product of normalized vectors
+        cos_sim = (student_norm * teacher_norm).sum(dim=1, keepdim=True)
+        cos_sim = torch.clamp(cos_sim, -1.0 + eps, 1.0 - eps)
+        
+        # Loss = 1 - cos(angle), range [0, 2]
+        loss = (1.0 - cos_sim).mean()
+        
+        return loss
 
     def _kl_divergence_loss(
         self,
@@ -289,10 +325,11 @@ class DistillationLoss(nn.Module):
         soft_loss_info["distill_metallic"] = metallic_kl.item()
 
         # Normal (3 channels)
-        # For normals, use MSE instead of KL since they're already normalized vectors
-        normal_mse = F.mse_loss(student_pred["normal"], teacher_pred["normal"])
-        soft_loss += normal_mse * (self.temperature ** 2)  # Scale for consistency
-        soft_loss_info["distill_normal"] = normal_mse.item()
+        # Use angular/cosine loss for normals - they're unit vectors, so direction matters
+        # 1 - cos(angle) penalizes angular difference, not magnitude
+        normal_angular = self._angular_loss(student_pred["normal"], teacher_pred["normal"])
+        soft_loss += normal_angular * (self.temperature ** 2)  # Scale for consistency
+        soft_loss_info["distill_normal"] = normal_angular.item()
 
         soft_loss_info["distill_total"] = soft_loss.item()
 
@@ -326,14 +363,18 @@ def _resize_dict_tensors(tensor_dict: Dict[str, torch.Tensor], target_size: Tupl
     resized = {}
     for key, tensor in tensor_dict.items():
         if tensor.shape[-2:] != target_size:
-            # Use bilinear for smooth downsampling, area for better quality
-            mode = 'bilinear' if tensor.shape[-1] > target_size[-1] else 'bilinear'
-            resized[key] = F.interpolate(
+            # Use bilinear for smooth downsampling
+            resized_tensor = F.interpolate(
                 tensor, 
                 size=target_size, 
-                mode=mode, 
-                align_corners=False if mode == 'bilinear' else None
+                mode='bilinear', 
+                align_corners=False
             )
+            # Re-normalize normal maps after interpolation
+            # Bilinear interpolation can change vector magnitudes
+            if key == "normal":
+                resized_tensor = F.normalize(resized_tensor, p=2, dim=1, eps=1e-8)
+            resized[key] = resized_tensor
         else:
             resized[key] = tensor
     return resized

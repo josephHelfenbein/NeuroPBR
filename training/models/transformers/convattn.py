@@ -132,16 +132,21 @@ class PLKGenerator(nn.Module):
     Creates a learnable large kernel that is shared across all blocks.
     The kernel is directly learnable with normalization applied.
     
+    Optionally uses geometric ensemble to enforce rotational symmetry,
+    which helps with directional outputs like normal maps.
+    
     Args:
         channels: Number of channels for the kernel
         kernel_size: Size of the large kernel
+        use_geo_ensemble: If True, average kernel with rotated/flipped versions
     """
     
-    def __init__(self, channels: int, kernel_size: int = 17):
+    def __init__(self, channels: int, kernel_size: int = 17, use_geo_ensemble: bool = True):
         super().__init__()
         
         self.channels = channels
         self.kernel_size = kernel_size
+        self.use_geo_ensemble = use_geo_ensemble
         
         # Learnable kernel (depthwise format: C, 1, K, K)
         self.plk_filter = nn.Parameter(torch.randn(channels, 1, kernel_size, kernel_size) * 0.02)
@@ -158,10 +163,39 @@ class PLKGenerator(nn.Module):
                     value = torch.exp(torch.tensor(-dist / (self.kernel_size / 4)))
                     self.plk_filter[:, 0, i, j] = value * 0.1
     
+    def _geo_ensemble(self, k: torch.Tensor) -> torch.Tensor:
+        """
+        Geometric ensemble: average kernel with all rotated/flipped versions.
+        
+        This enforces rotational symmetry, which is important for directional
+        outputs like normal maps. From ESC paper.
+        
+        Args:
+            k: Kernel tensor (C, 1, K, K)
+        
+        Returns:
+            Symmetrized kernel (C, 1, K, K)
+        """
+        k_hflip = k.flip([3])
+        k_vflip = k.flip([2])
+        k_hvflip = k.flip([2, 3])
+        k_rot90 = torch.rot90(k, -1, [2, 3])
+        k_rot90_hflip = k_rot90.flip([3])
+        k_rot90_vflip = k_rot90.flip([2])
+        k_rot90_hvflip = k_rot90.flip([2, 3])
+        k = (k + k_hflip + k_vflip + k_hvflip + k_rot90 + k_rot90_hflip + k_rot90_vflip + k_rot90_hvflip) / 8
+        return k
+    
     def forward(self) -> torch.Tensor:
         """Generate the normalized PLK filter."""
+        plk = self.plk_filter
+        
+        # Apply geometric ensemble for rotational symmetry
+        if self.use_geo_ensemble:
+            plk = self._geo_ensemble(plk)
+        
         # Normalize so each channel's kernel sums to 1 (like softmax attention)
-        plk = self.plk_filter / (self.plk_filter.abs().sum(dim=(2, 3), keepdim=True) + 1e-6)
+        plk = plk / (plk.abs().sum(dim=(2, 3), keepdim=True) + 1e-6)
         return plk
 
 
