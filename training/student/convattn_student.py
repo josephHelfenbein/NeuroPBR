@@ -107,6 +107,22 @@ class ConvAttnStudentGenerator(nn.Module):
         
         # Initialize weights
         self._init_weights()
+        
+        # Special initialization for normal head to output [0, 0, 1] (flat normal)
+        # This gives a much better starting point than random
+        self._init_normal_head()
+    
+    def _init_normal_head(self):
+        """Initialize normal head bias to output flat normals [0, 0, 1]."""
+        # The normal head is the 4th head (index 3) in the decoder
+        # output_channels = [3, 1, 1, 3] → albedo, roughness, metallic, normal
+        if hasattr(self.decoder, 'heads') and len(self.decoder.heads) >= 4:
+            normal_head = self.decoder.heads[3]  # 4th head is normal
+            if hasattr(normal_head, 'bias') and normal_head.bias is not None:
+                with torch.no_grad():
+                    # Bias toward [0, 0, 1] - flat normal in tangent space
+                    # After normalize(), [0, 0, 1] stays [0, 0, 1]
+                    normal_head.bias.data = torch.tensor([0.0, 0.0, 1.0])
     
     def _init_weights(self):
         """Initialize new layers (encoder uses pretrained weights)."""
