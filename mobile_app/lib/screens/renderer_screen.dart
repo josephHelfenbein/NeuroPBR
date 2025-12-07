@@ -9,6 +9,15 @@ import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import '../neuropbr_plugin.dart';
 
+// View mode for switching between IBL rendered view and individual PBR maps
+enum ViewMode {
+  rendered, // Final IBL rendered view
+  albedo,
+  roughness,
+  metallic,
+  normal,
+}
+
 class RendererScreen extends StatefulWidget {
   final String? materialPath;
   final bool isAsset;
@@ -38,6 +47,7 @@ class _RendererScreenState extends State<RendererScreen> {
   // Scene State
   NeuropbrModelType _currentModel = NeuropbrModelType.sphere;
   String _currentEnvMap = 'sunny_rose_garden_8k';
+  ViewMode _currentViewMode = ViewMode.rendered;
   
   // Available environment maps (base names without extension)
   final List<String> _availableEnvMaps = [
@@ -527,13 +537,48 @@ class _RendererScreenState extends State<RendererScreen> {
               ),
               child: SafeArea(
                 top: false,
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Model Selection
-                      const Text(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // View Mode Selection
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16.0, right: 16.0, top: 16.0),
+                      child: const Text(
+                        'VIEW MODE',
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.5,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 35,
+                      child: ListView(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                        children: [
+                          _buildViewModeBtn(ViewMode.rendered, 'Rendered'),
+                          const SizedBox(width: 8),
+                          _buildViewModeBtn(ViewMode.albedo, 'Albedo'),
+                          const SizedBox(width: 8),
+                          _buildViewModeBtn(ViewMode.roughness, 'Roughness'),
+                          const SizedBox(width: 8),
+                          _buildViewModeBtn(ViewMode.metallic, 'Metallic'),
+                          const SizedBox(width: 8),
+                          _buildViewModeBtn(ViewMode.normal, 'Normal'),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Model Selection
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: const Text(
                         'MODEL',
                         style: TextStyle(
                           color: Colors.grey,
@@ -542,8 +587,11 @@ class _RendererScreenState extends State<RendererScreen> {
                           letterSpacing: 1.5,
                         ),
                       ),
-                      const SizedBox(height: 10),
-                      Row(
+                    ),
+                    const SizedBox(height: 10),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: Row(
                         children: [
                           _buildModelBtn(NeuropbrModelType.sphere, Icons.circle, 'Sphere'),
                           const SizedBox(width: 10),
@@ -552,11 +600,14 @@ class _RendererScreenState extends State<RendererScreen> {
                           _buildModelBtn(NeuropbrModelType.plane, Icons.layers, 'Plane'),
                         ],
                       ),
+                    ),
 
-                      const SizedBox(height: 20),
+                    const SizedBox(height: 20),
 
-                      // HDRI Selection
-                      const Text(
+                    // HDRI Selection
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+                      child: const Text(
                         'ENVIRONMENT',
                         style: TextStyle(
                           color: Colors.grey,
@@ -565,55 +616,56 @@ class _RendererScreenState extends State<RendererScreen> {
                           letterSpacing: 1.5,
                         ),
                       ),
-                      const SizedBox(height: 10),
-                      SizedBox(
-                        height: 80,
-                        child: ListView.builder(
-                          scrollDirection: Axis.horizontal,
-                          itemCount: _availableEnvMaps.length,
-                          itemBuilder: (context, index) {
-                            final envMap = _availableEnvMaps[index];
-                            final isSelected = _currentEnvMap == envMap;
-                            // Clean up name for display
-                            final displayName = envMap
-                                .replaceAll('_8k', '')
-                                .replaceAll('_', ' ')
-                                .toUpperCase();
+                    ),
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      height: 60,
+                      child: ListView.builder(
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.only(left: 16.0, right: 16.0, bottom: 16.0),
+                        itemCount: _availableEnvMaps.length,
+                        itemBuilder: (context, index) {
+                          final envMap = _availableEnvMaps[index];
+                          final isSelected = _currentEnvMap == envMap;
+                          // Clean up name for display
+                          final displayName = envMap
+                              .replaceAll('_8k', '')
+                              .replaceAll('_', ' ')
+                              .toUpperCase();
 
-                            return GestureDetector(
-                              onTap: () {
-                                setState(() => _currentEnvMap = envMap);
-                                _loadEnvironment(envMap);
-                              },
-                              child: Container(
-                                width: 100,
-                                margin: const EdgeInsets.only(right: 10),
-                                decoration: BoxDecoration(
-                                  color: isSelected ? Colors.orange : Colors.grey[900],
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: isSelected 
-                                    ? Border.all(color: Colors.white, width: 2)
-                                    : Border.all(color: Colors.white24),
-                                ),
-                                padding: const EdgeInsets.all(8),
-                                child: Center(
-                                  child: Text(
-                                    displayName,
-                                    textAlign: TextAlign.center,
-                                    style: TextStyle(
-                                      color: isSelected ? Colors.white : Colors.grey[400],
-                                      fontSize: 10,
-                                      fontWeight: FontWeight.bold,
-                                    ),
+                          return GestureDetector(
+                            onTap: () {
+                              setState(() => _currentEnvMap = envMap);
+                              _loadEnvironment(envMap);
+                            },
+                            child: Container(
+                              width: 100,
+                              margin: const EdgeInsets.only(right: 10),
+                              decoration: BoxDecoration(
+                                color: isSelected ? Colors.orange : Colors.grey[900],
+                                borderRadius: BorderRadius.circular(12),
+                                border: isSelected 
+                                  ? Border.all(color: Colors.white, width: 2)
+                                  : Border.all(color: Colors.white24),
+                              ),
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              child: Center(
+                                child: Text(
+                                  displayName,
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    color: isSelected ? Colors.white : Colors.grey[400],
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
                                   ),
                                 ),
                               ),
-                            );
-                          },
-                        ),
+                            ),
+                          );
+                        },
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
               ),
             ),
@@ -660,6 +712,57 @@ class _RendererScreenState extends State<RendererScreen> {
         ),
       ),
     );
+  }
+
+  Widget _buildViewModeBtn(ViewMode mode, String label) {
+    final isSelected = _currentViewMode == mode;
+    return GestureDetector(
+      onTap: () {
+        if (!_isInitialized) return;
+        setState(() => _currentViewMode = mode);
+        _updateViewMode(mode);
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.orange : Colors.white.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(20),
+          border: isSelected 
+            ? Border.all(color: Colors.white, width: 1)
+            : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? Colors.white : Colors.grey[400],
+            fontSize: 12,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _updateViewMode(ViewMode mode) {
+    // Map ViewMode to channel index (matching PreviewChannel enum in native code)
+    final channelIndex = switch (mode) {
+      ViewMode.rendered => 0,
+      ViewMode.albedo => 1,
+      ViewMode.roughness => 2,
+      ViewMode.metallic => 3,
+      ViewMode.normal => 4,
+    };
+
+    _renderer.setPreviewControls(NeuropbrPreviewControls(
+      tint: const [1.0, 1.0, 1.0],
+      roughnessMultiplier: 1.0,
+      metallicMultiplier: 1.0,
+      toneMapping: NeuropbrToneMapping.filmic,
+      modelType: _currentModel,
+      zoom: 1.0,
+      channel: channelIndex,
+    ));
+    _renderer.renderFrame('default_mat');
   }
   
   @override

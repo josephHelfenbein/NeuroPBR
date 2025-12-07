@@ -3,7 +3,6 @@ import 'start_screen.dart';
 import 'scan_screen.dart';
 import 'tags_screen.dart';
 import 'stats_screen.dart';
-import 'settings_screen.dart';
 
 class CarouselScreen extends StatefulWidget {
   const CarouselScreen({super.key});
@@ -35,7 +34,7 @@ class _CarouselScreenState extends State<CarouselScreen> {
       controller: _pageController,
       physics: const BouncingScrollPhysics(),
       itemBuilder: (context, index) {
-        final screenIndex = index % 5;
+        final screenIndex = index % 4;
 
         switch (screenIndex) {
           case 0:
@@ -46,8 +45,6 @@ class _CarouselScreenState extends State<CarouselScreen> {
             return const TagsScreen();
           case 3:
             return const StatsScreen();
-          case 4:
-            return const SettingsScreen();
           default:
             return StartScreen(onScanPressed: navigateToCamera);
         }

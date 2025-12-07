@@ -162,9 +162,13 @@ fragment float4 pbr_fragment(
     float metallic = clamp(metallicMap.sample(linearSampler, uv).r * material.scalars.y, 0.0, 1.0);
 
     float3 shadingN = N;
+    float3 rawNormalMap = float3(0.5, 0.5, 1.0); // Default flat normal
     if (material.featureToggle.x > 0.5) {
         float3 mapN = normalMap.sample(linearSampler, uv).rgb;
+        rawNormalMap = mapN;
         shadingN = applyNormalMap(mapN, TBN);
+    } else {
+        rawNormalMap = normalMap.sample(linearSampler, uv).rgb;
     }
 
     float3 V = normalize(frame.cameraPosFov.xyz - in.worldPos);
@@ -187,12 +191,17 @@ fragment float4 pbr_fragment(
 
     float3 color = (diffuse * (1.0 - metallic) + specular) * frame.iblParams.x;
 
-    // Channel inspector overrides
+    // Channel inspector overrides - these bypass tone mapping for accurate display
     if (material.scalars.w > 0.5) {
-        if (material.scalars.w < 1.5) color = albedo;
-        else if (material.scalars.w < 2.5) color = float3(roughness);
-        else if (material.scalars.w < 3.5) color = float3(metallic);
-        else color = shadingN * 0.5 + 0.5;
+        if (material.scalars.w < 1.5) {
+            return float4(albedo, 1.0); // Albedo - show raw color
+        } else if (material.scalars.w < 2.5) {
+            return float4(float3(roughness), 1.0); // Roughness grayscale
+        } else if (material.scalars.w < 3.5) {
+            return float4(float3(metallic), 1.0); // Metallic grayscale
+        } else {
+            return float4(rawNormalMap, 1.0); // Normal map - show raw texture
+        }
     }
 
     if (material.featureToggle.z > 0.5) {

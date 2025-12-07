@@ -2,7 +2,6 @@
 import 'package:flutter/material.dart';
 import 'stats_screen.dart';
 import 'tags_screen.dart';
-import 'settings_screen.dart';
 import 'nav_item.dart';
 
 class MainTabScreen extends StatefulWidget {
@@ -23,7 +22,6 @@ class _MainTabScreenState extends State<MainTabScreen> {
     _screens = [
       StatsScreen(key: _statsKey),
       const TagsScreen(),
-      const SettingsScreen(),
     ];
   }
 
@@ -69,12 +67,6 @@ class _MainTabScreenState extends State<MainTabScreen> {
             label: 'Tags',
             active: _currentIndex == 1,
             onTap: () => _onTabTapped(1),
-          ),
-          NavItem(
-            icon: Icons.settings,
-            label: 'Settings',
-            active: _currentIndex == 2,
-            onTap: () => _onTabTapped(2),
           ),
         ],
       ),
