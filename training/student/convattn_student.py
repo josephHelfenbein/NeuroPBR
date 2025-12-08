@@ -51,7 +51,7 @@ class ConvAttnStudentGenerator(nn.Module):
     def __init__(
         self,
         config: TrainConfig,
-        bottleneck_channels: int = 320,
+        bottleneck_channels: int = 960,  # Use encoder output size (MobileNetV3-Large = 960)
         num_convattn_blocks: int = 3,
         use_dynamic_kernel: bool = True
     ):

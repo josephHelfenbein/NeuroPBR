@@ -250,15 +250,14 @@ class ConvolutionalAttention(nn.Module):
         )
         x1_dynamic = x1_dynamic.reshape(bs, self.pdim, x1.shape[2], x1.shape[3])
         
-        # Apply static large kernel conv
-        # Only use first pdim channels of the filter (filter shape: channels, 1, K, K)
-        lk_filter_slice = lk_filter[:self.pdim]
+        # Apply static large kernel conv - REGULAR conv (paper's approach)
+        # Filter is (pdim, pdim, K, K) for full channel mixing
         x1_static = F.conv2d(
             x1, 
-            lk_filter_slice, 
+            lk_filter, 
             stride=1, 
-            padding=lk_filter.shape[-1] // 2,
-            groups=self.pdim  # Depthwise
+            padding=lk_filter.shape[-1] // 2
+            # NO groups - regular conv for channel mixing
         )
         
         # Combine: static LK + dynamic adaptive
@@ -296,23 +295,13 @@ class PLKBlock(nn.Module):
     """
     Single PLK (Pre-computed Large Kernel) block from ESC.
     
-    Updated structure matching ESC paper with dynamic kernel:
-        x = convffn(x)        # Local refinement (3x3)
-        x = x + attn(x)       # Window attention
-        x = x + plk(x)        # Global aggregation (dynamic + static large kernel)
-    
-    The dynamic kernel allows content-adaptive behavior, which is crucial
-    for complex outputs like normal maps.
-    
-    Args:
-        channels: Number of channels
-        kernel_size: Size of the large kernel (default 17 for ~32×32 effective RF)
-        use_bn: Use BatchNorm vs LayerNorm
-        use_window_attn: Use window attention (True) or SE attention (False)
-        window_size: Window size for window attention
-        use_dynamic_kernel: Use dynamic+static PLK (True) or static-only (False)
-        pdim: Number of channels for dynamic kernel (default: channels//4)
-        conv_blocks: Number of PLK+FFN pairs per block (paper uses 5, default 3)
+    Structure matching paper:
+        x = norm1(x); x = convffn(x)         # Local refinement (no residual)
+        x = x + attn(norm2(x))               # Window attention with pre-norm
+        for pconv, convffn in zip(...):
+            x = x + pconv(convffn(x), plk)   # PLK+FFN pairs (no extra norm)
+        x = conv_out(ln_out(x))
+        return residual + gamma * x
     """
     
     def __init__(
@@ -324,7 +313,7 @@ class PLKBlock(nn.Module):
         window_size: int = 8,
         use_dynamic_kernel: bool = True,
         pdim: Optional[int] = None,
-        conv_blocks: int = 5,  # Paper uses 5
+        conv_blocks: int = 5,
     ):
         super().__init__()
         
@@ -335,20 +324,19 @@ class PLKBlock(nn.Module):
         self.use_dynamic_kernel = use_dynamic_kernel
         self.conv_blocks = conv_blocks
         
-        # pdim controls how many channels use the dynamic kernel
-        # Default: 1/4 of channels (like ESC paper uses pdim=16 for dim=64)
-        self.pdim = pdim if pdim is not None else max(channels // 4, 16)
+        # pdim for partial conv - paper uses FIXED 16
+        self.pdim = pdim if pdim is not None else 16
         
-        # Pre-norm
-        self.norm1 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
+        # Paper uses LayerNorm throughout (not BatchNorm)
+        self.norm1 = LayerNorm2d(channels)  # ln_proj
         
-        # ConvFFN for local refinement BEFORE PLK (ESC-style: local → global)
-        self.convffn = ConvFFN(channels, expansion=2.0, use_bn=use_bn)
+        # ConvFFN for local refinement (paper: proj)
+        self.convffn = ConvFFN(channels, expansion=2.0)
         
-        # Norm before PLK
-        self.norm2 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
+        # Norm before attention (paper: ln_attn)
+        self.norm2 = LayerNorm2d(channels)
         
-        # Multiple PLK+FFN pairs (paper uses conv_blocks=5)
+        # Multiple PLK+FFN pairs
         if use_dynamic_kernel:
             self.pconvs = nn.ModuleList([
                 ConvAttnWrapper(channels, self.pdim, proj_dim_in=self.pdim)
@@ -358,28 +346,26 @@ class PLKBlock(nn.Module):
             self.pconvs = nn.ModuleList([
                 nn.Sequential(
                     nn.Conv2d(channels, channels, kernel_size=1, bias=False),
-                    nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels),
+                    LayerNorm2d(channels),
                     nn.GELU(),
                 )
                 for _ in range(conv_blocks)
             ])
         
         self.convffns = nn.ModuleList([
-            ConvFFN(channels, expansion=1.25, use_bn=use_bn)  # Paper uses exp_ratio=1.25
+            ConvFFN(channels, expansion=1.25)
             for _ in range(conv_blocks)
         ])
         
-        # Final 3x3 conv (paper's conv_out)
-        self.ln_out = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
+        # Final 3x3 conv
+        self.ln_out = LayerNorm2d(channels)
         self.conv_out = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         
         # Attention mechanism
         if use_window_attn:
-            # Window attention for spatially-varying weights (better for normals)
-            num_heads = max(channels // 64, 4)  # At least 4 heads
+            num_heads = max(channels // 64, 4)
             self.attn = WindowAttention(channels, window_size=window_size, num_heads=num_heads)
         else:
-            # SE (channel) attention - same weight for all spatial positions
             hidden = max(channels // 4, 32)
             self.attn = nn.Sequential(
                 nn.AdaptiveAvgPool2d(1),
@@ -404,30 +390,28 @@ class PLKBlock(nn.Module):
         """
         residual = x
         
-        # Pre-norm
+        # 1. Initial projection (no residual)
         x = self.norm1(x)
-        
-        # 1. Local refinement with ConvFFN (3x3 depthwise)
-        x = x + self.convffn(x)
+        x = self.convffn(x)
         
         # 2. Window attention for spatial variation
         if self.use_window_attn:
-            x = x + self.attn(x)
+            x = x + self.attn(self.norm2(x))
         else:
             B, C, _, _ = x.shape
-            attn = self.attn(x).view(B, C, 1, 1)
+            attn = self.attn(self.norm2(x)).view(B, C, 1, 1)
             x = x * attn
         
         # 3. Multiple PLK+FFN pairs (paper uses conv_blocks=5)
         for pconv, convffn in zip(self.pconvs, self.convffns):
-            x_ffn = self.norm2(convffn(x))
             if self.use_dynamic_kernel:
-                x = x + pconv(x_ffn, plk_filter)
+                x = x + pconv(convffn(x), plk_filter)
             else:
+                x_ffn = convffn(x)
                 x_plk = F.conv2d(x_ffn, plk_filter, padding=self.padding, groups=self.channels)
                 x = x + pconv(x_plk)
         
-        # 4. Final 3x3 conv (paper's conv_out)
+        # 4. Final 3x3 conv
         x = self.conv_out(self.ln_out(x))
         
         # Residual connection with scaling
@@ -438,41 +422,31 @@ class PLKGenerator(nn.Module):
     """
     Generates the Pre-computed Large Kernel (PLK) filter.
     
-    Creates a learnable large kernel that is shared across all blocks.
-    The kernel is directly learnable with normalization applied.
+    Paper's approach: Creates (pdim, pdim, K, K) kernel for REGULAR conv.
+    Only the first pdim channels get processed with full channel mixing,
+    rest of channels pass through unchanged.
     
     Optionally uses geometric ensemble to enforce rotational symmetry,
     which helps with directional outputs like normal maps.
     
     Args:
-        channels: Number of channels for the kernel
-        kernel_size: Size of the large kernel
+        pdim: Number of channels for the kernel (paper uses 16)
+        kernel_size: Size of the large kernel (paper uses 13)
         use_geo_ensemble: If True, average kernel with rotated/flipped versions
     """
     
-    def __init__(self, channels: int, kernel_size: int = 17, use_geo_ensemble: bool = True):
+    def __init__(self, pdim: int = 16, kernel_size: int = 17, use_geo_ensemble: bool = True):
         super().__init__()
         
-        self.channels = channels
+        self.pdim = pdim
         self.kernel_size = kernel_size
         self.use_geo_ensemble = use_geo_ensemble
         
-        # Learnable kernel (depthwise format: C, 1, K, K)
-        # We create as (C, K*K) for orthogonal init, then reshape
-        self.plk_filter = nn.Parameter(torch.empty(channels, 1, kernel_size, kernel_size))
+        # Paper's approach: (pdim, pdim, K, K) for regular conv with channel mixing
+        self.plk_filter = nn.Parameter(torch.randn(pdim, pdim, kernel_size, kernel_size))
         
-        self._init_weights()
-    
-    def _init_weights(self):
         # Orthogonal initialization (from ESC paper)
-        # This preserves gradient norms and prevents redundant channel patterns
-        with torch.no_grad():
-            # Initialize each channel's kernel orthogonally
-            # Reshape to 2D for orthogonal init, then back to 4D
-            flat = self.plk_filter.view(self.channels, -1)  # (C, K*K)
-            nn.init.orthogonal_(flat)
-            # Scale down to prevent large initial outputs
-            self.plk_filter.data = flat.view_as(self.plk_filter) * 0.1
+        nn.init.orthogonal_(self.plk_filter)
     
     def _geo_ensemble(self, k: torch.Tensor) -> torch.Tensor:
         """
@@ -482,10 +456,10 @@ class PLKGenerator(nn.Module):
         outputs like normal maps. From ESC paper.
         
         Args:
-            k: Kernel tensor (C, 1, K, K)
+            k: Kernel tensor (pdim, pdim, K, K)
         
         Returns:
-            Symmetrized kernel (C, 1, K, K)
+            Symmetrized kernel (pdim, pdim, K, K)
         """
         k_hflip = k.flip([3])
         k_vflip = k.flip([2])
@@ -498,15 +472,13 @@ class PLKGenerator(nn.Module):
         return k
     
     def forward(self) -> torch.Tensor:
-        """Generate the normalized PLK filter."""
+        """Generate the PLK filter."""
         plk = self.plk_filter
         
         # Apply geometric ensemble for rotational symmetry
         if self.use_geo_ensemble:
             plk = self._geo_ensemble(plk)
         
-        # Normalize so each channel's kernel sums to 1 (like softmax attention)
-        plk = plk / (plk.abs().sum(dim=(2, 3), keepdim=True) + 1e-6)
         return plk
 
 
@@ -553,15 +525,22 @@ class ConvAttnBottleneck(nn.Module):
         self.num_blocks = num_blocks
         self.use_dynamic_kernel = use_dynamic_kernel
         
-        # Project to bottleneck dimension (replaces 3×3 encoder since we're already encoded)
-        self.input_proj = nn.Sequential(
-            nn.Conv2d(in_channels, bottleneck_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(bottleneck_channels) if use_bn else LayerNorm2d(bottleneck_channels),
-            nn.GELU()
-        )
+        # pdim for PLK - paper uses FIXED 16 (partial conv on 16 channels only)
+        # This allows large kernel + dynamic weights on only ~25% of features
+        self.pdim = 16  # Fixed, not scaled
         
-        # Shared PLK generator (creates the large kernel filter once)
-        self.plk_gen = PLKGenerator(bottleneck_channels, kernel_size=kernel_size)
+        # self.input_proj = nn.Sequential(
+        #     nn.Conv2d(in_channels, bottleneck_channels, kernel_size=1, bias=False),
+        #     nn.BatchNorm2d(bottleneck_channels) if use_bn else LayerNorm2d(bottleneck_channels),
+        #     nn.GELU()
+        # )
+
+        # Input already encoded by MobileNetV3, no projection needed
+        # PLKBlock has its own norm1 at the start
+        self.input_proj = nn.Identity()
+        
+        # Shared PLK generator - uses pdim for (pdim, pdim, K, K) filter
+        self.plk_gen = PLKGenerator(pdim=self.pdim, kernel_size=kernel_size)
         
         # Stack of PLK blocks (all share the same PLK filter)
         self.blocks = nn.ModuleList([
@@ -571,7 +550,8 @@ class ConvAttnBottleneck(nn.Module):
                 use_bn=use_bn,
                 use_window_attn=use_window_attn,
                 window_size=window_size,
-                use_dynamic_kernel=use_dynamic_kernel,  # Enable dynamic kernel
+                use_dynamic_kernel=use_dynamic_kernel,
+                pdim=self.pdim,  # Pass pdim to blocks
             )
             for _ in range(num_blocks)
         ])
