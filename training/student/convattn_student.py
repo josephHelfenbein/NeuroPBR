@@ -67,12 +67,15 @@ class ConvAttnStudentGenerator(nn.Module):
         # ConvAttn bottleneck for multi-view fusion
         # Input: encoder latent channels × num_views
         # Output: bottleneck_channels (to match decoder)
+        # Using window attention for spatially-varying attention (better for normals)
         self.fusion = ConvAttnFusion(
             in_channels=self.latent_channels,
             out_channels=bottleneck_channels,
             num_views=self.num_views,
             num_blocks=num_convattn_blocks,
-            use_bn=True
+            use_bn=True,
+            use_window_attn=True,  # Window attention for spatial variation
+            window_size=8  # 8x8 windows on 32x32 latent = 16 windows
         )
         
         # Project bottleneck to decoder expected channels if needed
