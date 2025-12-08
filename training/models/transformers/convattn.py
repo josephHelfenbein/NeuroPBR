@@ -699,13 +699,22 @@ class ConvAttnFusion(nn.Module):
         
         self.num_views = num_views
         
-        # Per-view feature refinement
+        # Squeeze dimension for lightweight dense refinement
+        squeezed = max(in_channels // 4, 16)
+        
+        # Per-view feature refinement with REGULAR 3x3 conv (cross-channel mixing)
+        # Lightweight: squeeze → regular 3x3 → expand
         self.view_refine = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(in_channels, in_channels, 3, padding=1, groups=in_channels, bias=False),
-                nn.BatchNorm2d(in_channels) if use_bn else LayerNorm2d(in_channels),
+                # 1. Squeeze channels down
+                nn.Conv2d(in_channels, squeezed, 1, bias=False),
                 nn.GELU(),
-                nn.Conv2d(in_channels, in_channels, 1, bias=False)
+                # 2. REGULAR 3x3 conv (NOT depthwise) - enables cross-channel mixing
+                nn.Conv2d(squeezed, squeezed, 3, padding=1, bias=False),
+                LayerNorm2d(squeezed),
+                nn.GELU(),
+                # 3. Expand back up
+                nn.Conv2d(squeezed, in_channels, 1, bias=False)
             )
             for _ in range(num_views)
         ])
@@ -713,7 +722,7 @@ class ConvAttnFusion(nn.Module):
         # Fusion conv (concatenate views then project)
         self.fusion = nn.Sequential(
             nn.Conv2d(in_channels * num_views, out_channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(out_channels) if use_bn else LayerNorm2d(out_channels),
+            LayerNorm2d(out_channels),
             nn.GELU()
         )
         
