@@ -154,7 +154,7 @@ class ConvFFN(nn.Module):
     Provides local refinement before global PLK aggregation.
     """
     
-    def __init__(self, channels: int, expansion: float = 2.0, use_bn: bool = True):
+    def __init__(self, channels: int, expansion: float = 2.0, use_bn: bool = False):
         super().__init__()
         hidden = int(channels * expansion)
         
