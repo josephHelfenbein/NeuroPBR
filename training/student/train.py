@@ -491,7 +491,8 @@ class Trainer:
         alpha: float = 0.3,
         rank: int = 0,
         use_feature_distillation: bool = False,
-        lambda_feat: float = 0.1
+        lambda_feat: float = 0.1,
+        denormalize_target: bool = True  # Convert GT from [-1,1] to [0,1] for sigmoid outputs
     ):
         self.config = config
         self.rank = rank
@@ -500,6 +501,7 @@ class Trainer:
         self.alpha = alpha
         self.use_feature_distillation = use_feature_distillation
         self.lambda_feat = lambda_feat
+        self.denormalize_target = denormalize_target
 
         # Set device
         self.device_preference = getattr(config.training, "device", "auto")
@@ -852,9 +854,10 @@ class Trainer:
                 teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
                 target_resized = _resize_dict_tensors(target, student_size)
                 
-                # Denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
+                # Optionally denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
                 # Normal maps stay in [-1,1], but albedo/roughness/metallic need [0,1]
-                target_resized = _denormalize_target(target_resized)
+                if self.denormalize_target:
+                    target_resized = _denormalize_target(target_resized)
 
                 # Distillation loss
                 loss, loss_info = self.criterion(student_pred, teacher_pred_resized, target_resized)
@@ -1019,8 +1022,9 @@ class Trainer:
             teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
             target_resized = _resize_dict_tensors(target, student_size)
             
-            # Denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
-            target_resized = _denormalize_target(target_resized)
+            # Optionally denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
+            if self.denormalize_target:
+                target_resized = _denormalize_target(target_resized)
 
             # Compute loss
             _, loss_info = self.criterion(student_pred, teacher_pred_resized, target_resized)
@@ -1331,7 +1335,8 @@ def main(args):
         alpha=args.alpha,
         rank=0,
         use_feature_distillation=args.use_feature_distillation,
-        lambda_feat=args.lambda_feat
+        lambda_feat=args.lambda_feat,
+        denormalize_target=not args.no_denormalize_target
     )
 
     # Resume if specified
@@ -1392,6 +1397,8 @@ if __name__ == "__main__":
                       help="Path to student checkpoint to resume from")
     parser.add_argument("--checkpoint-dir", type=str, default=None,
                       help="Directory to save student checkpoints")
+    parser.add_argument("--no-denormalize-target", action="store_true",
+                      help="Disable GT denormalization (for existing students trained with [-1,1] targets)")
 
     args = parser.parse_args()
 
