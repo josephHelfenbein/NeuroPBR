@@ -171,16 +171,138 @@ class ConvFFN(nn.Module):
         return x
 
 
+class ConvolutionalAttention(nn.Module):
+    """
+    Dynamic Convolutional Attention from ESC paper.
+    
+    Key insight: combines a content-adaptive dynamic 3x3 kernel with a static
+    large kernel (PLK). The dynamic kernel allows the model to adapt its behavior
+    based on the input content, which is crucial for complex outputs like normals.
+    
+    Structure:
+        1. Generate dynamic 3x3 kernel from input features (via pooling + MLP)
+        2. Apply dynamic depthwise conv (content-adaptive)
+        3. Apply static PLK conv (global context)
+        4. Sum the results
+    
+    The dynamic kernel generator is zero-initialized so it starts as identity,
+    allowing gradual learning of content-adaptive behavior.
+    
+    Args:
+        pdim: Number of channels to process with dynamic kernel
+        proj_dim_in: Number of input channels for kernel generation (default: pdim)
+    """
+    
+    def __init__(self, pdim: int, proj_dim_in: Optional[int] = None):
+        super().__init__()
+        self.pdim = pdim
+        self.proj_dim_in = proj_dim_in if proj_dim_in is not None else pdim
+        self.sk_size = 3  # Dynamic kernel size (3x3)
+        
+        # Dynamic kernel generator: input features -> 3x3 depthwise kernel
+        # Uses global pooling + MLP to generate per-sample kernels
+        self.dwc_proj = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(self.proj_dim_in, pdim // 2, 1, 1, 0),
+            nn.GELU(),
+            nn.Conv2d(pdim // 2, pdim * self.sk_size * self.sk_size, 1, 1, 0)
+        )
+        
+        # Zero-initialize the kernel generator output
+        # This makes the dynamic kernel start as zero (identity behavior)
+        nn.init.zeros_(self.dwc_proj[-1].weight)
+        nn.init.zeros_(self.dwc_proj[-1].bias)
+    
+    def forward(self, x: torch.Tensor, lk_filter: torch.Tensor) -> torch.Tensor:
+        """
+        Apply dynamic + static convolution.
+        
+        Args:
+            x: Input features (B, C, H, W) where C >= pdim
+            lk_filter: Static large kernel filter (pdim, 1, K, K)
+        
+        Returns:
+            Output features (B, C, H, W)
+        """
+        bs = x.shape[0]
+        
+        # Split channels: first pdim channels get dynamic+static, rest pass through
+        if x.shape[1] > self.pdim:
+            x1, x2 = torch.split(x, [self.pdim, x.shape[1] - self.pdim], dim=1)
+        else:
+            x1 = x
+            x2 = None
+        
+        # Generate dynamic kernel from input features
+        # Shape: (B, pdim * 3 * 3) -> (B * pdim, 1, 3, 3)
+        dynamic_kernel = self.dwc_proj(x[:, :self.proj_dim_in])
+        dynamic_kernel = dynamic_kernel.reshape(bs * self.pdim, 1, self.sk_size, self.sk_size)
+        
+        # Apply dynamic depthwise conv
+        # Reshape to (1, B*pdim, H, W) for grouped conv
+        x1_reshaped = x1.reshape(1, bs * self.pdim, x1.shape[2], x1.shape[3])
+        x1_dynamic = F.conv2d(
+            x1_reshaped, 
+            dynamic_kernel, 
+            stride=1, 
+            padding=self.sk_size // 2, 
+            groups=bs * self.pdim
+        )
+        x1_dynamic = x1_dynamic.reshape(bs, self.pdim, x1.shape[2], x1.shape[3])
+        
+        # Apply static large kernel conv
+        # Only use first pdim channels of the filter (filter shape: channels, 1, K, K)
+        lk_filter_slice = lk_filter[:self.pdim]
+        x1_static = F.conv2d(
+            x1, 
+            lk_filter_slice, 
+            stride=1, 
+            padding=lk_filter.shape[-1] // 2,
+            groups=self.pdim  # Depthwise
+        )
+        
+        # Combine: static LK + dynamic adaptive
+        x1_out = x1_static + x1_dynamic
+        
+        # Recombine with pass-through channels
+        if x2 is not None:
+            return torch.cat([x1_out, x2], dim=1)
+        else:
+            return x1_out
+    
+    def extra_repr(self):
+        return f'pdim={self.pdim}, proj_dim_in={self.proj_dim_in}, dynamic_kernel_size={self.sk_size}'
+
+
+class ConvAttnWrapper(nn.Module):
+    """
+    Wrapper that combines ConvolutionalAttention with aggregation.
+    
+    From ESC paper: applies PLK (dynamic + static) followed by 1x1 aggregation.
+    """
+    
+    def __init__(self, dim: int, pdim: int, proj_dim_in: Optional[int] = None):
+        super().__init__()
+        self.plk = ConvolutionalAttention(pdim, proj_dim_in)
+        self.aggr = nn.Conv2d(dim, dim, 1, 1, 0)
+    
+    def forward(self, x: torch.Tensor, lk_filter: torch.Tensor) -> torch.Tensor:
+        x = self.plk(x, lk_filter)
+        x = self.aggr(x)
+        return x
+
+
 class PLKBlock(nn.Module):
     """
     Single PLK (Pre-computed Large Kernel) block from ESC.
     
-    Updated structure matching ESC paper:
+    Updated structure matching ESC paper with dynamic kernel:
         x = convffn(x)        # Local refinement (3x3)
         x = x + attn(x)       # Window attention
-        x = x + plk(x)        # Global aggregation (large kernel)
+        x = x + plk(x)        # Global aggregation (dynamic + static large kernel)
     
-    This local→global flow helps with detail preservation.
+    The dynamic kernel allows content-adaptive behavior, which is crucial
+    for complex outputs like normal maps.
     
     Args:
         channels: Number of channels
@@ -188,6 +310,8 @@ class PLKBlock(nn.Module):
         use_bn: Use BatchNorm vs LayerNorm
         use_window_attn: Use window attention (True) or SE attention (False)
         window_size: Window size for window attention
+        use_dynamic_kernel: Use dynamic+static PLK (True) or static-only (False)
+        pdim: Number of channels for dynamic kernel (default: channels//4)
     """
     
     def __init__(
@@ -197,6 +321,8 @@ class PLKBlock(nn.Module):
         use_bn: bool = True,
         use_window_attn: bool = True,
         window_size: int = 8,
+        use_dynamic_kernel: bool = True,
+        pdim: Optional[int] = None,
     ):
         super().__init__()
         
@@ -204,6 +330,11 @@ class PLKBlock(nn.Module):
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
         self.use_window_attn = use_window_attn
+        self.use_dynamic_kernel = use_dynamic_kernel
+        
+        # pdim controls how many channels use the dynamic kernel
+        # Default: 1/4 of channels (like ESC paper uses pdim=16 for dim=64)
+        self.pdim = pdim if pdim is not None else max(channels // 4, 16)
         
         # Pre-norm
         self.norm1 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
@@ -211,19 +342,21 @@ class PLKBlock(nn.Module):
         # ConvFFN for local refinement BEFORE PLK (ESC-style: local → global)
         self.convffn = ConvFFN(channels, expansion=2.0, use_bn=use_bn)
         
-        # Depthwise conv with the PLK filter
-        # The actual filter weights come from the shared PLK
-        self.dw_weight_shape = (channels, 1, kernel_size, kernel_size)
-        
         # Norm before PLK
         self.norm2 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
         
-        # Pointwise mixing after PLK
-        self.pw = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=1, bias=False),
-            nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels),
-            nn.GELU(),
-        )
+        # PLK with optional dynamic kernel
+        if use_dynamic_kernel:
+            # Dynamic + static kernel combination (from ESC paper)
+            self.plk_conv = ConvAttnWrapper(channels, self.pdim, proj_dim_in=self.pdim)
+        else:
+            # Static-only (original simplified implementation)
+            self.plk_conv = None
+            self.pw = nn.Sequential(
+                nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+                nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels),
+                nn.GELU(),
+            )
         
         # Attention mechanism
         if use_window_attn:
@@ -270,10 +403,17 @@ class PLKBlock(nn.Module):
             attn = self.attn(x).view(B, C, 1, 1)
             x = x * attn
         
-        # 3. Global aggregation with PLK (large kernel)
+        # 3. Global aggregation with PLK (dynamic + static or static-only)
         x_plk = self.norm2(x)
-        x_plk = F.conv2d(x_plk, plk_filter, padding=self.padding, groups=self.channels)
-        x_plk = self.pw(x_plk)
+        
+        if self.use_dynamic_kernel:
+            # Dynamic + static PLK (ESC paper style)
+            x_plk = self.plk_conv(x_plk, plk_filter)
+        else:
+            # Static-only PLK
+            x_plk = F.conv2d(x_plk, plk_filter, padding=self.padding, groups=self.channels)
+            x_plk = self.pw(x_plk)
+        
         x = x + x_plk
         
         # Residual connection with scaling
@@ -360,7 +500,7 @@ class ConvAttnBottleneck(nn.Module):
     """
     ConvAttn bottleneck module using ESC-style PLK (Pre-computed Large Kernel).
     
-    Simplified structure matching the ESC paper:
+    Structure matching the ESC paper:
         skip = feat
         plk_filter = self.plk_func(self.plk_filter)
         for block in self.blocks:
@@ -378,6 +518,7 @@ class ConvAttnBottleneck(nn.Module):
         use_bn: Use BatchNorm vs LayerNorm
         use_window_attn: Use window attention (True) or SE attention (False)
         window_size: Window size for window attention
+        use_dynamic_kernel: Use dynamic+static PLK (True) or static-only (False)
     """
     
     def __init__(
@@ -389,14 +530,14 @@ class ConvAttnBottleneck(nn.Module):
         use_bn: bool = True,
         use_window_attn: bool = True,
         window_size: int = 8,
-        # Legacy params (ignored, kept for config compatibility)
-        expansion_ratio: int = 2,
-        use_dynamic_kernel: bool = True
+        expansion_ratio: int = 2,  # Legacy, kept for compatibility
+        use_dynamic_kernel: bool = True  # ESC paper dynamic kernel
     ):
         super().__init__()
         
         self.bottleneck_channels = bottleneck_channels
         self.num_blocks = num_blocks
+        self.use_dynamic_kernel = use_dynamic_kernel
         
         # Project to bottleneck dimension (replaces 3×3 encoder since we're already encoded)
         self.input_proj = nn.Sequential(
@@ -416,9 +557,11 @@ class ConvAttnBottleneck(nn.Module):
                 use_bn=use_bn,
                 use_window_attn=use_window_attn,
                 window_size=window_size,
+                use_dynamic_kernel=use_dynamic_kernel,  # Enable dynamic kernel
             )
             for _ in range(num_blocks)
         ])
+
         
         # Final projection (the "last" in ESC)
         self.last = nn.Sequential(
@@ -544,6 +687,7 @@ class ConvAttnFusion(nn.Module):
         num_blocks: Number of ConvAttn blocks after fusion
         use_window_attn: Use window attention (True) or SE attention (False)
         window_size: Window size for window attention
+        use_dynamic_kernel: Use dynamic+static PLK (True) or static-only (False)
     """
     
     def __init__(
@@ -554,7 +698,8 @@ class ConvAttnFusion(nn.Module):
         num_blocks: int = 2,
         use_bn: bool = True,
         use_window_attn: bool = True,
-        window_size: int = 8
+        window_size: int = 8,
+        use_dynamic_kernel: bool = True  # ESC paper dynamic kernel
     ):
         super().__init__()
         
@@ -585,7 +730,8 @@ class ConvAttnFusion(nn.Module):
             num_blocks=num_blocks,
             use_bn=use_bn,
             use_window_attn=use_window_attn,
-            window_size=window_size
+            window_size=window_size,
+            use_dynamic_kernel=use_dynamic_kernel  # Enable dynamic kernel
         )
     
     def forward(self, views: List[torch.Tensor]) -> torch.Tensor:
