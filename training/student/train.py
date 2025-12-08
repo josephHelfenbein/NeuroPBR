@@ -1205,6 +1205,10 @@ def main(args):
         config.training.device = args.device
     if args.no_amp:
         config.training.use_amp = False
+    if args.no_pin_memory:
+        config.data.pin_memory = False
+    if args.num_workers is not None:
+        config.data.num_workers = args.num_workers
     if args.epochs:
         config.training.epochs = args.epochs
     if args.checkpoint_dir:
@@ -1335,6 +1339,10 @@ if __name__ == "__main__":
                       help="Device: 'auto' (default), 'cuda', 'cuda:0', or 'cpu'")
     parser.add_argument("--no-amp", action="store_true",
                       help="Disable mixed precision (AMP) training")
+    parser.add_argument("--no-pin-memory", action="store_true",
+                      help="Disable pin_memory in DataLoader (helps with CUDA memory issues)")
+    parser.add_argument("--num-workers", type=int, default=None,
+                      help="Number of DataLoader workers (default: from config)")
 
     # Training
     parser.add_argument("--epochs", type=int, default=None,
