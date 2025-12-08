@@ -5,9 +5,8 @@ import 'dart:convert';
 import 'package:path_provider/path_provider.dart';
 import 'scan_screen.dart';
 import '../theme/theme_provider.dart';
-import 'tags_screen.dart'; // ADD THIS
-import 'settings_screen.dart'; // ADD THIS
-import 'nav_item.dart'; // ADD THIS
+import 'tags_screen.dart';
+import 'nav_item.dart';
 
 class StatsScreen extends StatefulWidget {
   const StatsScreen({super.key});

@@ -67,12 +67,15 @@ class ConvAttnStudentGenerator(nn.Module):
         # ConvAttn bottleneck for multi-view fusion
         # Input: encoder latent channels × num_views
         # Output: bottleneck_channels (to match decoder)
+        # Using window attention for spatially-varying attention (better for normals)
         self.fusion = ConvAttnFusion(
             in_channels=self.latent_channels,
             out_channels=bottleneck_channels,
             num_views=self.num_views,
             num_blocks=num_convattn_blocks,
-            use_bn=True
+            use_bn=True,
+            use_window_attn=True,  # Window attention for spatial variation
+            window_size=8  # 8x8 windows on 32x32 latent = 16 windows
         )
         
         # Project bottleneck to decoder expected channels if needed
@@ -107,6 +110,22 @@ class ConvAttnStudentGenerator(nn.Module):
         
         # Initialize weights
         self._init_weights()
+        
+        # Special initialization for normal head to output [0, 0, 1] (flat normal)
+        # This gives a much better starting point than random
+        self._init_normal_head()
+    
+    def _init_normal_head(self):
+        """Initialize normal head bias to output flat normals [0, 0, 1]."""
+        # The normal head is the 4th head (index 3) in the decoder
+        # output_channels = [3, 1, 1, 3] → albedo, roughness, metallic, normal
+        if hasattr(self.decoder, 'heads') and len(self.decoder.heads) >= 4:
+            normal_head = self.decoder.heads[3]  # 4th head is normal
+            if hasattr(normal_head, 'bias') and normal_head.bias is not None:
+                with torch.no_grad():
+                    # Bias toward [0, 0, 1] - flat normal in tangent space
+                    # After normalize(), [0, 0, 1] stays [0, 0, 1]
+                    normal_head.bias.data = torch.tensor([0.0, 0.0, 1.0])
     
     def _init_weights(self):
         """Initialize new layers (encoder uses pretrained weights)."""
@@ -292,6 +311,9 @@ class ConvAttnDistillationLoss(nn.Module):
                         mode='bilinear',
                         align_corners=False
                     )
+                    # Re-normalize normals after interpolation
+                    if key == "normal":
+                        target_val = F.normalize(target_val, p=2, dim=1, eps=1e-8)
                 
                 loss = loss + F.l1_loss(pred_val, target_val)
         

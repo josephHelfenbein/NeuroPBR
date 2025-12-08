@@ -378,7 +378,7 @@ int main(int argc, const char* argv[]) {
         // Default parameters
         NSString *inputDir = @"../assets/hdris";
         NSString *outputDir = @"../assets/env_maps";
-        NSUInteger faceSize = 512;
+        NSUInteger faceSize = 1024;
         NSUInteger irradianceSize = 64;
         NSUInteger prefilterSize = 256;
         NSUInteger specularSamples = 1024;

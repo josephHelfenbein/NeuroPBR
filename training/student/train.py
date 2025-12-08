@@ -36,8 +36,11 @@ from train_config import TrainConfig, get_default_config
 from models.encoders.unet import UNetMobileNetV3Encoder
 from models.decoders.unet import UNetDecoderHeads
 from models.transformers.vision_transformer import ViTCrossViewFusion
-from losses.losses import HybridLoss
+from losses.losses import HybridLoss, NormalConsistencyLoss
 from utils.dataset import get_dataloader
+
+# Import ConvAttn student generator
+from student.convattn_student import ConvAttnStudentGenerator
 
 
 class StudentGenerator(MultiViewPBRGenerator):
@@ -47,6 +50,10 @@ class StudentGenerator(MultiViewPBRGenerator):
     The student model uses the same architecture as the teacher (multi-view fusion)
     but with a lightweight MobileNetV3 encoder instead of ResNet.
     """
+
+    def __init__(self, config, return_features: bool = False):
+        self.return_features = return_features
+        super().__init__(config)
 
     def _build_encoder(self, model_config):
         """Build MobileNetV3 encoder for student model."""
@@ -62,6 +69,72 @@ class StudentGenerator(MultiViewPBRGenerator):
         else:
             # Fall back to parent implementation for other encoder types
             return super()._build_encoder(model_config)
+
+    def forward(self, views: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Forward pass with optional feature output for distillation.
+        
+        Args:
+            views: (B, 3, 3, H, W) - batch of 3 RGB views
+            
+        Returns:
+            Dictionary with keys: albedo, roughness, metallic, normal
+            If return_features=True, also includes: bottleneck_features, decoder_skip_0, decoder_skip_1
+        """
+        B, num_views, C, H, W = views.shape
+        assert num_views == 3, f"Expected 3 views, got {num_views}"
+        
+        # Encode each view separately (shared encoder weights)
+        latents = []
+        aggregated_skips = None
+        
+        for i in range(num_views):
+            view = views[:, i]  # (B, C, H, W)
+            latent, skips = self.encoder(view)
+            latent = self.latent_proj(latent)
+            latents.append(latent)
+            if aggregated_skips is None:
+                aggregated_skips = [s for s in skips]
+            else:
+                aggregated_skips = [acc + s for acc, s in zip(aggregated_skips, skips)]
+        
+        skips_list = [s / num_views for s in aggregated_skips] if aggregated_skips else []
+        
+        # Fuse latents with transformer
+        if self.config.model.use_transformer:
+            fused = self.fusion(*latents)
+        else:
+            # Simple concatenation + 1x1 conv
+            fused = torch.cat(latents, dim=1)
+            fused = self.fusion(fused)
+        
+        # Decode to PBR maps
+        outputs = self.decoder(fused, skips_list)
+        
+        # outputs is a list: [albedo, roughness, metallic, normal]
+        albedo, roughness, metallic, normal = outputs
+        
+        # Apply activations
+        albedo = torch.sigmoid(albedo)  # [0, 1]
+        roughness = torch.sigmoid(roughness)  # [0, 1]
+        metallic = torch.sigmoid(metallic)  # [0, 1]
+        normal = F.normalize(normal, p=2, dim=1)  # Normalized vector
+        
+        result = {
+            "albedo": albedo,
+            "roughness": roughness,
+            "metallic": metallic,
+            "normal": normal
+        }
+        
+        # Add intermediate features for distillation
+        if self.return_features:
+            result["bottleneck_features"] = fused
+            if len(skips_list) >= 2:
+                result["decoder_skip_0"] = skips_list[-1]  # Last (highest res) skip
+                result["decoder_skip_1"] = skips_list[-2]  # Second last skip
+        
+        return result
 
 
 class DistillationLoss(nn.Module):
@@ -110,6 +183,9 @@ class DistillationLoss(nn.Module):
                 "gan_loss_type": "hinge"
             }
         self.hard_loss = HybridLoss(hard_loss_config)
+        
+        # Angular loss for normals (unit vectors need cosine similarity, not MSE)
+        self.normal_loss = NormalConsistencyLoss(normalize_pred=True)
 
     def _apply_temperature(self, x: torch.Tensor, temperature: float) -> torch.Tensor:
         """
@@ -126,6 +202,39 @@ class DistillationLoss(nn.Module):
         # Apply temperature scaling
         soft_probs = torch.sigmoid(logits / temperature)
         return soft_probs
+
+    def _angular_loss(
+        self,
+        student_normal: torch.Tensor,
+        teacher_normal: torch.Tensor,
+        eps: float = 1e-8
+    ) -> torch.Tensor:
+        """
+        Compute angular loss between student and teacher normal maps.
+        
+        Uses cosine similarity: loss = 1 - cos(angle)
+        This is appropriate for unit vectors where direction matters.
+        
+        Args:
+            student_normal: Student predicted normals (B, 3, H, W)
+            teacher_normal: Teacher predicted normals (B, 3, H, W)
+            eps: Small value for numerical stability
+            
+        Returns:
+            Scalar angular loss (0 = identical, 2 = opposite)
+        """
+        # Normalize both to unit vectors
+        student_norm = F.normalize(student_normal, p=2, dim=1, eps=eps)
+        teacher_norm = F.normalize(teacher_normal, p=2, dim=1, eps=eps)
+        
+        # Cosine similarity: dot product of normalized vectors
+        cos_sim = (student_norm * teacher_norm).sum(dim=1, keepdim=True)
+        cos_sim = torch.clamp(cos_sim, -1.0 + eps, 1.0 - eps)
+        
+        # Loss = 1 - cos(angle), range [0, 2]
+        loss = (1.0 - cos_sim).mean()
+        
+        return loss
 
     def _kl_divergence_loss(
         self,
@@ -216,10 +325,11 @@ class DistillationLoss(nn.Module):
         soft_loss_info["distill_metallic"] = metallic_kl.item()
 
         # Normal (3 channels)
-        # For normals, use MSE instead of KL since they're already normalized vectors
-        normal_mse = F.mse_loss(student_pred["normal"], teacher_pred["normal"])
-        soft_loss += normal_mse * (self.temperature ** 2)  # Scale for consistency
-        soft_loss_info["distill_normal"] = normal_mse.item()
+        # Use angular/cosine loss for normals - they're unit vectors, so direction matters
+        # 1 - cos(angle) penalizes angular difference, not magnitude
+        normal_angular = self._angular_loss(student_pred["normal"], teacher_pred["normal"])
+        soft_loss += normal_angular * (self.temperature ** 2)  # Scale for consistency
+        soft_loss_info["distill_normal"] = normal_angular.item()
 
         soft_loss_info["distill_total"] = soft_loss.item()
 
@@ -253,17 +363,54 @@ def _resize_dict_tensors(tensor_dict: Dict[str, torch.Tensor], target_size: Tupl
     resized = {}
     for key, tensor in tensor_dict.items():
         if tensor.shape[-2:] != target_size:
-            # Use bilinear for smooth downsampling, area for better quality
-            mode = 'bilinear' if tensor.shape[-1] > target_size[-1] else 'bilinear'
-            resized[key] = F.interpolate(
+            # Use bilinear for smooth downsampling
+            resized_tensor = F.interpolate(
                 tensor, 
                 size=target_size, 
-                mode=mode, 
-                align_corners=False if mode == 'bilinear' else None
+                mode='bilinear', 
+                align_corners=False
             )
+            # Re-normalize normal maps after interpolation
+            # Bilinear interpolation can change vector magnitudes
+            if key == "normal":
+                resized_tensor = F.normalize(resized_tensor, p=2, dim=1, eps=1e-8)
+            resized[key] = resized_tensor
         else:
             resized[key] = tensor
     return resized
+
+
+def _compute_feature_loss(
+    student_feat: torch.Tensor,
+    teacher_feat: torch.Tensor
+) -> torch.Tensor:
+    """
+    Compute L2 loss between feature maps with channel/spatial alignment.
+    
+    Handles mismatched channel counts via adaptive pooling.
+    """
+    B, C_s, H_s, W_s = student_feat.shape
+    _, C_t, H_t, W_t = teacher_feat.shape
+    
+    # Resize spatial dimensions if needed
+    if (H_s, W_s) != (H_t, W_t):
+        teacher_feat = F.interpolate(
+            teacher_feat,
+            size=(H_s, W_s),
+            mode='bilinear',
+            align_corners=False
+        )
+    
+    # Handle channel mismatch via adaptive average pooling
+    if C_s != C_t:
+        # Reshape: (B, C_t, H, W) -> (B, H*W, C_t)
+        teacher_flat = teacher_feat.permute(0, 2, 3, 1).reshape(B * H_s * W_s, 1, C_t)
+        # Pool channels: (B*H*W, 1, C_t) -> (B*H*W, 1, C_s)
+        teacher_pooled = F.adaptive_avg_pool1d(teacher_flat, C_s)
+        # Reshape back: (B*H*W, 1, C_s) -> (B, H, W, C_s) -> (B, C_s, H, W)
+        teacher_feat = teacher_pooled.reshape(B, H_s, W_s, C_s).permute(0, 3, 1, 2)
+    
+    return F.mse_loss(student_feat, teacher_feat)
 
 
 class Trainer:
@@ -308,13 +455,17 @@ class Trainer:
         teacher_checkpoint_path: Optional[str] = None,
         temperature: float = 4.0,
         alpha: float = 0.3,
-        rank: int = 0
+        rank: int = 0,
+        use_feature_distillation: bool = False,
+        lambda_feat: float = 0.1
     ):
         self.config = config
         self.rank = rank
         self.is_main_process = (rank == 0)
         self.temperature = temperature
         self.alpha = alpha
+        self.use_feature_distillation = use_feature_distillation
+        self.lambda_feat = lambda_feat
 
         # Set device
         self.device_preference = getattr(config.training, "device", "auto")
@@ -326,12 +477,32 @@ class Trainer:
             if self.device.type == "cpu" and auto_selected:
                 print("  No CUDA/MPS devices detected; training will run on CPU.")
 
-        # Build student model (MobileNetV3-based)
+        # Build student model
+        # Choose generator type based on config
+        # ConvAttn uses PLK bottleneck instead of ViT transformer
+        # Both use MobileNetV3 encoder - the difference is the fusion method
+        use_convattn = not config.model.use_transformer
+        
         if self.is_main_process:
-            print(f"Building student model ({config.model.encoder_type})...")
-        self.student = StudentGenerator(config).to(self.device)
+            arch_name = "ConvAttn (PLK)" if use_convattn else "ViT"
+            print(f"Building student model ({config.model.encoder_type} + {arch_name})...")
+        
+        if use_convattn:
+            # Use ConvAttn-based generator (PLK bottleneck)
+            self.student = ConvAttnStudentGenerator(
+                config,
+                bottleneck_channels=config.model.transformer_dim,  # Use transformer_dim as reference
+                num_convattn_blocks=config.model.transformer_depth  # Use transformer_depth for block count
+            ).to(self.device)
+            # ConvAttn generator has return_features parameter in forward()
+            self._student_needs_return_features_arg = True
+        else:
+            # Use ViT-based generator (transformer fusion)
+            self.student = StudentGenerator(config, return_features=use_feature_distillation).to(self.device)
+            self._student_needs_return_features_arg = False
 
         # Load and freeze teacher model (for inference only during training)
+        # Teacher is needed if: (1) no shards, or (2) feature distillation is enabled
         if teacher_checkpoint_path:
             if self.is_main_process:
                 print(f"Loading teacher model from {teacher_checkpoint_path}...")
@@ -339,9 +510,14 @@ class Trainer:
             self.teacher.eval()
             for param in self.teacher.parameters():
                 param.requires_grad = False
+            if self.is_main_process and use_feature_distillation:
+                print("  Feature distillation enabled: will extract intermediate features from teacher")
         else:
             self.teacher = None
             if self.is_main_process:
+                if use_feature_distillation:
+                    print("WARNING: --use-feature-distillation requires --teacher-checkpoint. Disabling feature distillation.")
+                    self.use_feature_distillation = False
                 print("No teacher checkpoint provided. Assuming shards contain teacher predictions.")
 
         # Build distillation loss
@@ -417,6 +593,7 @@ class Trainer:
                 print("  Teacher params: N/A (using pre-computed shards)")
             print(f"  Distillation temperature: {temperature}")
             print(f"  Distillation alpha: {alpha}")
+            print(f"  Feature distillation: {'enabled (λ=' + str(lambda_feat) + ')' if self.use_feature_distillation else 'disabled'}")
             print(f"  Mixed precision (AMP): {'enabled' if self.use_amp else 'disabled'}")
 
     def _load_teacher(self, checkpoint_path: str) -> nn.Module:
@@ -435,6 +612,61 @@ class Trainer:
         teacher.load_state_dict(checkpoint["generator_state_dict"])
 
         return teacher
+
+    def _get_teacher_features(self, views: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """
+        Extract intermediate features from teacher model for feature distillation.
+        
+        This runs a custom forward pass to capture bottleneck and skip features.
+        """
+        B, num_views, C, H, W = views.shape
+        
+        # Encode each view
+        latents = []
+        aggregated_skips = None
+        
+        for i in range(num_views):
+            view = views[:, i]
+            latent, skips = self.teacher.encoder(view)
+            latent = self.teacher.latent_proj(latent)
+            latents.append(latent)
+            if aggregated_skips is None:
+                aggregated_skips = [s for s in skips]
+            else:
+                aggregated_skips = [acc + s for acc, s in zip(aggregated_skips, skips)]
+        
+        skips_list = [s / num_views for s in aggregated_skips] if aggregated_skips else []
+        
+        # Fuse latents
+        if self.teacher.config.model.use_transformer:
+            fused = self.teacher.fusion(*latents)
+        else:
+            fused = torch.cat(latents, dim=1)
+            fused = self.teacher.fusion(fused)
+        
+        # Decode to PBR maps
+        outputs = self.teacher.decoder(fused, skips_list)
+        albedo, roughness, metallic, normal = outputs
+        
+        # Apply activations
+        albedo = torch.sigmoid(albedo)
+        roughness = torch.sigmoid(roughness)
+        metallic = torch.sigmoid(metallic)
+        normal = F.normalize(normal, p=2, dim=1)
+        
+        result = {
+            "albedo": albedo,
+            "roughness": roughness,
+            "metallic": metallic,
+            "normal": normal,
+            "bottleneck_features": fused
+        }
+        
+        if len(skips_list) >= 2:
+            result["decoder_skip_0"] = skips_list[-1]
+            result["decoder_skip_1"] = skips_list[-2]
+        
+        return result
 
     def _build_optimizer(self):
         """Build optimizer for student."""
@@ -548,7 +780,20 @@ class Trainer:
             }
 
             # Get teacher predictions (no gradient - inference only)
-            if teacher_pred is None:
+            # If feature distillation is enabled, we need live teacher inference for intermediate features
+            if self.use_feature_distillation and self.teacher is not None:
+                # Run teacher to get outputs AND intermediate features
+                with torch.no_grad():
+                    teacher_pred_live = self._get_teacher_features(input_renders)
+                # Merge live predictions with shard predictions (prefer live for features)
+                if teacher_pred is not None:
+                    # Use shards for outputs, live for features
+                    for k, v in teacher_pred_live.items():
+                        if k not in teacher_pred:
+                            teacher_pred[k] = v
+                else:
+                    teacher_pred = teacher_pred_live
+            elif teacher_pred is None:
                 if self.teacher is None:
                      raise RuntimeError("Teacher model not loaded and no teacher predictions in batch!")
                 with torch.no_grad():
@@ -559,7 +804,11 @@ class Trainer:
 
             with self._autocast():
                 # Student forward
-                student_pred = self.student(input_renders)
+                # ConvAttn generator takes return_features as argument, ViT generator has it set at init
+                if self._student_needs_return_features_arg:
+                    student_pred = self.student(input_renders, return_features=self.use_feature_distillation)
+                else:
+                    student_pred = self.student(input_renders)
 
                 # Get student output size (may differ from teacher/target due to SR head)
                 student_size = student_pred["albedo"].shape[-2:]
@@ -571,6 +820,38 @@ class Trainer:
 
                 # Distillation loss
                 loss, loss_info = self.criterion(student_pred, teacher_pred_resized, target_resized)
+                
+                # Feature distillation loss (intermediate layer matching)
+                if self.use_feature_distillation and self.teacher is not None:
+                    feat_loss = 0.0
+                    feat_count = 0
+                    
+                    # Match bottleneck features
+                    if "bottleneck_features" in student_pred and "bottleneck_features" in teacher_pred:
+                        bottleneck_loss = _compute_feature_loss(
+                            student_pred["bottleneck_features"],
+                            teacher_pred["bottleneck_features"]
+                        )
+                        feat_loss = feat_loss + bottleneck_loss
+                        feat_count += 1
+                        loss_info["feat_bottleneck"] = bottleneck_loss.item()
+                    
+                    # Match decoder skip features
+                    for i in range(2):
+                        key = f"decoder_skip_{i}"
+                        if key in student_pred and key in teacher_pred:
+                            skip_loss = _compute_feature_loss(
+                                student_pred[key],
+                                teacher_pred[key]
+                            )
+                            feat_loss = feat_loss + skip_loss
+                            feat_count += 1
+                            loss_info[f"feat_skip_{i}"] = skip_loss.item()
+                    
+                    if feat_count > 0:
+                        loss = loss + self.lambda_feat * feat_loss
+                        loss_info["feat_total"] = (feat_loss.item() if isinstance(feat_loss, torch.Tensor) else feat_loss)
+                        loss_info["loss_total"] = loss.item()
 
             # Backward
             if self.scaler:
@@ -689,7 +970,11 @@ class Trainer:
                      raise RuntimeError("Teacher model not loaded and no teacher predictions in batch!")
                 teacher_pred = self.teacher(input_renders)
             
-            student_pred = self.student(input_renders)  # Student runs independently
+            # Student forward (features not needed for validation)
+            if self._student_needs_return_features_arg:
+                student_pred = self.student(input_renders, return_features=False)
+            else:
+                student_pred = self.student(input_renders)
             
             # Resize teacher/target to match student output size
             student_size = student_pred["albedo"].shape[-2:]
@@ -770,7 +1055,9 @@ class Trainer:
             "val_loss": val_loss,
             "best_val_loss": self.best_val_loss,
             "distillation_temperature": self.temperature,
-            "distillation_alpha": self.alpha
+            "distillation_alpha": self.alpha,
+            "use_feature_distillation": self.use_feature_distillation,
+            "lambda_feat": self.lambda_feat
         }
 
         if self.scaler:
@@ -997,7 +1284,9 @@ def main(args):
         teacher_checkpoint_path=args.teacher_checkpoint,
         temperature=args.temperature,
         alpha=args.alpha,
-        rank=0
+        rank=0,
+        use_feature_distillation=args.use_feature_distillation,
+        lambda_feat=args.lambda_feat
     )
 
     # Resume if specified
@@ -1024,6 +1313,10 @@ if __name__ == "__main__":
                       help="Temperature for distillation (default: 4.0)")
     parser.add_argument("--alpha", type=float, default=0.3,
                       help="Weight for distillation loss. Final loss = alpha*soft + (1-alpha)*hard (default: 0.3)")
+    parser.add_argument("--use-feature-distillation", action="store_true",
+                      help="Enable feature distillation (match intermediate layers). Requires --teacher-checkpoint.")
+    parser.add_argument("--lambda-feat", type=float, default=0.1,
+                      help="Weight for feature distillation loss (default: 0.1)")
 
     # Data
     parser.add_argument("--shards-dir", type=str, default=None,

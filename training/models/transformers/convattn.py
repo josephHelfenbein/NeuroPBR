@@ -43,17 +43,151 @@ class LayerNorm2d(nn.Module):
         return x
 
 
+class WindowAttention(nn.Module):
+    """
+    Window-based spatial attention for PLK blocks.
+    
+    Unlike SE (channel) attention which applies the same weight to all pixels,
+    window attention provides spatially-varying attention weights.
+    This is crucial for normal maps where different regions need different treatment.
+    
+    Args:
+        channels: Number of input channels
+        window_size: Size of attention window (default 8)
+        num_heads: Number of attention heads
+    """
+    
+    def __init__(self, channels: int, window_size: int = 8, num_heads: int = 4):
+        super().__init__()
+        self.channels = channels
+        self.window_size = window_size
+        self.num_heads = num_heads
+        self.head_dim = channels // num_heads
+        self.scale = self.head_dim ** -0.5
+        
+        # QKV projection
+        self.qkv = nn.Conv2d(channels, channels * 3, kernel_size=1, bias=False)
+        
+        # Output projection
+        self.proj = nn.Conv2d(channels, channels, kernel_size=1, bias=False)
+        
+        # Relative position bias (learnable)
+        self.relative_position_bias = nn.Parameter(
+            torch.zeros((2 * window_size - 1) * (2 * window_size - 1), num_heads)
+        )
+        nn.init.trunc_normal_(self.relative_position_bias, std=0.02)
+        
+        # Create position index
+        coords = torch.stack(torch.meshgrid(
+            torch.arange(window_size), torch.arange(window_size), indexing='ij'
+        ))
+        coords_flatten = coords.flatten(1)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+        relative_coords[:, :, 0] += window_size - 1
+        relative_coords[:, :, 1] += window_size - 1
+        relative_coords[:, :, 0] *= 2 * window_size - 1
+        relative_position_index = relative_coords.sum(-1)
+        self.register_buffer("relative_position_index", relative_position_index)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        ws = self.window_size
+        
+        # Pad if needed
+        pad_h = (ws - H % ws) % ws
+        pad_w = (ws - W % ws) % ws
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h))
+        
+        _, _, Hp, Wp = x.shape
+        
+        # Partition into windows: (B, C, H, W) -> (B*num_windows, C, ws, ws)
+        x = x.view(B, C, Hp // ws, ws, Wp // ws, ws)
+        x = x.permute(0, 2, 4, 1, 3, 5).contiguous()  # (B, nH, nW, C, ws, ws)
+        num_windows = (Hp // ws) * (Wp // ws)
+        x = x.view(B * num_windows, C, ws, ws)
+        
+        # QKV
+        qkv = self.qkv(x)  # (B*nW, 3C, ws, ws)
+        qkv = qkv.view(B * num_windows, 3, self.num_heads, self.head_dim, ws * ws)
+        qkv = qkv.permute(1, 0, 2, 4, 3)  # (3, B*nW, heads, ws*ws, head_dim)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        
+        # Attention
+        q = q * self.scale
+        attn = q @ k.transpose(-2, -1)  # (B*nW, heads, ws*ws, ws*ws)
+        
+        # Add relative position bias
+        relative_position_bias = self.relative_position_bias[
+            self.relative_position_index.view(-1)
+        ].view(ws * ws, ws * ws, -1)
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+        attn = attn + relative_position_bias.unsqueeze(0)
+        
+        attn = attn.softmax(dim=-1)
+        
+        # Apply attention
+        out = attn @ v  # (B*nW, heads, ws*ws, head_dim)
+        out = out.transpose(2, 3).contiguous().view(B * num_windows, C, ws, ws)
+        
+        # Project
+        out = self.proj(out)
+        
+        # Reverse window partition
+        out = out.view(B, Hp // ws, Wp // ws, C, ws, ws)
+        out = out.permute(0, 3, 1, 4, 2, 5).contiguous()
+        out = out.view(B, C, Hp, Wp)
+        
+        # Remove padding
+        if pad_h > 0 or pad_w > 0:
+            out = out[:, :, :H, :W]
+        
+        return out
+
+
+class ConvFFN(nn.Module):
+    """
+    Convolutional Feed-Forward Network from ESC.
+    
+    Structure: 1x1 expand → 3x3 depthwise → 1x1 project
+    Provides local refinement before global PLK aggregation.
+    """
+    
+    def __init__(self, channels: int, expansion: float = 2.0, use_bn: bool = True):
+        super().__init__()
+        hidden = int(channels * expansion)
+        
+        self.expand = nn.Conv2d(channels, hidden, 1, bias=False)
+        self.dwconv = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
+        self.norm = nn.BatchNorm2d(hidden) if use_bn else LayerNorm2d(hidden)
+        self.project = nn.Conv2d(hidden, channels, 1, bias=False)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.gelu(self.expand(x))
+        x = F.gelu(self.dwconv(x)) + x  # Residual inside FFN
+        x = self.norm(x)
+        x = self.project(x)
+        return x
+
+
 class PLKBlock(nn.Module):
     """
     Single PLK (Pre-computed Large Kernel) block from ESC.
     
-    Takes a pre-computed large kernel filter and applies it efficiently.
-    Uses depthwise separable structure for memory efficiency.
+    Updated structure matching ESC paper:
+        x = convffn(x)        # Local refinement (3x3)
+        x = x + attn(x)       # Window attention
+        x = x + plk(x)        # Global aggregation (large kernel)
+    
+    This local→global flow helps with detail preservation.
     
     Args:
         channels: Number of channels
         kernel_size: Size of the large kernel (default 17 for ~32×32 effective RF)
         use_bn: Use BatchNorm vs LayerNorm
+        use_window_attn: Use window attention (True) or SE attention (False)
+        window_size: Window size for window attention
     """
     
     def __init__(
@@ -61,19 +195,28 @@ class PLKBlock(nn.Module):
         channels: int,
         kernel_size: int = 17,
         use_bn: bool = True,
+        use_window_attn: bool = True,
+        window_size: int = 8,
     ):
         super().__init__()
         
         self.channels = channels
         self.kernel_size = kernel_size
         self.padding = kernel_size // 2
+        self.use_window_attn = use_window_attn
         
         # Pre-norm
         self.norm1 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
         
+        # ConvFFN for local refinement BEFORE PLK (ESC-style: local → global)
+        self.convffn = ConvFFN(channels, expansion=2.0, use_bn=use_bn)
+        
         # Depthwise conv with the PLK filter
         # The actual filter weights come from the shared PLK
         self.dw_weight_shape = (channels, 1, kernel_size, kernel_size)
+        
+        # Norm before PLK
+        self.norm2 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
         
         # Pointwise mixing after PLK
         self.pw = nn.Sequential(
@@ -82,16 +225,22 @@ class PLKBlock(nn.Module):
             nn.GELU(),
         )
         
-        # Channel attention (SE-style) for dynamic weighting
-        hidden = max(channels // 4, 32)
-        self.se = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-            nn.Linear(channels, hidden),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden, channels),
-            nn.Sigmoid(),
-        )
+        # Attention mechanism
+        if use_window_attn:
+            # Window attention for spatially-varying weights (better for normals)
+            num_heads = max(channels // 64, 4)  # At least 4 heads
+            self.attn = WindowAttention(channels, window_size=window_size, num_heads=num_heads)
+        else:
+            # SE (channel) attention - same weight for all spatial positions
+            hidden = max(channels // 4, 32)
+            self.attn = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(channels, hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden, channels),
+                nn.Sigmoid(),
+            )
         
         # Residual scaling
         self.gamma = nn.Parameter(torch.ones(1) * 0.1)
@@ -110,18 +259,24 @@ class PLKBlock(nn.Module):
         # Pre-norm
         x = self.norm1(x)
         
-        # Apply PLK as depthwise conv
-        x = F.conv2d(x, plk_filter, padding=self.padding, groups=self.channels)
+        # 1. Local refinement with ConvFFN (3x3 depthwise)
+        x = x + self.convffn(x)
         
-        # Pointwise mixing
-        x = self.pw(x)
+        # 2. Window attention for spatial variation
+        if self.use_window_attn:
+            x = x + self.attn(x)
+        else:
+            B, C, _, _ = x.shape
+            attn = self.attn(x).view(B, C, 1, 1)
+            x = x * attn
         
-        # Channel attention
-        B, C, _, _ = x.shape
-        attn = self.se(x).view(B, C, 1, 1)
-        x = x * attn
+        # 3. Global aggregation with PLK (large kernel)
+        x_plk = self.norm2(x)
+        x_plk = F.conv2d(x_plk, plk_filter, padding=self.padding, groups=self.channels)
+        x_plk = self.pw(x_plk)
+        x = x + x_plk
         
-        # Residual connection
+        # Residual connection with scaling
         return residual + self.gamma * x
 
 
@@ -132,36 +287,72 @@ class PLKGenerator(nn.Module):
     Creates a learnable large kernel that is shared across all blocks.
     The kernel is directly learnable with normalization applied.
     
+    Optionally uses geometric ensemble to enforce rotational symmetry,
+    which helps with directional outputs like normal maps.
+    
     Args:
         channels: Number of channels for the kernel
         kernel_size: Size of the large kernel
+        use_geo_ensemble: If True, average kernel with rotated/flipped versions
     """
     
-    def __init__(self, channels: int, kernel_size: int = 17):
+    def __init__(self, channels: int, kernel_size: int = 17, use_geo_ensemble: bool = True):
         super().__init__()
         
         self.channels = channels
         self.kernel_size = kernel_size
+        self.use_geo_ensemble = use_geo_ensemble
         
         # Learnable kernel (depthwise format: C, 1, K, K)
-        self.plk_filter = nn.Parameter(torch.randn(channels, 1, kernel_size, kernel_size) * 0.02)
+        # We create as (C, K*K) for orthogonal init, then reshape
+        self.plk_filter = nn.Parameter(torch.empty(channels, 1, kernel_size, kernel_size))
         
         self._init_weights()
     
     def _init_weights(self):
-        # Initialize with a Gaussian-like pattern centered in the kernel
+        # Orthogonal initialization (from ESC paper)
+        # This preserves gradient norms and prevents redundant channel patterns
         with torch.no_grad():
-            center = self.kernel_size // 2
-            for i in range(self.kernel_size):
-                for j in range(self.kernel_size):
-                    dist = ((i - center) ** 2 + (j - center) ** 2) ** 0.5
-                    value = torch.exp(torch.tensor(-dist / (self.kernel_size / 4)))
-                    self.plk_filter[:, 0, i, j] = value * 0.1
+            # Initialize each channel's kernel orthogonally
+            # Reshape to 2D for orthogonal init, then back to 4D
+            flat = self.plk_filter.view(self.channels, -1)  # (C, K*K)
+            nn.init.orthogonal_(flat)
+            # Scale down to prevent large initial outputs
+            self.plk_filter.data = flat.view_as(self.plk_filter) * 0.1
+    
+    def _geo_ensemble(self, k: torch.Tensor) -> torch.Tensor:
+        """
+        Geometric ensemble: average kernel with all rotated/flipped versions.
+        
+        This enforces rotational symmetry, which is important for directional
+        outputs like normal maps. From ESC paper.
+        
+        Args:
+            k: Kernel tensor (C, 1, K, K)
+        
+        Returns:
+            Symmetrized kernel (C, 1, K, K)
+        """
+        k_hflip = k.flip([3])
+        k_vflip = k.flip([2])
+        k_hvflip = k.flip([2, 3])
+        k_rot90 = torch.rot90(k, -1, [2, 3])
+        k_rot90_hflip = k_rot90.flip([3])
+        k_rot90_vflip = k_rot90.flip([2])
+        k_rot90_hvflip = k_rot90.flip([2, 3])
+        k = (k + k_hflip + k_vflip + k_hvflip + k_rot90 + k_rot90_hflip + k_rot90_vflip + k_rot90_hvflip) / 8
+        return k
     
     def forward(self) -> torch.Tensor:
         """Generate the normalized PLK filter."""
+        plk = self.plk_filter
+        
+        # Apply geometric ensemble for rotational symmetry
+        if self.use_geo_ensemble:
+            plk = self._geo_ensemble(plk)
+        
         # Normalize so each channel's kernel sums to 1 (like softmax attention)
-        plk = self.plk_filter / (self.plk_filter.abs().sum(dim=(2, 3), keepdim=True) + 1e-6)
+        plk = plk / (plk.abs().sum(dim=(2, 3), keepdim=True) + 1e-6)
         return plk
 
 
@@ -185,6 +376,8 @@ class ConvAttnBottleneck(nn.Module):
         num_blocks: Number of PLK blocks (2-4)
         kernel_size: PLK kernel size (default 17 for ~32×32 effective RF)
         use_bn: Use BatchNorm vs LayerNorm
+        use_window_attn: Use window attention (True) or SE attention (False)
+        window_size: Window size for window attention
     """
     
     def __init__(
@@ -194,6 +387,8 @@ class ConvAttnBottleneck(nn.Module):
         num_blocks: int = 3,
         kernel_size: int = 17,
         use_bn: bool = True,
+        use_window_attn: bool = True,
+        window_size: int = 8,
         # Legacy params (ignored, kept for config compatibility)
         expansion_ratio: int = 2,
         use_dynamic_kernel: bool = True
@@ -219,6 +414,8 @@ class ConvAttnBottleneck(nn.Module):
                 channels=bottleneck_channels,
                 kernel_size=kernel_size,
                 use_bn=use_bn,
+                use_window_attn=use_window_attn,
+                window_size=window_size,
             )
             for _ in range(num_blocks)
         ])
@@ -345,6 +542,8 @@ class ConvAttnFusion(nn.Module):
         out_channels: Output channels
         num_views: Number of input views
         num_blocks: Number of ConvAttn blocks after fusion
+        use_window_attn: Use window attention (True) or SE attention (False)
+        window_size: Window size for window attention
     """
     
     def __init__(
@@ -353,7 +552,9 @@ class ConvAttnFusion(nn.Module):
         out_channels: int = 320,
         num_views: int = 4,
         num_blocks: int = 2,
-        use_bn: bool = True
+        use_bn: bool = True,
+        use_window_attn: bool = True,
+        window_size: int = 8
     ):
         super().__init__()
         
@@ -382,7 +583,9 @@ class ConvAttnFusion(nn.Module):
             in_channels=out_channels,
             bottleneck_channels=out_channels,
             num_blocks=num_blocks,
-            use_bn=use_bn
+            use_bn=use_bn,
+            use_window_attn=use_window_attn,
+            window_size=window_size
         )
     
     def forward(self, views: List[torch.Tensor]) -> torch.Tensor:

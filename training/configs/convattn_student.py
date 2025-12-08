@@ -86,7 +86,7 @@ def get_config() -> TrainConfig:
     
     # No SR head: Decoder upsamples directly to 1024×1024
     # (32→64→128→256→512→1024 via decoder, no SR)
-    config.model.decoder_sr_scale = 1
+    config.model.decoder_sr_scale = 0  # 0 = no SR, Literal[0, 2, 4]
     
     # Don't freeze backbone - allow fine-tuning
     config.model.freeze_backbone = False
@@ -124,7 +124,7 @@ def get_config() -> TrainConfig:
     config.training.epochs = 100
     config.training.gan_start_epoch = 999  # Never start GAN
     config.training.val_every_n_epochs = 1
-    config.training.save_every_n_epochs = 5
+    config.training.save_every_n_epochs = 1
     config.training.log_every_n_steps = 50
     config.training.log_images_every_n_epochs = 5
     
@@ -190,8 +190,8 @@ def get_fast_iteration_config() -> TrainConfig:
     
     # Fewer epochs
     config.training.epochs = 20
-    config.training.val_every_n_epochs = 2
-    config.training.save_every_n_epochs = 5
+    config.training.val_every_n_epochs = 1
+    config.training.save_every_n_epochs = 1
     
     # Less warmup
     config.optimizer.scheduler_warmup_epochs = 2
@@ -233,7 +233,7 @@ if __name__ == "__main__":
     print()
     print("Data:")
     print(f"  Input size: {config.data.image_size}")
-    print(f"  Output size: {config.data.output_size} (after SR 4×)")
+    print(f"  Output size: {config.data.output_size} (no SR, decoder upsamples directly)")
     print(f"  Batch size: {config.data.batch_size}")
     print()
     print("Model:")
