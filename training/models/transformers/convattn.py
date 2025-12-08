@@ -312,6 +312,7 @@ class PLKBlock(nn.Module):
         window_size: Window size for window attention
         use_dynamic_kernel: Use dynamic+static PLK (True) or static-only (False)
         pdim: Number of channels for dynamic kernel (default: channels//4)
+        conv_blocks: Number of PLK+FFN pairs per block (paper uses 5, default 3)
     """
     
     def __init__(
@@ -323,6 +324,7 @@ class PLKBlock(nn.Module):
         window_size: int = 8,
         use_dynamic_kernel: bool = True,
         pdim: Optional[int] = None,
+        conv_blocks: int = 5,  # Paper uses 5
     ):
         super().__init__()
         
@@ -331,6 +333,7 @@ class PLKBlock(nn.Module):
         self.padding = kernel_size // 2
         self.use_window_attn = use_window_attn
         self.use_dynamic_kernel = use_dynamic_kernel
+        self.conv_blocks = conv_blocks
         
         # pdim controls how many channels use the dynamic kernel
         # Default: 1/4 of channels (like ESC paper uses pdim=16 for dim=64)
@@ -345,18 +348,30 @@ class PLKBlock(nn.Module):
         # Norm before PLK
         self.norm2 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
         
-        # PLK with optional dynamic kernel
+        # Multiple PLK+FFN pairs (paper uses conv_blocks=5)
         if use_dynamic_kernel:
-            # Dynamic + static kernel combination (from ESC paper)
-            self.plk_conv = ConvAttnWrapper(channels, self.pdim, proj_dim_in=self.pdim)
+            self.pconvs = nn.ModuleList([
+                ConvAttnWrapper(channels, self.pdim, proj_dim_in=self.pdim)
+                for _ in range(conv_blocks)
+            ])
         else:
-            # Static-only (original simplified implementation)
-            self.plk_conv = None
-            self.pw = nn.Sequential(
-                nn.Conv2d(channels, channels, kernel_size=1, bias=False),
-                nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels),
-                nn.GELU(),
-            )
+            self.pconvs = nn.ModuleList([
+                nn.Sequential(
+                    nn.Conv2d(channels, channels, kernel_size=1, bias=False),
+                    nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels),
+                    nn.GELU(),
+                )
+                for _ in range(conv_blocks)
+            ])
+        
+        self.convffns = nn.ModuleList([
+            ConvFFN(channels, expansion=1.25, use_bn=use_bn)  # Paper uses exp_ratio=1.25
+            for _ in range(conv_blocks)
+        ])
+        
+        # Final 3x3 conv (paper's conv_out)
+        self.ln_out = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
+        self.conv_out = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         
         # Attention mechanism
         if use_window_attn:
@@ -403,18 +418,17 @@ class PLKBlock(nn.Module):
             attn = self.attn(x).view(B, C, 1, 1)
             x = x * attn
         
-        # 3. Global aggregation with PLK (dynamic + static or static-only)
-        x_plk = self.norm2(x)
+        # 3. Multiple PLK+FFN pairs (paper uses conv_blocks=5)
+        for pconv, convffn in zip(self.pconvs, self.convffns):
+            x_ffn = self.norm2(convffn(x))
+            if self.use_dynamic_kernel:
+                x = x + pconv(x_ffn, plk_filter)
+            else:
+                x_plk = F.conv2d(x_ffn, plk_filter, padding=self.padding, groups=self.channels)
+                x = x + pconv(x_plk)
         
-        if self.use_dynamic_kernel:
-            # Dynamic + static PLK (ESC paper style)
-            x_plk = self.plk_conv(x_plk, plk_filter)
-        else:
-            # Static-only PLK
-            x_plk = F.conv2d(x_plk, plk_filter, padding=self.padding, groups=self.channels)
-            x_plk = self.pw(x_plk)
-        
-        x = x + x_plk
+        # 4. Final 3x3 conv (paper's conv_out)
+        x = self.conv_out(self.ln_out(x))
         
         # Residual connection with scaling
         return residual + self.gamma * x
