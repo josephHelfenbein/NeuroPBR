@@ -380,6 +380,40 @@ def _resize_dict_tensors(tensor_dict: Dict[str, torch.Tensor], target_size: Tupl
     return resized
 
 
+def _denormalize_target(target: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """
+    Denormalize ground truth from [-1, 1] (after Normalize transform) to [0, 1].
+    
+    The dataset applies transforms.Normalize(mean=0.5, std=0.5) which converts:
+        [0, 1] -> [-1, 1]  via:  (x - 0.5) / 0.5 = 2x - 1
+    
+    Model output ranges:
+        - albedo: sigmoid -> [0, 1]
+        - roughness: sigmoid -> [0, 1]  
+        - metallic: sigmoid -> [0, 1]
+        - normal: F.normalize -> [-1, 1] (unit vectors)
+    
+    This function converts GT back to [0, 1] for albedo/roughness/metallic
+    so they match the model output range for proper loss/metric computation.
+    Normal maps are left as-is since they should be in [-1, 1].
+    
+    Args:
+        target: Dict with ground truth tensors in [-1, 1] range
+    
+    Returns:
+        Dict with denormalized tensors (albedo/roughness/metallic in [0, 1], normal unchanged)
+    """
+    denormalized = {}
+    for key, tensor in target.items():
+        if key == "normal":
+            # Normal maps should stay as unit vectors in [-1, 1]
+            denormalized[key] = tensor
+        else:
+            # Convert [-1, 1] -> [0, 1] via: (x + 1) / 2
+            denormalized[key] = (tensor + 1.0) / 2.0
+    return denormalized
+
+
 def _compute_feature_loss(
     student_feat: torch.Tensor,
     teacher_feat: torch.Tensor
@@ -817,6 +851,10 @@ class Trainer:
                 # This handles training at lower resolution than shards (e.g., 512 input → 1024 output vs 2048 shards)
                 teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
                 target_resized = _resize_dict_tensors(target, student_size)
+                
+                # Denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
+                # Normal maps stay in [-1,1], but albedo/roughness/metallic need [0,1]
+                target_resized = _denormalize_target(target_resized)
 
                 # Distillation loss
                 loss, loss_info = self.criterion(student_pred, teacher_pred_resized, target_resized)
@@ -980,6 +1018,9 @@ class Trainer:
             student_size = student_pred["albedo"].shape[-2:]
             teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
             target_resized = _resize_dict_tensors(target, student_size)
+            
+            # Denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
+            target_resized = _denormalize_target(target_resized)
 
             # Compute loss
             _, loss_info = self.criterion(student_pred, teacher_pred_resized, target_resized)
