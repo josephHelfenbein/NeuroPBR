@@ -509,6 +509,19 @@ class Trainer:
         if self.teacher:
             self.teacher.eval()  # Teacher always in eval mode (inference only)
 
+        # Alpha warmup: disable distillation for first 5 epochs to learn basic reconstruction first
+        # This helps the student converge before adding distillation pressure
+        distillation_warmup_epochs = 5
+        if epoch < distillation_warmup_epochs:
+            warmup_alpha = 0.0
+            if self.is_main_process and epoch == 0:
+                print(f"[Distillation Warmup] Using alpha=0.0 for epochs 0-{distillation_warmup_epochs-1} (hard loss only)")
+        else:
+            warmup_alpha = self.alpha
+            if self.is_main_process and epoch == distillation_warmup_epochs:
+                print(f"[Distillation Warmup] Enabling distillation with alpha={self.alpha}")
+        self.criterion.alpha = warmup_alpha
+
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=not self.is_main_process)
 
         epoch_loss = 0.0
