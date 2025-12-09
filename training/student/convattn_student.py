@@ -73,7 +73,7 @@ class ConvAttnStudentGenerator(nn.Module):
             out_channels=bottleneck_channels,
             num_views=self.num_views,
             num_blocks=num_convattn_blocks,
-            use_bn=False,
+            use_bn=True,
             use_window_attn=True,  # Window attention for spatial variation
             window_size=8  # 8x8 windows on 32x32 latent = 16 windows
         )

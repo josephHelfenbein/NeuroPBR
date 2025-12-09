@@ -154,7 +154,7 @@ class ConvFFN(nn.Module):
     Provides local refinement before global PLK aggregation.
     """
     
-    def __init__(self, channels: int, expansion: float = 2.0, use_bn: bool = False):
+    def __init__(self, channels: int, expansion: float = 2.0, use_bn: bool = True):
         super().__init__()
         hidden = int(channels * expansion)
         
@@ -327,14 +327,14 @@ class PLKBlock(nn.Module):
         # pdim for partial conv - paper uses FIXED 16
         self.pdim = pdim if pdim is not None else 16
         
-        # Paper uses LayerNorm throughout (not BatchNorm)
-        self.norm1 = LayerNorm2d(channels)  # ln_proj
+        # Pre-norm
+        self.norm1 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
         
-        # ConvFFN for local refinement (paper: proj)
-        self.convffn = ConvFFN(channels, expansion=2.0)
+        # ConvFFN for local refinement
+        self.convffn = ConvFFN(channels, expansion=2.0, use_bn=use_bn)
         
         # Norm before attention (paper: ln_attn)
-        self.norm2 = LayerNorm2d(channels)
+        self.norm2 = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
         
         # Multiple PLK+FFN pairs
         if use_dynamic_kernel:
@@ -346,19 +346,19 @@ class PLKBlock(nn.Module):
             self.pconvs = nn.ModuleList([
                 nn.Sequential(
                     nn.Conv2d(channels, channels, kernel_size=1, bias=False),
-                    LayerNorm2d(channels),
+                    nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels),
                     nn.GELU(),
                 )
                 for _ in range(conv_blocks)
             ])
         
         self.convffns = nn.ModuleList([
-            ConvFFN(channels, expansion=1.25)
+            ConvFFN(channels, expansion=1.25, use_bn=use_bn)
             for _ in range(conv_blocks)
         ])
         
         # Final 3x3 conv
-        self.ln_out = LayerNorm2d(channels)
+        self.ln_out = nn.BatchNorm2d(channels) if use_bn else LayerNorm2d(channels)
         self.conv_out = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
         
         # Attention mechanism
@@ -393,6 +393,9 @@ class PLKBlock(nn.Module):
         # 1. Initial projection (no residual)
         x = self.norm1(x)
         x = self.convffn(x)
+        
+        # 1. Local refinement with ConvFFN (3x3 depthwise)
+        x = x + self.convffn(x)
         
         # 2. Window attention for spatial variation
         if self.use_window_attn:
