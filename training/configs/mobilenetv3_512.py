@@ -82,10 +82,16 @@ def get_config() -> TrainConfig:
     config.training.val_every_n_epochs = 1
     config.training.save_every_n_epochs = 5
     config.training.use_amp = True  # Mixed precision
+    
+    # Gradient clipping for ViT stability (prevents NaN from large attention gradients)
+    config.training.grad_clip_norm = 1.0
 
-    # Optimizer
-    config.optimizer.g_lr = 2e-4
+    # Optimizer - lower LR for transformer stability
+    config.optimizer.g_optimizer = "adamw"  # AdamW works better for transformers
+    config.optimizer.g_lr = 1e-4  # Lower than 2e-4 for ViT stability
+    config.optimizer.g_betas = (0.9, 0.999)  # Standard betas for transformers (not 0.5 for GANs)
     config.optimizer.d_lr = 2e-4
+    config.optimizer.g_weight_decay = 1e-4  # Weight decay for AdamW
     config.optimizer.scheduler = "cosine"
     config.optimizer.scheduler_warmup_epochs = 5
 

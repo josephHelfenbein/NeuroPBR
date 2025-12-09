@@ -45,6 +45,11 @@ class ViTCrossViewFusion(nn.Module):
 
         assert C == self.dim, f"Input channels {C} doesn't match expected {self.dim}"
 
+        # Check for NaN in inputs
+        for i, l in enumerate(latents):
+            if torch.isnan(l).any():
+                print(f"[ViT Warning] NaN in input latent {i}")
+
         tokens = [rearrange(l, 'b c h w -> b (h w) c') for l in latents]
         x = torch.cat(tokens, dim=1)  # [B, N*HW, C]
 
@@ -56,8 +61,13 @@ class ViTCrossViewFusion(nn.Module):
 
         x = rearrange(x, 'b (v hw) c -> b hw (v c)', v=self.num_views)
         x = self.norm(self.fusion(x))
+        
+        # Check for NaN in output
+        output = rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
+        if torch.isnan(output).any():
+            print(f"[ViT Warning] NaN in output! Input had NaN: {any(torch.isnan(l).any() for l in latents)}")
 
-        return rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
+        return output
 
 class ViT(nn.Module):
     def __init__(

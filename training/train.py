@@ -215,7 +215,7 @@ class MultiViewPBRGenerator(nn.Module):
         albedo = torch.sigmoid(albedo)  # [0, 1]
         roughness = torch.sigmoid(roughness)  # [0, 1]
         metallic = torch.sigmoid(metallic)  # [0, 1]
-        normal = F.normalize(normal, p=2, dim=1)  # Normalized vector
+        normal = F.normalize(normal, p=2, dim=1, eps=1e-6)  # Normalized vector (eps for stability)
         
         return {
             "albedo": albedo,

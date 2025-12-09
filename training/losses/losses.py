@@ -57,7 +57,11 @@ class SSIMLoss(nn.Module):
         window = window.expand(channel, 1, self.window_size, self.window_size).contiguous()
         return window.to(dtype=dtype)
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+        # Check for NaN inputs
+        if torch.isnan(pred).any() or torch.isnan(target).any():
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        
         _, channel, _, _ = pred.shape
         dtype = pred.dtype
         
@@ -82,10 +86,20 @@ class SSIMLoss(nn.Module):
         sigma2_sq = F.conv2d(target * target, self.window, padding=self.window_size // 2, groups=channel) - mu2_sq
         sigma12 = F.conv2d(pred * target, self.window, padding=self.window_size // 2, groups=channel) - mu1_mu2
         
+        # Ensure sigmas are non-negative (can be slightly negative due to numerical precision)
+        sigma1_sq = torch.clamp(sigma1_sq, min=0.0)
+        sigma2_sq = torch.clamp(sigma2_sq, min=0.0)
+        
         ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
                    ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2) + eps)
         
-        return 1.0 - ssim_map.mean()
+        loss = 1.0 - ssim_map.mean()
+        
+        # Final NaN check
+        if torch.isnan(loss):
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        
+        return loss
 
 
 class NormalConsistencyLoss(nn.Module):
@@ -94,7 +108,11 @@ class NormalConsistencyLoss(nn.Module):
         super().__init__()
         self.normalize_pred = normalize_pred
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8) -> Tuple[torch.Tensor, float]:
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> Tuple[torch.Tensor, float]:
+        # Check for NaN inputs
+        if torch.isnan(pred).any() or torch.isnan(target).any():
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype), 0.0
+        
         if self.normalize_pred:
             pred = F.normalize(pred, p=2, dim=1, eps=eps)
         
@@ -107,6 +125,10 @@ class NormalConsistencyLoss(nn.Module):
         angle_deg = (angle_rad * 180.0 / np.pi).mean().item()
         
         loss = (1.0 - cos_sim).mean()
+        
+        # Final NaN check
+        if torch.isnan(loss):
+            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype), 0.0
         
         return loss, angle_deg
 

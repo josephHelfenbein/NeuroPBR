@@ -118,7 +118,7 @@ class StudentGenerator(MultiViewPBRGenerator):
         albedo = torch.sigmoid(albedo)  # [0, 1]
         roughness = torch.sigmoid(roughness)  # [0, 1]
         metallic = torch.sigmoid(metallic)  # [0, 1]
-        normal = F.normalize(normal, p=2, dim=1)  # Normalized vector
+        normal = F.normalize(normal, p=2, dim=1, eps=1e-6)  # Normalized vector (eps for numerical stability)
         
         result = {
             "albedo": albedo,
@@ -194,10 +194,18 @@ class DistillationLoss(nn.Module):
         For values already in [0,1] (like sigmoid outputs), we apply temperature
         to their logits to get smoother distributions.
         """
+        # Check for NaN - if input has NaN, clamp won't fix it
+        if torch.isnan(x).any():
+            # Replace NaN with 0.5 (neutral probability)
+            x = torch.where(torch.isnan(x), torch.full_like(x, 0.5), x)
+        
         # Convert from probability space to logit space
         eps = 1e-7
         x_clamped = torch.clamp(x, eps, 1 - eps)
         logits = torch.log(x_clamped / (1 - x_clamped))
+        
+        # Clamp logits to avoid extreme values in fp16
+        logits = torch.clamp(logits, -16.0, 16.0)
 
         # Apply temperature scaling
         soft_probs = torch.sigmoid(logits / temperature)
@@ -207,7 +215,7 @@ class DistillationLoss(nn.Module):
         self,
         student_normal: torch.Tensor,
         teacher_normal: torch.Tensor,
-        eps: float = 1e-8
+        eps: float = 1e-6
     ) -> torch.Tensor:
         """
         Compute angular loss between student and teacher normal maps.
@@ -223,6 +231,10 @@ class DistillationLoss(nn.Module):
         Returns:
             Scalar angular loss (0 = identical, 2 = opposite)
         """
+        # Check for NaN inputs
+        if torch.isnan(student_normal).any() or torch.isnan(teacher_normal).any():
+            return torch.tensor(0.0, device=student_normal.device, dtype=student_normal.dtype)
+        
         # Normalize both to unit vectors
         student_norm = F.normalize(student_normal, p=2, dim=1, eps=eps)
         teacher_norm = F.normalize(teacher_normal, p=2, dim=1, eps=eps)
@@ -233,6 +245,10 @@ class DistillationLoss(nn.Module):
         
         # Loss = 1 - cos(angle), range [0, 2]
         loss = (1.0 - cos_sim).mean()
+        
+        # Return 0 if loss is NaN (shouldn't happen with above guards)
+        if torch.isnan(loss):
+            return torch.tensor(0.0, device=student_normal.device, dtype=student_normal.dtype)
         
         return loss
 
@@ -252,6 +268,10 @@ class DistillationLoss(nn.Module):
 
         Returns loss scaled by T^2 to account for gradient magnitude.
         """
+        # Check for NaN inputs - return 0 to avoid corrupting gradients
+        if torch.isnan(student_output).any() or torch.isnan(teacher_output).any():
+            return torch.tensor(0.0, device=student_output.device, dtype=student_output.dtype)
+        
         # Apply temperature scaling
         student_soft = self._apply_temperature(student_output, temperature)
         teacher_soft = self._apply_temperature(teacher_output, temperature)
@@ -266,6 +286,10 @@ class DistillationLoss(nn.Module):
 
         # Scale by T^2 to account for gradient magnitude (standard in distillation)
         kl_loss = kl_loss.mean() * (temperature ** 2)
+        
+        # Final NaN check
+        if torch.isnan(kl_loss) or torch.isinf(kl_loss):
+            return torch.tensor(0.0, device=student_output.device, dtype=student_output.dtype)
 
         return kl_loss
 
@@ -836,6 +860,15 @@ class Trainer:
             # Train student
             self.optimizer.zero_grad()
 
+            # Debug: Check for NaN in inputs and teacher BEFORE student forward
+            if torch.isnan(input_renders).any():
+                print(f"[NaN DEBUG] Epoch {epoch}, Batch {batch_idx}: NaN in input_renders!")
+            if torch.isnan(pbr_maps).any():
+                print(f"[NaN DEBUG] Epoch {epoch}, Batch {batch_idx}: NaN in pbr_maps (ground truth)!")
+            for k, v in teacher_pred.items():
+                if isinstance(v, torch.Tensor) and torch.isnan(v).any():
+                    print(f"[NaN DEBUG] Epoch {epoch}, Batch {batch_idx}: NaN in teacher_pred['{k}']!")
+
             with self._autocast():
                 # Student forward
                 # ConvAttn generator takes return_features as argument, ViT generator has it set at init
@@ -843,6 +876,18 @@ class Trainer:
                     student_pred = self.student(input_renders, return_features=self.use_feature_distillation)
                 else:
                     student_pred = self.student(input_renders)
+
+                # Debug: Check for NaN in student outputs
+                for k, v in student_pred.items():
+                    if isinstance(v, torch.Tensor) and torch.isnan(v).any():
+                        print(f"[NaN DEBUG] Epoch {epoch}, Batch {batch_idx}: NaN in student_pred['{k}']")
+                        print(f"  Input has NaN: {torch.isnan(input_renders).any().item()}")
+                        # Check model weights for NaN
+                        for name, param in self.student.named_parameters():
+                            if torch.isnan(param).any():
+                                print(f"  NaN in model param: {name}")
+                                break
+                        break
 
                 # Get student output size (may differ from teacher/target due to SR head)
                 student_size = student_pred["albedo"].shape[-2:]
@@ -891,7 +936,25 @@ class Trainer:
                         loss_info["feat_total"] = (feat_loss.item() if isinstance(feat_loss, torch.Tensor) else feat_loss)
                         loss_info["loss_total"] = loss.item()
 
-            # Backward
+            # Backward - skip if loss is NaN to prevent corrupting weights
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"[NaN DEBUG] Epoch {epoch}, Batch {batch_idx}: Skipping backward due to NaN/Inf loss")
+                print(f"  loss_total: {loss_info.get('loss_total', 'N/A')}")
+                print(f"  loss_hard: {loss_info.get('loss_hard', 'N/A')}")
+                print(f"  loss_soft: {loss_info.get('loss_soft', 'N/A')}")
+                # Check inputs for NaN
+                for k, v in student_pred.items():
+                    if isinstance(v, torch.Tensor) and torch.isnan(v).any():
+                        print(f"  student_pred['{k}'] has NaN")
+                for k, v in teacher_pred_resized.items():
+                    if isinstance(v, torch.Tensor) and torch.isnan(v).any():
+                        print(f"  teacher_pred['{k}'] has NaN")
+                for k, v in target_resized.items():
+                    if isinstance(v, torch.Tensor) and torch.isnan(v).any():
+                        print(f"  target['{k}'] has NaN")
+                self.optimizer.zero_grad()
+                continue  # Skip this batch
+                
             if self.scaler:
                 self.scaler.scale(loss).backward()
                 if self.config.training.grad_clip_norm:
@@ -910,6 +973,14 @@ class Trainer:
                         self.config.training.grad_clip_norm
                     )
                 self.optimizer.step()
+
+            # Debug: Check for NaN in model weights after optimizer step
+            if batch_idx == len(train_loader) - 1:  # Only check at end of epoch to save time
+                for name, param in self.student.named_parameters():
+                    if torch.isnan(param).any():
+                        print(f"[NaN DEBUG] Epoch {epoch}: NaN in model weights after training!")
+                        print(f"  First NaN param: {name}")
+                        break
 
             # Update metrics
             epoch_loss += loss_info["loss_total"]
@@ -960,6 +1031,13 @@ class Trainer:
         self.student.eval()
         if self.teacher:
             self.teacher.eval()
+
+        # Debug: Check model weights at start of validation
+        for name, param in self.student.named_parameters():
+            if torch.isnan(param).any():
+                print(f"[NaN DEBUG] Validation Epoch {epoch}: NaN in model weights at START of validation!")
+                print(f"  First NaN param: {name}")
+                break
 
         total_loss = 0.0
         num_batches = 0
@@ -1014,6 +1092,16 @@ class Trainer:
             else:
                 student_pred = self.student(input_renders)
             
+            # Debug: Check for NaN in validation
+            for k, v in student_pred.items():
+                if isinstance(v, torch.Tensor) and torch.isnan(v).any():
+                    print(f"[NaN DEBUG] Validation Epoch {epoch}, Batch {batch_idx}: NaN in student_pred['{k}']")
+                    for name, param in self.student.named_parameters():
+                        if torch.isnan(param).any():
+                            print(f"  NaN in model param: {name}")
+                            break
+                    break
+
             # Resize teacher/target to match student output size
             student_size = student_pred["albedo"].shape[-2:]
             teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
