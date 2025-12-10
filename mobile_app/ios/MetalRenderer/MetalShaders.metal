@@ -152,7 +152,7 @@ fragment float4 pbr_fragment(
     constexpr sampler clampSampler(filter::linear, address::clamp_to_edge, mip_filter::linear);
 
     float3 N = normalize(in.normal);
-    float2 uv = in.uv;
+    float2 uv = in.uv * 2.0; // Tile 2x
     
     // TBN
     float3x3 TBN = computeTBN(N, in.worldPos, uv);
@@ -175,21 +175,38 @@ fragment float4 pbr_fragment(
     float3 R = reflect(-V, shadingN);
 
     float3 F0 = mix(float3(0.04), albedo, metallic);
+    
+    // Fresnel-Schlick approximation for energy conservation
+    float NdotV = max(dot(shadingN, V), 0.0);
+    float3 F = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
     // Apply environment rotation to lookup vectors
     float3 rotN = rotateEnv(shadingN, frame.iblParams.y);
     float3 rotR = rotateEnv(R, frame.iblParams.y);
 
     float3 irradiance = irradianceMap.sample(clampSampler, rotN).rgb;
-    float3 diffuse = irradiance * albedo;
+    
+    // Energy conservation: kD is reduced by Fresnel reflection and metalness
+    float3 kD = (1.0 - F) * (1.0 - metallic);
+    float3 diffuse = kD * irradiance * albedo;
 
     // Map roughness to valid mip levels (0 to count-1) to avoid out-of-bounds sampling
-    float lod = roughness * max(frame.iblParams.z - 1.0, 0.0);
+    // Add minimum LOD bias to reduce pixelation on bright specular highlights
+    float maxLod = max(frame.iblParams.z - 1.0, 0.0);
+    float minLod = 0.5; // Slight blur to avoid harsh aliasing on shiny surfaces
+    float lod = max(roughness * maxLod, minLod);
     float3 prefiltered = prefilteredMap.sample(clampSampler, rotR, level(lod)).rgb;
-    float2 brdf = brdfLUT.sample(clampSampler, float2(max(dot(shadingN, V), 0.0), roughness)).rg;
+    float2 brdf = brdfLUT.sample(clampSampler, float2(NdotV, roughness)).rg;
+    
+    // Specular reflection using split-sum approximation
+    // For rough dielectrics, attenuate specular to prevent overly bright reflections
     float3 specular = prefiltered * (F0 * brdf.x + brdf.y);
+    
+    // Roughness-based specular attenuation for non-metals to reduce excessive reflections
+    float specularAttenuation = mix(1.0, 1.0 - roughness * 0.5, 1.0 - metallic);
+    specular *= specularAttenuation;
 
-    float3 color = (diffuse * (1.0 - metallic) + specular) * frame.iblParams.x;
+    float3 color = (diffuse + specular) * frame.iblParams.x;
 
     // Channel inspector overrides - these bypass tone mapping for accurate display
     if (material.scalars.w > 0.5) {

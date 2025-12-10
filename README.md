@@ -41,8 +41,13 @@
 NeuroPBR is an end-to-end system for digitizing real-world materials into high-quality PBR (Physically Based Rendering) textures using an iPhone. It enables developers and artists to create professional-quality 3D materials using just an iPhone by combining:
 
 1.  **Synthetic Data Generation**: A custom C++/CUDA renderer that produces photorealistic training pairs (clean PBR maps vs. artifact-heavy renders) from the MatSynth dataset.
+<img src="renderer/assets/readme-images/renderer-diagram.png">
+
 2.  **Deep Learning Pipeline**: A multi-view fusion network (ResNet/UNet + Vision Transformer) trained to reconstruct albedo, normal, roughness, and metallic maps from just three imperfect photos.
+<img src="renderer/assets/readme-images/teacher-architecture.png">
+
 3.  **Mobile Deployment**: An iOS app that runs a distilled "Student" model on-device via Core ML, featuring a real-time Metal-based PBR previewer for instant feedback.
+<img src="renderer/assets/readme-images/mobile-diagram.png">
 
 This repository contains the complete stack: from dataset preparation and rendering to model training and mobile deployment.
 

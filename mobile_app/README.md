@@ -6,6 +6,8 @@ A Flutter-based iOS application designed to capture real-world surfaces, reconst
 
 The mobile app serves as the primary interface for the NeuroPBR pipeline in the field. It guides users to capture three specific images of a surface, processes them using a lightweight "Student" model (distilled from the larger server-side teacher model), and immediately visualizes the resulting Albedo, Normal, Roughness, and Metallic maps.
 
+<img src="../renderer/assets/readme-images/mobile-diagram.png">
+
 ## Key Features
 
 - **Multi-View Capture**: Guided UI for taking the three required input images for material reconstruction.

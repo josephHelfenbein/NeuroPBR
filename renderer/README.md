@@ -10,6 +10,8 @@ C++/CUDA renderer for generating synthetic training data using image-based light
 
 The renderer is built using **C++17** and **CUDA**, implementing a standard PBR pipeline optimized for high-throughput data generation.
 
+<img src="assets/readme-images/renderer-diagram.png">
+
 ### Multithreaded Pipeline & GPU Batching
 To maximize GPU utilization and minimize I/O bottlenecks, the renderer uses a 3-stage multithreaded pipeline connected by thread-safe queues. The depth of this pipeline (the "batch size") is dynamically calculated at runtime based on available resources.
 

@@ -14,6 +14,7 @@ NeuroPBR trains a deep model that:
 4. Decodes to **four 2048×2048 PBR maps** (albedo, roughness, metallic, normal)
 5. Improves realism with **optional GAN losses** plus reconstruction terms
 
+<img src="../renderer/assets/readme-images/teacher-architecture.png">
 
 ### Key Features
 
