@@ -43,8 +43,10 @@ def main():
     dry_counts_top = {}
 
     common_root = None
+    grouping_root = None
     if files:
         common_root = Path(os.path.commonpath([str(p.parent) for p in files]))
+        grouping_root = common_root.parent if common_root.parent != common_root else common_root
 
     for p in files:
         if not p.exists():
@@ -56,8 +58,8 @@ def main():
         if args.dry_run:
             print(f"[dry-run] would delete: {p}")
             dry_counts[p.parent] = dry_counts.get(p.parent, 0) + 1
-            if common_root:
-                rel = p.parent.relative_to(common_root)
+            if grouping_root:
+                rel = p.parent.relative_to(grouping_root)
                 top = rel.parts[0] if rel.parts else "."
                 dry_counts_top[top] = dry_counts_top.get(top, 0) + 1
         else:
@@ -72,7 +74,7 @@ def main():
     if args.dry_run:
         print("Dry run only; no files were removed.")
         if dry_counts_top:
-            label = f" under {common_root}" if common_root else ""
+            label = f" under {grouping_root}" if grouping_root else ""
             print(f"Per top-level directory{label}:")
             for parent, count in sorted(dry_counts_top.items()):
                 print(f"  {parent}: {count}")
