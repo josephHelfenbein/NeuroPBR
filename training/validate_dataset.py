@@ -29,18 +29,16 @@ def validate_image(path: Path) -> tuple[Path, bool, str]:
     """
     try:
         with Image.open(path) as img:
-            img.load()  # Force full load to detect truncation
-            img.verify()  # Additional verification
-        
+            img.verify()
+
         # Re-open after verify (verify closes the file)
         with Image.open(path) as img:
-            img.load()
-            # Check if image has reasonable dimensions
+            img.load()  # Force full load to detect truncation
             if img.size[0] < 1 or img.size[1] < 1:
                 return (path, False, f"Invalid dimensions: {img.size}")
-            
+
         return (path, True, "")
-        
+
     except Exception as e:
         return (path, False, str(e))
 
