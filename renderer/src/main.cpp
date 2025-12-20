@@ -14,8 +14,6 @@
 #include <atomic>
 #include <algorithm>
 
-#include "stb_image.h"
-
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -161,20 +159,6 @@ struct RetryInfo {
     bool isDirty;
 };
 
-static bool isPngReadable(const std::filesystem::path& p) {
-    std::error_code ec;
-    auto sz = std::filesystem::file_size(p, ec);
-    if (ec || sz < 16) { // trivially reject zero/very small files
-        return false;
-    }
-
-    int w = 0, h = 0, c = 0;
-    // stbi_info is quick and avoids full decode
-    if (stbi_info(p.string().c_str(), &w, &h, &c) == 0) {
-        return false;
-    }
-    return (w > 0 && h > 0);
-}
 
 void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
                   ThreadSafeQueue<GPUMemorySlot>& freeSlots,
@@ -541,7 +525,7 @@ int main(int argc, char** argv) {
                                 bool complete = true;
                                 for (int j = 0; j < 3; ++j) {
                                     auto imgPath = entry.path() / (std::to_string(j) + ".png");
-                                    if (!std::filesystem::exists(imgPath) || !isPngReadable(imgPath)) {
+                                    if (!std::filesystem::exists(imgPath) || !isPNGReadable(imgPath)) {
                                         complete = false;
                                         break;
                                     }

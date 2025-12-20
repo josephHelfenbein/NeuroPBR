@@ -15,6 +15,9 @@ struct FloatImage {
 
 FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChannels = 3, bool flipY = true);
 
+// Lightweight readability/size check for PNG files used during continue-mode scans
+bool isPNGReadable(const std::filesystem::path& filePath);
+
 void writePNGImage(const std::filesystem::path& filePath, const float4* frameData, int width, int height, bool flipY = true);
 
 void appendRenderMetadata(const std::filesystem::path& metadataPath,

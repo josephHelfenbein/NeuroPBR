@@ -229,6 +229,20 @@ FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChanne
     return image;
 }
 
+bool isPNGReadable(const std::filesystem::path& filePath) {
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(filePath, ec);
+    if (ec || sz < 16) { // trivially reject zero/very small files
+        return false;
+    }
+
+    int w = 0, h = 0, c = 0;
+    if (stbi_info(filePath.string().c_str(), &w, &h, &c) == 0) {
+        return false;
+    }
+    return (w > 0 && h > 0);
+}
+
 void writePNGImage(const std::filesystem::path& filePath, const float4* frameData, 
                     int width, int height, bool flipY) {
     if (frameData == nullptr) {
