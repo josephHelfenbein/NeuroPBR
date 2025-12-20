@@ -38,6 +38,7 @@ def main():
     deleted = 0
     skipped_missing = 0
     skipped_not_file = 0
+    dry_counts = {}
 
     for p in files:
         if not p.exists():
@@ -48,6 +49,7 @@ def main():
             continue
         if args.dry_run:
             print(f"[dry-run] would delete: {p}")
+            dry_counts[p.parent] = dry_counts.get(p.parent, 0) + 1
         else:
             p.unlink()
             deleted += 1
@@ -59,6 +61,10 @@ def main():
     print(f"  not-file skipped: {skipped_not_file}")
     if args.dry_run:
         print("Dry run only; no files were removed.")
+        if dry_counts:
+            print("Per-directory counts:")
+            for parent, count in sorted(dry_counts.items()):
+                print(f"  {parent}: {count}")
 
 
 if __name__ == "__main__":
