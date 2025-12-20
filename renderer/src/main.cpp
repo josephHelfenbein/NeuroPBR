@@ -163,6 +163,7 @@ struct RetryInfo {
 void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
                   ThreadSafeQueue<GPUMemorySlot>& freeSlots,
                   const std::filesystem::path& texturesDir,
+                  const std::filesystem::path& outputDir,
                   const std::vector<std::string>& textureNames,
                   int maxRenders,
                   size_t numEnvironments,
@@ -403,7 +404,7 @@ void renderThread(ThreadSafeQueue<RenderRequest>& inQueue,
     }
 }
 
-void writerThread(ThreadSafeQueue<RenderResult>& queue, ThreadSafeQueue<GPUMemorySlot>& freeSlots) {
+void writerThread(ThreadSafeQueue<RenderResult>& queue, ThreadSafeQueue<GPUMemorySlot>& freeSlots, const std::filesystem::path& outputDir) {
     try {
     std::map<std::string, std::string> metadataEntries;
     std::filesystem::path metadataPath = outputDir / "render_metadata.json";
@@ -628,9 +629,9 @@ int main(int argc, char** argv) {
             freeSlots.push(slot);
         }
 
-        std::thread t1(loaderThread, std::ref(loadQueue), std::ref(freeSlots), texturesDir, textureNames, maxRenders, environments.size(), startIndex, retryRequests);
+        std::thread t1(loaderThread, std::ref(loadQueue), std::ref(freeSlots), texturesDir, outputDir, textureNames, maxRenders, environments.size(), startIndex, retryRequests);
         std::thread t2(renderThread, std::ref(loadQueue), std::ref(writeQueue), std::cref(environments), std::cref(brdfLut));
-        std::thread t3(writerThread, std::ref(writeQueue), std::ref(freeSlots));
+        std::thread t3(writerThread, std::ref(writeQueue), std::ref(freeSlots), outputDir);
 
         t1.join();
         t2.join();
