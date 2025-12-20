@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 
@@ -39,6 +40,11 @@ def main():
     skipped_missing = 0
     skipped_not_file = 0
     dry_counts = {}
+    dry_counts_top = {}
+
+    common_root = None
+    if files:
+        common_root = Path(os.path.commonpath([str(p.parent) for p in files]))
 
     for p in files:
         if not p.exists():
@@ -50,6 +56,10 @@ def main():
         if args.dry_run:
             print(f"[dry-run] would delete: {p}")
             dry_counts[p.parent] = dry_counts.get(p.parent, 0) + 1
+            if common_root:
+                rel = p.parent.relative_to(common_root)
+                top = rel.parts[0] if rel.parts else "."
+                dry_counts_top[top] = dry_counts_top.get(top, 0) + 1
         else:
             p.unlink()
             deleted += 1
@@ -61,9 +71,10 @@ def main():
     print(f"  not-file skipped: {skipped_not_file}")
     if args.dry_run:
         print("Dry run only; no files were removed.")
-        if dry_counts:
-            print("Per-directory counts:")
-            for parent, count in sorted(dry_counts.items()):
+        if dry_counts_top:
+            label = f" under {common_root}" if common_root else ""
+            print(f"Per top-level directory{label}:")
+            for parent, count in sorted(dry_counts_top.items()):
                 print(f"  {parent}: {count}")
 
 
