@@ -86,10 +86,11 @@ The binary will be written to `bin/neuropbr_renderer`.
 ### Command-line usage
 
 ```bash
-./bin/neuropbr_renderer <materials_dir> <num_samples> [--continuing]
+./bin/neuropbr_renderer <materials_dir> <output_dir> <num_samples> [--continuing]
 ```
 
 - `<materials_dir>` – Path to the cleaned material dataset (each material folder must contain `albedo.png`, `normal.png`, `roughness.png`, `metallic.png` and be uniquely named).
+- `<output_dir>` - Path to output the renders.
 - `<num_samples>` – Number of samples to render; each sample produces three views and writes to `output/clean` or `output/dirty` plus `output/render_metadata.json`.
 - `--continuing` / `-c` – Optional flag. If set, the renderer scans the output directory for the highest existing sample index and starts numbering new samples from there. It also detects any incomplete samples (missing views) and retries them before starting new renders.
 

@@ -242,12 +242,12 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
             unsigned long long artifactSeed = 0;
 
             if (retry.isDirty) {
-                targetDir = std::filesystem::path("output") / "dirty" / retry.sampleName;
+                targetDir = outputDir / "dirty" / retry.sampleName;
                 enableShadows = uni(rng) < P_SHADOW;
                 enableCameraArtifacts = uni(rng) < P_SMUDGE;
                 artifactSeed = seedDist(rng);
             } else {
-                targetDir = std::filesystem::path("output") / "clean" / retry.sampleName;
+                targetDir = outputDir / "clean" / retry.sampleName;
             }
             std::filesystem::create_directories(targetDir);
 
@@ -328,9 +328,9 @@ void loaderThread(ThreadSafeQueue<RenderRequest>& queue,
                 enableShadows = uni(rng) < P_SHADOW;
                 enableCameraArtifacts = uni(rng) < P_SMUDGE;
                 artifactSeed = seedDist(rng);
-                targetDir = std::filesystem::path("output") / "dirty" / sampleName;
+                targetDir = outputDir / "dirty" / sampleName;
             } else {
-                targetDir = std::filesystem::path("output") / "clean" / sampleName;
+                targetDir = outputDir / "clean" / sampleName;
             }
             std::filesystem::create_directories(targetDir);
 
@@ -406,7 +406,7 @@ void renderThread(ThreadSafeQueue<RenderRequest>& inQueue,
 void writerThread(ThreadSafeQueue<RenderResult>& queue, ThreadSafeQueue<GPUMemorySlot>& freeSlots) {
     try {
     std::map<std::string, std::string> metadataEntries;
-    std::filesystem::path metadataPath = std::filesystem::path("output") / "render_metadata.json";
+    std::filesystem::path metadataPath = outputDir / "render_metadata.json";
     
     // Load existing metadata once at start
     loadMetadata(metadataPath, metadataEntries);
@@ -442,8 +442,8 @@ void writerThread(ThreadSafeQueue<RenderResult>& queue, ThreadSafeQueue<GPUMemor
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--continuing]" << std::endl;
+    if (argc < 4) {
+        std::cerr << "Usage: " << argv[0] << " <textures directory> <output directory> <num renders> [--continuing]" << std::endl;
         return 1;
     }
     try {
@@ -477,6 +477,7 @@ int main(int argc, char** argv) {
 
         std::vector<std::string> textureNames;
         const std::filesystem::path texturesDir = argv[1];
+        const std::filesystem::path outputDir = argv[2];
         for (const auto& entry : std::filesystem::directory_iterator(texturesDir)) {
             if (entry.is_directory()) {
                 textureNames.push_back(entry.path().filename().string());
@@ -486,17 +487,17 @@ int main(int argc, char** argv) {
             throw std::runtime_error("No material subdirectories found in textures directory.");
         }
         
-        const int maxRenders = std::stoi(argv[2]);
+        const int maxRenders = std::stoi(argv[3]);
         size_t startIndex = 0;
         bool continuing = false;
 
-        for (int i = 3; i < argc; ++i) {
+        for (int i = 4; i < argc; ++i) {
             std::string arg = argv[i];
             if (arg == "--continuing" || arg == "-c") {
                 continuing = true;
             } else {
                 std::cerr << "Unknown argument: " << arg << std::endl;
-                std::cerr << "Usage: " << argv[0] << " <textures directory> <num renders> [--continuing]" << std::endl;
+                std::cerr << "Usage: " << argv[0] << " <textures directory> <output directory> <num renders> [--continuing]" << std::endl;
                 return 1;
             }
         }
@@ -505,7 +506,7 @@ int main(int argc, char** argv) {
         if (continuing) {
             std::cout << "Continuing mode enabled. Scanning for incomplete samples..." << std::endl;
             std::map<std::string, std::string> metadata;
-            std::filesystem::path metadataPath = std::filesystem::path("output") / "render_metadata.json";
+            std::filesystem::path metadataPath = outputDir / "render_metadata.json";
             loadMetadata(metadataPath, metadata);
 
             size_t maxIndex = 0;
@@ -545,8 +546,8 @@ int main(int argc, char** argv) {
                 }
             };
 
-            scanDir(std::filesystem::path("output") / "clean", false);
-            scanDir(std::filesystem::path("output") / "dirty", true);
+            scanDir(outputDir / "clean", false);
+            scanDir(outputDir / "dirty", true);
 
             startIndex = maxIndex + 1;
             std::cout << "Found " << retryRequests.size() << " incomplete samples to retry." << std::endl;
