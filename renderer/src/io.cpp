@@ -13,6 +13,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC
@@ -255,11 +257,32 @@ void writePNGImage(const std::filesystem::path& filePath, const float4* frameDat
         rawPixels[dstIndex + 3] = toByte(pixel.w);
     }
 
-    std::string utf8Path = filePath.string();
-    if (stbi_write_png(utf8Path.c_str(), width, height, 4, rawPixels.data(), width * 4) == 0) {
-        throw std::runtime_error("Failed to write PNG image");
+    // Write atomically
+    auto tmpPath = filePath;
+    tmpPath += ".tmp";
+
+    std::string utf8Tmp = tmpPath.string();
+    int attempts = 3;
+    for (int attempt = 1; attempt <= attempts; ++attempt) {
+        if (stbi_write_png(utf8Tmp.c_str(), width, height, 4, rawPixels.data(), width * 4) != 0) {
+            std::error_code ec;
+            std::filesystem::rename(tmpPath, filePath, ec);
+            if (ec) {
+                std::filesystem::remove(tmpPath);
+                throw std::runtime_error("Failed to rename temp PNG: " + ec.message());
+            }
+            stbi_flip_vertically_on_write(0);
+            return;
+        }
+
+        if (attempt == attempts) {
+            std::filesystem::remove(tmpPath);
+            stbi_flip_vertically_on_write(0);
+            throw std::runtime_error("Failed to write PNG image after retries");
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50 * attempt));
     }
-    stbi_flip_vertically_on_write(0);
 }
 
 void loadMetadata(const std::filesystem::path& metadataPath, std::map<std::string, std::string>& entries) {
