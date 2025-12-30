@@ -355,8 +355,15 @@ def check_optimizer_state(ckpt: Dict) -> List[CheckResult]:
     return results
 
 
-def run_test_inference(ckpt: Dict, input_dir: str, num_samples: int = 3) -> List[CheckResult]:
-    """Run actual inference to check output distributions."""
+def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_samples: int = 3) -> List[CheckResult]:
+    """Run actual inference to check output distributions.
+    
+    Args:
+        ckpt: Loaded checkpoint dict
+        input_dir: Path to input renders directory
+        output_dir: Path to ground truth PBR maps directory (optional, defaults to input_dir/../output)
+        num_samples: Number of samples to test
+    """
     results = []
     
     try:
@@ -408,19 +415,31 @@ def run_test_inference(ckpt: Dict, input_dir: str, num_samples: int = 3) -> List
         
         # Find metadata
         metadata_path = input_path / "render_metadata.json"
-        output_dir = input_path.parent / "output"
         
-        if not metadata_path.exists() or not output_dir.exists():
+        # Use provided output_dir or default to sibling 'output' folder
+        if output_dir:
+            output_path = Path(output_dir)
+        else:
+            output_path = input_path.parent / "output"
+        
+        if not metadata_path.exists():
             return [CheckResult(
                 name="Test inference",
                 status=HealthStatus.WARNING,
-                message="Could not find metadata or output directory"
+                message=f"Could not find metadata: {metadata_path}"
+            )]
+        
+        if not output_path.exists():
+            return [CheckResult(
+                name="Test inference",
+                status=HealthStatus.WARNING,
+                message=f"Could not find output directory: {output_path}"
             )]
         
         # Create dataset
         dataset = PBRDataset(
             input_dir=str(input_path),
-            output_dir=str(output_dir),
+            output_dir=str(output_path),
             metadata_path=str(metadata_path),
             transform_mean=[0.5, 0.5, 0.5],
             transform_std=[0.5, 0.5, 0.5],
@@ -574,7 +593,7 @@ def main():
 Examples:
     python check_checkpoint.py checkpoints/best_model.pth
     python check_checkpoint.py checkpoints/best_model.pth --verbose
-    python check_checkpoint.py checkpoints/best_model.pth --test-inference --input-dir ./data/input
+    python check_checkpoint.py checkpoints/best_model.pth --test-inference --input-dir ./data/input --output-dir ./data/output
         """
     )
     parser.add_argument("checkpoint", type=str, help="Path to checkpoint file")
@@ -583,6 +602,8 @@ Examples:
                         help="Run actual inference to check outputs (slower but more thorough)")
     parser.add_argument("--input-dir", type=str, default=None,
                         help="Input directory for inference test (required if --test-inference)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory with ground truth PBR maps (default: input_dir/../output)")
     
     args = parser.parse_args()
     
@@ -624,7 +645,7 @@ Examples:
     # Optional inference test
     if args.test_inference:
         print("Running inference test...")
-        all_results.extend(run_test_inference(ckpt, args.input_dir))
+        all_results.extend(run_test_inference(ckpt, args.input_dir, args.output_dir))
     
     # Print results
     is_safe = print_results(all_results, args.verbose)
