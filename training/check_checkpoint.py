@@ -197,12 +197,21 @@ def check_batchnorm_stats(state_dict: Dict[str, torch.Tensor]) -> List[CheckResu
     return results
 
 
-def check_discriminator_health(state_dict: Dict[str, torch.Tensor]) -> List[CheckResult]:
-    """Check discriminator-specific health indicators."""
+def check_discriminator_health(state_dict: Dict[str, torch.Tensor], is_discriminator_dict: bool = False) -> List[CheckResult]:
+    """Check discriminator-specific health indicators.
+    
+    Args:
+        state_dict: Either the full checkpoint or the discriminator's state dict
+        is_discriminator_dict: If True, state_dict is already the discriminator's state dict
+    """
     results = []
     
-    # Find discriminator layers
-    disc_keys = [k for k in state_dict.keys() if any(p in k.lower() for p in ['discriminator', 'disc', 'd_'])]
+    if is_discriminator_dict:
+        # state_dict IS the discriminator - use all keys
+        disc_keys = list(state_dict.keys())
+    else:
+        # Find discriminator layers in a combined state dict
+        disc_keys = [k for k in state_dict.keys() if any(p in k.lower() for p in ['discriminator', 'disc', 'd_'])]
     
     if not disc_keys:
         # No discriminator in checkpoint
@@ -610,7 +619,7 @@ Examples:
     # Discriminator checks
     if disc_state_dict:
         all_results.extend(check_weight_statistics(disc_state_dict))
-        all_results.extend(check_discriminator_health(disc_state_dict))
+        all_results.extend(check_discriminator_health(disc_state_dict, is_discriminator_dict=True))
     
     # Optional inference test
     if args.test_inference:
