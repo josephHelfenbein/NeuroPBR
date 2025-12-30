@@ -184,7 +184,7 @@ def check_batchnorm_stats(state_dict: Dict[str, torch.Tensor]) -> List[CheckResu
             name="BatchNorm running vars",
             status=HealthStatus.WARNING,
             message=f"Found {len(abnormal_vars)} layers with extreme variances",
-            details="; ".join([f"{k}: [{v[0]:.1e}, {v[1]:.1e}]" for k, v in abnormal_vars[:3]])
+            details="; ".join([f"{k}: [{min_v:.1e}, {max_v:.1e}]" for k, min_v, max_v in abnormal_vars[:3]])
         ))
     
     if not abnormal_means and not abnormal_vars:
