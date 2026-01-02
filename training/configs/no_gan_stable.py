@@ -24,14 +24,11 @@ The L1 + SSIM + Normal loss combination provides strong reconstruction.
 For most PBR workflows, the quality difference is negligible, especially
 after the student distillation step.
 
-RESOLUTION: 1024×1024 input/output
-- 4× faster training than 2048×2048
-- Matches shard generation resolution
-- Still high enough quality for distillation
+RESOLUTION: 2048×2048 native (downsample to 1024 during shard generation)
 
 RECOMMENDED USE:
 1. Train teacher with this config (~100 epochs)
-2. Generate 1024×1024 distillation shards (already native resolution)
+2. Generate 1024×1024 distillation shards with --shard-output-size 1024
 3. Train student (which also doesn't use GAN)
 4. If you need sharper textures, fine-tune with GAN for 10-20 epochs
    using a separate config with gan_start_epoch=0.
@@ -76,10 +73,10 @@ def get_config():
     config.loss.w_metallic = 1.0
     config.loss.w_normal_map = 1.2  # Extra emphasis on normal reconstruction
 
-    # ========== Data (1024×1024 for shard generation) ==========
-    config.data.image_size = (1024, 1024)   # Input resolution
-    config.data.output_size = (1024, 1024)  # Output resolution (matches shards)
-    config.data.batch_size = 2              # Can fit 2 at 1024² (vs 1 at 2048²)
+    # ========== Data (2048×2048 native resolution) ==========
+    config.data.image_size = (2048, 2048)   # Input resolution
+    config.data.output_size = (2048, 2048)  # Output resolution
+    config.data.batch_size = 1              # Safe for 2048² on most GPUs
     config.data.num_workers = 8
     config.data.render_curriculum = 0  # Clean only for stable training
     config.data.val_ratio = 0.1
