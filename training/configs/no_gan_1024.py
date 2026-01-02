@@ -59,14 +59,18 @@ def get_config():
 
     # ========== Optimizer ==========
     config.optimizer.g_optimizer = "adamw"
-    config.optimizer.g_lr = 1e-4  # Slightly lower LR for stability
+    # Base LR for batch_size=2. If auto-scaler increases batch, LR should scale too.
+    # For batch=10 (5× larger), effective LR would be 5e-4
+    # The training script should handle this if it has LR scaling logic.
+    # If not, we set a middle-ground LR that works for larger batches:
+    config.optimizer.g_lr = 5e-4  # Works for batch 8-12
     config.optimizer.g_betas = (0.9, 0.999)
     config.optimizer.g_weight_decay = 1e-4
 
     config.optimizer.d_lr = 0.0
 
     config.optimizer.scheduler = "cosine"
-    config.optimizer.scheduler_warmup_epochs = 10  # Longer warmup
+    config.optimizer.scheduler_warmup_epochs = 10  # Longer warmup helps with higher LR
     config.optimizer.scheduler_min_lr = 1e-6
 
     # ========== Training ==========
