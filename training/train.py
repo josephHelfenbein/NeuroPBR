@@ -705,8 +705,14 @@ class Trainer:
             
             total_loss += loss_info["loss_total"]
             
-            # Compute metrics
-            batch_metrics = compute_pbr_metrics(pred_pbr, target, include_angular=True)
+            # Compute metrics (denormalize targets to [0,1] to match predictions)
+            batch_metrics = compute_pbr_metrics(
+                pred_pbr, target, 
+                include_angular=True,
+                denorm_target=True,
+                mean=self.config.transform.mean,
+                std=self.config.transform.std
+            )
             for key, val in batch_metrics.items():
                 if key not in all_metrics:
                     all_metrics[key] = []

@@ -12,7 +12,34 @@ Includes:
 import torch
 import torch.nn.functional as F
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Union
+
+
+def denormalize(tensor: torch.Tensor, mean: List[float] = [0.5, 0.5, 0.5], 
+                std: List[float] = [0.5, 0.5, 0.5]) -> torch.Tensor:
+    """
+    Denormalize a tensor from normalized space back to [0, 1].
+    
+    Args:
+        tensor: Normalized tensor (B, C, H, W)
+        mean: Per-channel means used in normalization
+        std: Per-channel stds used in normalization
+        
+    Returns:
+        Denormalized tensor in [0, 1] range
+    """
+    device = tensor.device
+    dtype = tensor.dtype
+    
+    # Handle single-channel (roughness, metallic) vs multi-channel (albedo, normal)
+    if tensor.shape[1] == 1:
+        mean_t = torch.tensor([mean[0]], device=device, dtype=dtype).view(1, 1, 1, 1)
+        std_t = torch.tensor([std[0]], device=device, dtype=dtype).view(1, 1, 1, 1)
+    else:
+        mean_t = torch.tensor(mean, device=device, dtype=dtype).view(1, -1, 1, 1)
+        std_t = torch.tensor(std, device=device, dtype=dtype).view(1, -1, 1, 1)
+    
+    return tensor * std_t + mean_t
 
 
 def psnr(pred: torch.Tensor, target: torch.Tensor, max_val: float = 1.0, eps: float = 1e-8) -> float:
@@ -154,20 +181,34 @@ def rmse(pred: torch.Tensor, target: torch.Tensor) -> float:
 def compute_pbr_metrics(
     pred: Dict[str, torch.Tensor],
     target: Dict[str, torch.Tensor],
-    include_angular: bool = True
+    include_angular: bool = True,
+    denorm_target: bool = False,
+    mean: List[float] = [0.5, 0.5, 0.5],
+    std: List[float] = [0.5, 0.5, 0.5]
 ) -> Dict[str, float]:
     """
     Compute comprehensive metrics for all PBR maps.
     
     Args:
         pred: Dictionary with predicted PBR maps (albedo, roughness, metallic, normal)
+               Expected to be in [0, 1] range (after sigmoid).
         target: Dictionary with target PBR maps
+               May be normalized (if denorm_target=True) or in [0, 1] range.
         include_angular: Whether to compute angular error (slower)
+        denorm_target: If True, denormalize target from normalized space to [0, 1]
+        mean: Normalization mean (used if denorm_target=True)
+        std: Normalization std (used if denorm_target=True)
         
     Returns:
         Dictionary of all computed metrics
     """
     metrics = {}
+    
+    # Optionally denormalize targets to match prediction range [0, 1]
+    if denorm_target:
+        target = {
+            k: denormalize(v, mean, std) for k, v in target.items()
+        }
     
     # Metrics for each map type
     for map_name in ["albedo", "roughness", "metallic"]:
