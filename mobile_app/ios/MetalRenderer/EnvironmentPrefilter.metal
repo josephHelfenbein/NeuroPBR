@@ -115,6 +115,7 @@ kernel void equirectangularToCubemapKernel(texture2d<float, access::sample> hdrT
     if (isnan(color.x) || isinf(color.x)) color.x = 0.0f;
     if (isnan(color.y) || isinf(color.y)) color.y = 0.0f;
     if (isnan(color.z) || isinf(color.z)) color.z = 0.0f;
+    color.xyz = min(color.xyz, float3(1000.0f));
     
     color.w = 1.0f; // Force alpha to 1.0
     cubeFaces.write(color, uint2(gid.xy), gid.z);
@@ -162,10 +163,12 @@ kernel void prefilterSpecularKernel(texturecube<float, access::sample> envMap [[
             float mipLevel = uniforms.roughness == 0.0f ? 0.0f : 0.5f * log2(saSample / saTexel);
 
             float3 sampleColor = envMap.sample(cubeSampler, L, level(mipLevel)).xyz;
-            // Sanitize
+            // Sanitize NaN/Inf
             if (isnan(sampleColor.x) || isinf(sampleColor.x)) sampleColor.x = 0.0f;
             if (isnan(sampleColor.y) || isinf(sampleColor.y)) sampleColor.y = 0.0f;
             if (isnan(sampleColor.z) || isinf(sampleColor.z)) sampleColor.z = 0.0f;
+            // Clamp extreme HDR values to prevent fireflies from very bright light sources
+            sampleColor = min(sampleColor, float3(1000.0f));
 
             prefiltered += sampleColor * NdotL;
             totalWeight += NdotL;
@@ -203,10 +206,12 @@ kernel void convolveDiffuseKernel(texturecube<float, access::sample> envMap [[te
         if (NdotL > 0.0f) {
             // Use calculated mip level
             float3 sampleColor = envMap.sample(cubeSampler, L, level(mipLevel)).xyz;
-            // Sanitize
+            // Sanitize NaN/Inf
             if (isnan(sampleColor.x) || isinf(sampleColor.x)) sampleColor.x = 0.0f;
             if (isnan(sampleColor.y) || isinf(sampleColor.y)) sampleColor.y = 0.0f;
             if (isnan(sampleColor.z) || isinf(sampleColor.z)) sampleColor.z = 0.0f;
+            // Clamp extreme HDR values to prevent fireflies from very bright light sources
+            sampleColor = min(sampleColor, float3(1000.0f));
 
             irradiance += sampleColor;
         }
@@ -267,8 +272,12 @@ kernel void precomputeBRDFKernel(texture2d<float, access::write> brdfLut [[textu
     if (gid.x >= uniforms.width || gid.y >= uniforms.height) {
         return;
     }
-    float NdotV = (float(gid.x) + 0.5f) / float(uniforms.width);
+    // Clamp NdotV to minimum value to avoid extreme values at grazing angles
+    // This prevents division-by-near-zero issues in integrateBRDF
+    float NdotV = max((float(gid.x) + 0.5f) / float(uniforms.width), 0.001f);
     float roughness = (float(gid.y) + 0.5f) / float(uniforms.height);
     float2 result = integrateBRDF(NdotV, roughness);
+    // Clamp result to valid range to prevent extreme values causing fireflies
+    result = clamp(result, float2(0.0f), float2(1.0f));
     brdfLut.write(float4(result, 0.0f, 1.0f), gid);
 }

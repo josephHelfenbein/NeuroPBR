@@ -177,7 +177,7 @@ fragment float4 pbr_fragment(
     float3 F0 = mix(float3(0.04), albedo, metallic);
     
     // Fresnel-Schlick approximation for energy conservation
-    float NdotV = max(dot(shadingN, V), 0.0);
+    float NdotV = max(dot(shadingN, V), 0.001);
     float3 F = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
     // Apply environment rotation to lookup vectors
@@ -185,10 +185,11 @@ fragment float4 pbr_fragment(
     float3 rotR = rotateEnv(R, frame.iblParams.y);
 
     float3 irradiance = irradianceMap.sample(clampSampler, rotN).rgb;
+    irradiance = min(irradiance, float3(100.0));
     
     // Energy conservation: kD is reduced by Fresnel reflection and metalness
     float3 kD = (1.0 - F) * (1.0 - metallic);
-    float3 diffuse = kD * irradiance * albedo;
+    float3 diffuse = kD * irradiance * albedo / kPi;
 
     // Map roughness to valid mip levels (0 to count-1) to avoid out-of-bounds sampling
     // Add minimum LOD bias to reduce pixelation on bright specular highlights
@@ -196,7 +197,10 @@ fragment float4 pbr_fragment(
     float minLod = 0.5; // Slight blur to avoid harsh aliasing on shiny surfaces
     float lod = max(roughness * maxLod, minLod);
     float3 prefiltered = prefilteredMap.sample(clampSampler, rotR, level(lod)).rgb;
+    prefiltered = min(prefiltered, float3(100.0));
+    
     float2 brdf = brdfLUT.sample(clampSampler, float2(NdotV, roughness)).rg;
+    brdf = clamp(brdf, float2(0.0), float2(1.0));
     
     // Specular reflection using split-sum approximation
     // For rough dielectrics, attenuate specular to prevent overly bright reflections

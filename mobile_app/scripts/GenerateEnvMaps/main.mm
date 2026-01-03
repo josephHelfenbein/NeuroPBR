@@ -539,6 +539,17 @@ int main(int argc, const char* argv[]) {
         // Process each HDR file
         MTKTextureLoader *textureLoader = [[MTKTextureLoader alloc] initWithDevice:device];
         
+        // Resolution multipliers and suffixes for progressive loading
+        struct ResolutionLevel {
+            float multiplier;
+            NSString *suffix;
+        };
+        std::vector<ResolutionLevel> resolutionLevels = {
+            {0.25f, @"_q"},  // Quarter resolution
+            {0.5f, @"_h"},   // Half resolution
+            {1.0f, @""}      // Full resolution
+        };
+        
         for (NSString *hdrFile in hdrFiles) {
             @autoreleasepool {
                 NSString *hdrPath = [inputDir stringByAppendingPathComponent:hdrFile];
@@ -571,78 +582,90 @@ int main(int argc, const char* argv[]) {
                                 withBytes:hdrImage.pixels.data()
                               bytesPerRow:hdrImage.width * sizeof(HDRPixel)];
                 
-                // Generate environment products using the Metal prefilter
-                NSLog(@"  Generating environment maps (this may take a moment)...");
-                NSError *genError = nil;
-                NPBREnvironmentProducts *products = [prefilter generateFromHDRTexture:hdrTexture
-                                                                             faceSize:faceSize
-                                                                       irradianceSize:irradianceSize
-                                                                      specularSamples:specularSamples
-                                                                       diffuseSamples:diffuseSamples
-                                                                                error:&genError];
-                
-                if (!products) {
-                    NSLog(@"  Failed to generate environment maps: %@", genError.localizedDescription);
-                    continue;
-                }
-                
-                // Copy textures to shared storage for saving
-                auto copyToShared = ^id<MTLTexture>(id<MTLTexture> src) {
-                    MTLTextureDescriptor *desc = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:src.pixelFormat
-                                                                                                       size:src.width
-                                                                                                  mipmapped:(src.mipmapLevelCount > 1)];
-                    desc.mipmapLevelCount = src.mipmapLevelCount;
-                    desc.usage = MTLTextureUsageShaderRead;
-                    desc.storageMode = MTLStorageModeShared;
-                    id<MTLTexture> dst = [device newTextureWithDescriptor:desc];
+                // Generate environment maps at multiple resolutions for progressive loading
+                for (const auto& level : resolutionLevels) {
+                    NSUInteger levelFaceSize = (NSUInteger)(faceSize * level.multiplier);
+                    NSUInteger levelIrradianceSize = MAX(16, (NSUInteger)(irradianceSize * level.multiplier));
+                    NSUInteger levelPrefilterSize = (NSUInteger)(prefilterSize * level.multiplier);
                     
-                    id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
-                    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
-                    for (NSUInteger mip = 0; mip < src.mipmapLevelCount; ++mip) {
-                        NSUInteger mipSize = MAX(1, src.width >> mip);
-                        for (NSUInteger face = 0; face < 6; ++face) {
-                            [blit copyFromTexture:src
-                                      sourceSlice:face
-                                      sourceLevel:mip
-                                     sourceOrigin:MTLOriginMake(0, 0, 0)
-                                       sourceSize:MTLSizeMake(mipSize, mipSize, 1)
-                                        toTexture:dst
-                                 destinationSlice:face
-                                 destinationLevel:mip
-                                destinationOrigin:MTLOriginMake(0, 0, 0)];
-                        }
+                    // Use fewer samples for lower resolutions (faster generation)
+                    NSUInteger levelSpecularSamples = level.multiplier < 1.0f ? (NSUInteger)(specularSamples * level.multiplier) : specularSamples;
+                    NSUInteger levelDiffuseSamples = level.multiplier < 1.0f ? (NSUInteger)(diffuseSamples * level.multiplier) : diffuseSamples;
+                    levelSpecularSamples = MAX(64, levelSpecularSamples);
+                    levelDiffuseSamples = MAX(64, levelDiffuseSamples);
+                    
+                    NSLog(@"  Generating %@ environment maps (face=%lu, prefilter=%lu)...", 
+                          level.multiplier == 1.0f ? @"full" : (level.multiplier == 0.5f ? @"half" : @"quarter"),
+                          (unsigned long)levelFaceSize, (unsigned long)levelPrefilterSize);
+                    
+                    NSError *genError = nil;
+                    NPBREnvironmentProducts *products = [prefilter generateFromHDRTexture:hdrTexture
+                                                                                 faceSize:levelFaceSize
+                                                                           irradianceSize:levelIrradianceSize
+                                                                          specularSamples:levelSpecularSamples
+                                                                           diffuseSamples:levelDiffuseSamples
+                                                                                    error:&genError];
+                    
+                    if (!products) {
+                        NSLog(@"  Failed to generate environment maps: %@", genError.localizedDescription);
+                        continue;
                     }
-                    [blit endEncoding];
-                    [cmd commit];
-                    [cmd waitUntilCompleted];
-                    return dst;
-                };
-                
-                // Save environment cubemap
-                NSString *envPath = [outputDir stringByAppendingPathComponent:
-                                     [NSString stringWithFormat:@"%@_env.ktx", baseName]];
-                NSLog(@"  Saving environment cubemap...");
-                id<MTLTexture> sharedEnv = copyToShared(products.environment);
-                if (saveCubemapKTX(sharedEnv, envPath.UTF8String)) {
-                    NSLog(@"  Saved: %@", envPath);
-                }
-                
-                // Save irradiance cubemap
-                NSString *irrPath = [outputDir stringByAppendingPathComponent:
-                                     [NSString stringWithFormat:@"%@_irradiance.ktx", baseName]];
-                NSLog(@"  Saving irradiance cubemap...");
-                id<MTLTexture> sharedIrr = copyToShared(products.irradiance);
-                if (saveCubemapKTX(sharedIrr, irrPath.UTF8String)) {
-                    NSLog(@"  Saved: %@", irrPath);
-                }
-                
-                // Save prefiltered cubemap
-                NSString *pfPath = [outputDir stringByAppendingPathComponent:
-                                    [NSString stringWithFormat:@"%@_prefiltered.ktx", baseName]];
-                NSLog(@"  Saving prefiltered cubemap (%lu mip levels)...", (unsigned long)products.mipLevelCount);
-                id<MTLTexture> sharedPf = copyToShared(products.prefiltered);
-                if (saveCubemapKTX(sharedPf, pfPath.UTF8String)) {
-                    NSLog(@"  Saved: %@", pfPath);
+                    
+                    // Copy textures to shared storage for saving
+                    auto copyToShared = ^id<MTLTexture>(id<MTLTexture> src) {
+                        MTLTextureDescriptor *desc = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:src.pixelFormat
+                                                                                                           size:src.width
+                                                                                                      mipmapped:(src.mipmapLevelCount > 1)];
+                        desc.mipmapLevelCount = src.mipmapLevelCount;
+                        desc.usage = MTLTextureUsageShaderRead;
+                        desc.storageMode = MTLStorageModeShared;
+                        id<MTLTexture> dst = [device newTextureWithDescriptor:desc];
+                        
+                        id<MTLCommandBuffer> cmd = [commandQueue commandBuffer];
+                        id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+                        for (NSUInteger mip = 0; mip < src.mipmapLevelCount; ++mip) {
+                            NSUInteger mipSize = MAX(1, src.width >> mip);
+                            for (NSUInteger face = 0; face < 6; ++face) {
+                                [blit copyFromTexture:src
+                                          sourceSlice:face
+                                          sourceLevel:mip
+                                         sourceOrigin:MTLOriginMake(0, 0, 0)
+                                           sourceSize:MTLSizeMake(mipSize, mipSize, 1)
+                                            toTexture:dst
+                                     destinationSlice:face
+                                     destinationLevel:mip
+                                    destinationOrigin:MTLOriginMake(0, 0, 0)];
+                            }
+                        }
+                        [blit endEncoding];
+                        [cmd commit];
+                        [cmd waitUntilCompleted];
+                        return dst;
+                    };
+                    
+                    // Save environment cubemap
+                    NSString *envPath = [outputDir stringByAppendingPathComponent:
+                                         [NSString stringWithFormat:@"%@%@_env.ktx", baseName, level.suffix]];
+                    id<MTLTexture> sharedEnv = copyToShared(products.environment);
+                    if (saveCubemapKTX(sharedEnv, envPath.UTF8String)) {
+                        NSLog(@"    Saved: %@", envPath);
+                    }
+                    
+                    // Save irradiance cubemap
+                    NSString *irrPath = [outputDir stringByAppendingPathComponent:
+                                         [NSString stringWithFormat:@"%@%@_irradiance.ktx", baseName, level.suffix]];
+                    id<MTLTexture> sharedIrr = copyToShared(products.irradiance);
+                    if (saveCubemapKTX(sharedIrr, irrPath.UTF8String)) {
+                        NSLog(@"    Saved: %@", irrPath);
+                    }
+                    
+                    // Save prefiltered cubemap
+                    NSString *pfPath = [outputDir stringByAppendingPathComponent:
+                                        [NSString stringWithFormat:@"%@%@_prefiltered.ktx", baseName, level.suffix]];
+                    id<MTLTexture> sharedPf = copyToShared(products.prefiltered);
+                    if (saveCubemapKTX(sharedPf, pfPath.UTF8String)) {
+                        NSLog(@"    Saved: %@ (%lu mips)", pfPath, (unsigned long)products.mipLevelCount);
+                    }
                 }
                 
                 NSLog(@"  Done: %@", baseName);

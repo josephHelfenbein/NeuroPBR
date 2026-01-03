@@ -57,8 +57,15 @@ class _RendererScreenState extends State<RendererScreen> {
     'the_sky_is_on_fire_8k',
   ];
 
-  // Cache for copied asset paths
-  final Map<String, Map<String, String>> _envMapPaths = {};
+  // Resolution levels for progressive loading (in order of loading)
+  // _q = quarter, _h = half, '' = full
+  static const List<String> _resolutionSuffixes = ['_q', '_h', ''];
+  
+  // Cache for copied asset paths: envMapName -> suffix -> {environment, irradiance, prefiltered}
+  final Map<String, Map<String, Map<String, String>>> _envMapPaths = {};
+  
+  // Track current loaded resolution level per environment (index into _resolutionSuffixes)
+  final Map<String, int> _currentResolutionLevel = {};
   
   final List<String> _defaultTextures = [
     'albedo.png',
@@ -139,11 +146,11 @@ class _RendererScreenState extends State<RendererScreen> {
     for (final texName in _defaultTextures) {
       try {
         final file = File('${tempDir.path}/$texName');
-        // Always overwrite to ensure fresh assets during dev, or check exists for prod
-        // For now, we'll overwrite if it doesn't exist or just overwrite.
-        // Let's overwrite to be safe.
-        final byteData = await rootBundle.load('assets/default_tex/$texName');
-        await file.writeAsBytes(byteData.buffer.asUint8List());
+        // Only copy if file doesn't already exist (cached)
+        if (!await file.exists()) {
+          final byteData = await rootBundle.load('assets/default_tex/$texName');
+          await file.writeAsBytes(byteData.buffer.asUint8List());
+        }
         _texturePaths[texName] = file.path;
       } catch (e) {
         debugPrint('Failed to copy texture $texName: $e');
@@ -333,62 +340,140 @@ class _RendererScreenState extends State<RendererScreen> {
   Future<void> _prepareEnvMaps() async {
     final tempDir = await getTemporaryDirectory();
     
-    // Copy BRDF LUT first (shared across all environments)
-    try {
-      final brdfByteData = await rootBundle.load('assets/env_maps/brdf_lut.ktx');
-      final brdfFile = File('${tempDir.path}/brdf_lut.ktx');
-      await brdfFile.writeAsBytes(brdfByteData.buffer.asUint8List());
-      _brdfLutPath = brdfFile.path;
-    } catch (e) {
-      debugPrint('Failed to copy BRDF LUT: $e');
+    // Helper to copy asset if it doesn't already exist
+    Future<String?> copyAssetIfNeeded(String assetPath, String destPath) async {
+      final destFile = File(destPath);
+      if (await destFile.exists()) {
+        return destPath;
+      }
+      try {
+        final byteData = await rootBundle.load(assetPath);
+        await destFile.writeAsBytes(byteData.buffer.asUint8List());
+        return destPath;
+      } catch (e) {
+        debugPrint('Failed to copy asset $assetPath: $e');
+        return null;
+      }
     }
     
-    // Copy environment map files for each environment
-    for (final envMap in _availableEnvMaps) {
-      try {
-        final paths = <String, String>{};
-        
-        // Environment cubemap
-        final envByteData = await rootBundle.load('assets/env_maps/${envMap}_env.ktx');
-        final envFile = File('${tempDir.path}/${envMap}_env.ktx');
-        await envFile.writeAsBytes(envByteData.buffer.asUint8List());
-        paths['environment'] = envFile.path;
-        
-        // Irradiance cubemap
-        final irrByteData = await rootBundle.load('assets/env_maps/${envMap}_irradiance.ktx');
-        final irrFile = File('${tempDir.path}/${envMap}_irradiance.ktx');
-        await irrFile.writeAsBytes(irrByteData.buffer.asUint8List());
-        paths['irradiance'] = irrFile.path;
-        
-        // Prefiltered cubemap
-        final pfByteData = await rootBundle.load('assets/env_maps/${envMap}_prefiltered.ktx');
-        final pfFile = File('${tempDir.path}/${envMap}_prefiltered.ktx');
-        await pfFile.writeAsBytes(pfByteData.buffer.asUint8List());
-        paths['prefiltered'] = pfFile.path;
-        
-        _envMapPaths[envMap] = paths;
-      } catch (e) {
-        debugPrint('Failed to copy environment maps for $envMap: $e');
+    // Copy BRDF LUT first (shared across all environments)
+    final brdfDestPath = '${tempDir.path}/brdf_lut.ktx';
+    _brdfLutPath = await copyAssetIfNeeded('assets/env_maps/brdf_lut.ktx', brdfDestPath);
+    
+    // Prepare only the lowest resolution of current environment for fast initial load
+    await _prepareEnvMapResolution(_currentEnvMap, '_q', tempDir.path);
+  }
+  
+  /// Prepare a specific resolution level of an environment map
+  Future<bool> _prepareEnvMapResolution(String envMap, String suffix, String tempPath) async {
+    // Initialize the structure if needed
+    _envMapPaths[envMap] ??= {};
+    
+    // Skip if this resolution already prepared
+    if (_envMapPaths[envMap]!.containsKey(suffix)) {
+      return true;
+    }
+    
+    // Helper to copy asset if it doesn't already exist
+    Future<String?> copyAssetIfNeeded(String assetPath, String destPath) async {
+      final destFile = File(destPath);
+      if (await destFile.exists()) {
+        return destPath;
       }
+      try {
+        final byteData = await rootBundle.load(assetPath);
+        await destFile.writeAsBytes(byteData.buffer.asUint8List());
+        return destPath;
+      } catch (e) {
+        // Asset may not exist (e.g., _q version not generated yet)
+        return null;
+      }
+    }
+    
+    try {
+      final paths = <String, String>{};
+      
+      // Environment cubemap
+      final envPath = await copyAssetIfNeeded(
+        'assets/env_maps/${envMap}${suffix}_env.ktx',
+        '$tempPath/${envMap}${suffix}_env.ktx',
+      );
+      if (envPath != null) paths['environment'] = envPath;
+      
+      // Irradiance cubemap
+      final irrPath = await copyAssetIfNeeded(
+        'assets/env_maps/${envMap}${suffix}_irradiance.ktx',
+        '$tempPath/${envMap}${suffix}_irradiance.ktx',
+      );
+      if (irrPath != null) paths['irradiance'] = irrPath;
+      
+      // Prefiltered cubemap
+      final pfPath = await copyAssetIfNeeded(
+        'assets/env_maps/${envMap}${suffix}_prefiltered.ktx',
+        '$tempPath/${envMap}${suffix}_prefiltered.ktx',
+      );
+      if (pfPath != null) paths['prefiltered'] = pfPath;
+      
+      if (paths.length == 3) {
+        _envMapPaths[envMap]![suffix] = paths;
+        return true;
+      }
+      return false;
+    } catch (e) {
+      debugPrint('Failed to prepare environment maps for $envMap$suffix: $e');
+      return false;
     }
   }
 
   Future<void> _loadEnvironment(String envMapName) async {
-    final paths = _envMapPaths[envMapName];
-    if (paths == null) {
-      debugPrint('Environment maps not found for $envMapName');
-      return;
-    }
+    final tempDir = await getTemporaryDirectory();
+    final tempPath = tempDir.path;
     
-    await _renderer.setEnvironment(NeuropbrEnvironment(
-      environmentPath: paths['environment'],
-      irradiancePath: paths['irradiance'],
-      prefilteredPath: paths['prefiltered'],
-      brdfPath: _brdfLutPath,
-    ));
+    // Reset resolution level for this environment
+    _currentResolutionLevel[envMapName] = -1;
     
-    if (_isInitialized) {
-      _renderer.renderFrame('default_mat');
+    // Try to load resolutions progressively, starting with lowest
+    for (int i = 0; i < _resolutionSuffixes.length; i++) {
+      final suffix = _resolutionSuffixes[i];
+      
+      // For first resolution (quarter), load synchronously for fast display
+      // For higher resolutions, check if we're still on this environment
+      if (i > 0 && _currentEnvMap != envMapName) {
+        debugPrint('Environment changed, stopping progressive load for $envMapName');
+        return;
+      }
+      
+      // Prepare this resolution level
+      final prepared = await _prepareEnvMapResolution(envMapName, suffix, tempPath);
+      
+      if (prepared) {
+        final paths = _envMapPaths[envMapName]?[suffix];
+        if (paths != null && paths.length == 3) {
+          // Only update if this is still the current environment
+          if (_currentEnvMap == envMapName && i > (_currentResolutionLevel[envMapName] ?? -1)) {
+            _currentResolutionLevel[envMapName] = i;
+            
+            await _renderer.setEnvironment(NeuropbrEnvironment(
+              environmentPath: paths['environment'],
+              irradiancePath: paths['irradiance'],
+              prefilteredPath: paths['prefiltered'],
+              brdfPath: _brdfLutPath,
+            ));
+            
+            if (_isInitialized) {
+              _renderer.renderFrame('default_mat');
+              debugPrint('Loaded $envMapName at resolution ${suffix.isEmpty ? "full" : suffix}');
+            }
+          }
+        }
+      }
+      
+      // If first resolution loaded successfully and we have more to load,
+      // continue loading in the background but yield to let UI update
+      if (i == 0 && _isInitialized) {
+        // Small delay to let the UI update with the low-res version
+        await Future.delayed(const Duration(milliseconds: 16));
+      }
     }
   }
 
