@@ -78,6 +78,50 @@ from models.gan.discriminator import PatchGANDiscriminator as ConfigurablePatchG
 from utils.dataset import get_dataloader
 
 
+def denormalize_target(target: Dict[str, torch.Tensor], mean: List[float], std: List[float]) -> Dict[str, torch.Tensor]:
+    """
+    Denormalize target PBR maps from normalized space back to [0, 1].
+    
+    The dataset applies transforms.Normalize(mean, std) which converts [0,1] to normalized space.
+    Model outputs are in [0,1] via sigmoid, so we need targets in the same space for loss computation.
+    
+    EXCEPTION: Normal maps should NOT be denormalized because:
+    - Dataset normalization (0.5, 0.5) converts RGB encoding [0,1] to actual normal vectors [-1,1]
+    - Model outputs F.normalize() which gives unit vectors in [-1,1]
+    - So both pred and target normals are already in [-1,1] space
+    
+    Args:
+        target: Dict with keys albedo, roughness, metallic, normal - all normalized
+        mean: Normalization mean (typically [0.5, 0.5, 0.5])
+        std: Normalization std (typically [0.5, 0.5, 0.5])
+    
+    Returns:
+        Dict with albedo/roughness/metallic in [0,1], normal stays in [-1,1]
+    """
+    result = {}
+    for name, tensor in target.items():
+        # Skip normal - it should stay as actual normal vectors in [-1,1]
+        # The dataset normalization already converted RGB encoding to true normals
+        if name == "normal":
+            result[name] = tensor
+            continue
+            
+        device = tensor.device
+        dtype = tensor.dtype
+        
+        # Handle single-channel (roughness, metallic) vs multi-channel (albedo)
+        if tensor.shape[1] == 1:
+            mean_t = torch.tensor([mean[0]], device=device, dtype=dtype).view(1, 1, 1, 1)
+            std_t = torch.tensor([std[0]], device=device, dtype=dtype).view(1, 1, 1, 1)
+        else:
+            mean_t = torch.tensor(mean, device=device, dtype=dtype).view(1, -1, 1, 1)
+            std_t = torch.tensor(std, device=device, dtype=dtype).view(1, -1, 1, 1)
+        
+        result[name] = tensor * std_t + mean_t
+    
+    return result
+
+
 class MultiViewPBRGenerator(nn.Module):
     """
     Multi-view fusion generator for PBR map prediction.
@@ -530,13 +574,20 @@ class Trainer:
             input_renders = input_renders.to(self.device)
             pbr_maps = pbr_maps.to(self.device)
             
-            # Prepare ground truth
-            target = {
+            # Prepare ground truth (still normalized)
+            target_normalized = {
                 "albedo": pbr_maps[:, 0],  # (B, 3, H, W)
                 "roughness": pbr_maps[:, 1, 0:1],  # (B, 1, H, W) - take only R channel
                 "metallic": pbr_maps[:, 2, 0:1],  # (B, 1, H, W)
                 "normal": pbr_maps[:, 3]  # (B, 3, H, W)
             }
+            
+            # Denormalize targets to [0,1] to match model sigmoid outputs
+            target = denormalize_target(
+                target_normalized,
+                self.config.transform.mean,
+                self.config.transform.std
+            )
             
             # ==================== Train Discriminator ====================
             d_loss_val = 0.0
@@ -690,28 +741,34 @@ class Trainer:
             input_renders = input_renders.to(self.device)
             pbr_maps = pbr_maps.to(self.device)
             
-            target = {
+            # Prepare ground truth (still normalized)
+            target_normalized = {
                 "albedo": pbr_maps[:, 0],
                 "roughness": pbr_maps[:, 1, 0:1],
                 "metallic": pbr_maps[:, 2, 0:1],
                 "normal": pbr_maps[:, 3]
             }
             
+            # Denormalize targets to [0,1] to match model sigmoid outputs
+            target = denormalize_target(
+                target_normalized,
+                self.config.transform.mean,
+                self.config.transform.std
+            )
+            
             # Forward
             pred_pbr = self.generator(input_renders)
             
-            # Loss (without GAN)
+            # Loss (without GAN) - now both pred and target are in [0,1]
             _, loss_info = self.criterion(pred_pbr, target, discriminator=None)
             
             total_loss += loss_info["loss_total"]
             
-            # Compute metrics (denormalize targets to [0,1] to match predictions)
+            # Compute metrics (both pred and target now in [0,1])
             batch_metrics = compute_pbr_metrics(
-                pred_pbr, target, 
+                pred_pbr, target,
                 include_angular=True,
-                denorm_target=True,
-                mean=self.config.transform.mean,
-                std=self.config.transform.std
+                denorm_target=False  # Already denormalized above
             )
             for key, val in batch_metrics.items():
                 if key not in all_metrics:

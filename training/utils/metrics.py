@@ -205,9 +205,12 @@ def compute_pbr_metrics(
     metrics = {}
     
     # Optionally denormalize targets to match prediction range [0, 1]
+    # NOTE: Skip normal - dataset normalization converts RGB encoding to actual normals,
+    # and model outputs F.normalize which is also in [-1,1]. So normals match already.
     if denorm_target:
         target = {
-            k: denormalize(v, mean, std) for k, v in target.items()
+            k: (denormalize(v, mean, std) if k != "normal" else v) 
+            for k, v in target.items()
         }
     
     # Metrics for each map type
