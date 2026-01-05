@@ -106,6 +106,11 @@ class LossConfig:
     w_roughness: float = 1.0
     w_metallic: float = 1.0
     w_normal_map: float = 1.0
+    
+    # Sample-aware metallic boost: multiplier for metallic loss on samples
+    # that actually have metallic content (GT > 0.1). Compensates for ~80%
+    # non-metallic samples where pred=target=0 gives zero gradient.
+    metallic_boost: float = 10.0
 
     # GAN loss type
     gan_loss_type: Literal["hinge", "bce"] = "hinge"

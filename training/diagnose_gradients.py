@@ -90,8 +90,10 @@ def main():
         "w_roughness": config.loss.w_roughness,
         "w_metallic": config.loss.w_metallic,
         "w_normal_map": config.loss.w_normal_map,
-        "gan_loss_type": "hinge"
+        "gan_loss_type": "hinge",
+        "metallic_boost": getattr(config.loss, 'metallic_boost', 10.0)
     }
+    print(f"\n  metallic_boost: {loss_config['metallic_boost']}")
     criterion = HybridLoss(loss_config).to(device)
     
     # Load one batch
@@ -240,33 +242,72 @@ def main():
         status = " ← ZERO!" if g < 1e-10 else ""
         print(f"    {name}: {g:.2e}{status}")
     
-    # Also check F.normalize gradient
+    # Search for a metallic sample to test gradient on
     print("\n" + "="*60)
-    print("F.normalize GRADIENT TEST")
+    print("SEARCHING FOR METALLIC SAMPLE")
     print("="*60)
     
-    # Test if gradient flows through F.normalize when input is [0,0,1]
-    test_input = torch.tensor([[[[0.0, 0.0, 1.0]]]], device=device, requires_grad=True).permute(0, 3, 1, 2)
-    test_target = torch.tensor([[[[0.707, 0.707, 0.0]]]], device=device).permute(0, 3, 1, 2)
+    metallic_sample_idx = None
+    for i in range(min(100, len(dataset))):
+        _, targets_check = dataset[i]
+        metallic_gt = targets_check[2, 0:1]  # metallic channel
+        metallic_denorm = metallic_gt * 0.5 + 0.5
+        if metallic_denorm.max() > 0.1:
+            metallic_sample_idx = i
+            print(f"  Found metallic sample at index {i}: max={metallic_denorm.max().item():.4f}")
+            break
     
-    normalized = F.normalize(test_input, p=2, dim=1, eps=1e-6)
-    test_loss = F.l1_loss(normalized, test_target)
-    test_loss.backward()
-    
-    print(f"  Input [0,0,1], Target [0.707, 0.707, 0]:")
-    print(f"  Normalized output: {normalized.squeeze().tolist()}")
-    print(f"  Loss: {test_loss.item():.4f}")
-    print(f"  Gradient on input: {test_input.grad.squeeze().tolist()}")
-    
-    grad_norm = test_input.grad.norm().item()
-    if grad_norm < 1e-8:
-        print(f"  ← GRADIENT IS NEAR ZERO! F.normalize may be blocking gradients for [0,0,1] input")
+    if metallic_sample_idx is not None:
+        print(f"\n  Testing gradient on metallic sample {metallic_sample_idx}:")
+        inputs_m, targets_m = dataset[metallic_sample_idx]
+        inputs_m = inputs_m.unsqueeze(0).to(device)
+        targets_m = targets_m.unsqueeze(0).to(device)
+        
+        target_m_dict = {
+            "albedo": targets_m[:, 0],
+            "roughness": targets_m[:, 1, 0:1],
+            "metallic": targets_m[:, 2, 0:1],
+            "normal": targets_m[:, 3]
+        }
+        target_m = denormalize_target(target_m_dict, config.transform.mean, config.transform.std)
+        
+        print(f"    GT metallic: min={target_m['metallic'].min():.4f}, max={target_m['metallic'].max():.4f}, std={target_m['metallic'].std():.4f}")
+        
+        model.zero_grad()
+        outputs_m = model(inputs_m)
+        loss_m, info_m = criterion(outputs_m, target_m)
+        loss_m.backward()
+        
+        print(f"    Pred metallic: min={outputs_m['metallic'].min():.4f}, max={outputs_m['metallic'].max():.4f}")
+        print(f"    l1_metallic: {info_m.get('l1_metallic', 'N/A')}")
+        print(f"    metallic_boosted: {info_m.get('metallic_boosted', False)}")
+        
+        for name, param in model.named_parameters():
+            if 'head' in name.lower() and '2' in name:
+                if param.grad is not None:
+                    g = param.grad.norm().item()
+                    status = " ← ZERO!" if g < 1e-8 else " ← GOOD!" if g > 1e-4 else ""
+                    print(f"    {name}: grad_norm={g:.2e}{status}")
     else:
-        print(f"  ← Gradient looks OK (norm={grad_norm:.2e})")
+        print("  No metallic samples found in first 100 samples!")
     
     print("\n" + "="*60)
     print("DIAGNOSIS SUMMARY")
     print("="*60)
+    print("""
+The key finding: when target metallic is 0 and model outputs ~0, the L1 loss
+is 0 and gradients are 0. The model never learns to output non-zero metallic.
+
+FIX APPLIED: Sample-aware metallic boost
+- When a sample HAS metallic content (GT max > 0.1), its loss is multiplied by 10x
+- This ensures metallic samples generate meaningful gradients
+- Non-metallic samples still have ~0 loss (which is correct)
+
+To use the fix:
+1. Restart training from scratch (epoch 0) - the collapsed heads need fresh init
+2. Use config with metallic_boost=10.0 (now added to no_gan_stable.py)
+3. Monitor l1_metallic in logs - it should be non-zero for ~20% of batches
+""")
 
 
 if __name__ == "__main__":

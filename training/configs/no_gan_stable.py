@@ -76,6 +76,11 @@ def get_config():
     config.loss.w_roughness = 1.0
     config.loss.w_metallic = 3.0     # Heavy boost - minority class
     config.loss.w_normal_map = 2.5   # Heavy boost - critical for shading
+    
+    # Sample-aware metallic boost: when a sample HAS metallic content (GT > 0.1),
+    # multiply that sample's metallic loss by this factor. This compensates for
+    # the ~80% non-metallic samples where pred=target=0 gives zero gradient.
+    config.loss.metallic_boost = 10.0
 
     # ========== Data (2048×2048 native resolution) ==========
     config.data.image_size = (2048, 2048)   # Input resolution

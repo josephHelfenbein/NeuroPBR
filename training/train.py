@@ -434,7 +434,8 @@ class Trainer:
             "w_roughness": self.config.loss.w_roughness,
             "w_metallic": self.config.loss.w_metallic,
             "w_normal_map": self.config.loss.w_normal_map,
-            "gan_loss_type": self.config.loss.gan_loss_type
+            "gan_loss_type": self.config.loss.gan_loss_type,
+            "metallic_boost": getattr(self.config.loss, 'metallic_boost', 10.0)
         }
         return HybridLoss(loss_config).to(self.device)
     
