@@ -427,10 +427,16 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
         loaded_heads = [k for k in head_keys if k not in load_result.missing_keys]
         if verbose:
             print(f"    Output head keys in checkpoint: {len(head_keys)}")
-            print(f"    Sample head keys: {head_keys[:3]}...")
-            # Check normal head specifically
-            normal_head_keys = [k for k in head_keys if 'normal' in k]
-            print(f"    Normal head keys: {normal_head_keys}")
+            print(f"    Head keys: {sorted(head_keys)}")
+            # Check which head indices exist (heads.0 = albedo, heads.1 = roughness, heads.2 = metallic, heads.3 = normal)
+            head_indices = set()
+            for k in head_keys:
+                if 'heads.' in k:
+                    parts = k.split('heads.')
+                    if len(parts) > 1:
+                        idx = parts[1].split('.')[0]
+                        head_indices.add(idx)
+            print(f"    Head indices found: {sorted(head_indices)} (expect 0,1,2,3 for albedo,roughness,metallic,normal)")
         
         model.eval()
         
