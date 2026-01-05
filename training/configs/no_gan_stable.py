@@ -118,8 +118,8 @@ def get_config():
     config.training.gan_start_epoch = 999  # Never
     config.training.d_steps_per_g_step = 0
 
-    # Checkpointing
-    config.training.save_every_n_epochs = 5
+    # Checkpointing - save every epoch for early validation
+    config.training.save_every_n_epochs = 1
     config.training.save_best_only = False
 
     # Logging

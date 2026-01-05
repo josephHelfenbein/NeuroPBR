@@ -215,6 +215,28 @@ class UNetDecoderHeads(nn.Module):
             self.heads.append(
                 nn.Conv2d(64, out_channel, kernel_size=1)
             )
+        
+        # Initialize output heads to prevent saturation
+        # Heads 0,1,2 use sigmoid → init bias to 0 so sigmoid(0)=0.5 (middle of range)
+        # Head 3 uses F.normalize → standard init is fine
+        self._init_heads()
+    
+    def _init_heads(self):
+        """Initialize output heads to prevent early saturation.
+        
+        For sigmoid outputs (albedo, roughness, metallic), we want initial outputs
+        around 0.5 to avoid gradient vanishing. This means:
+        - Weights should be small (so pre-activation is close to 0)
+        - Bias should be 0 (so sigmoid(0) = 0.5)
+        
+        For normal (head 3), standard init works since F.normalize handles it.
+        """
+        for i, head in enumerate(self.heads):
+            # Small weights to keep pre-activation near 0
+            nn.init.normal_(head.weight, mean=0.0, std=0.01)
+            if head.bias is not None:
+                # Bias = 0 means sigmoid output starts at 0.5
+                nn.init.zeros_(head.bias)
 
     def forward(self, x, skips):
         reversed_skips = skips[::-1]
