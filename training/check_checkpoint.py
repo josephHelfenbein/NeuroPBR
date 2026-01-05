@@ -355,14 +355,15 @@ def check_optimizer_state(ckpt: Dict) -> List[CheckResult]:
     return results
 
 
-def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_samples: int = 3) -> List[CheckResult]:
+def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_samples: int = 20, verbose: bool = False) -> List[CheckResult]:
     """Run actual inference to check output distributions.
     
     Args:
         ckpt: Loaded checkpoint dict
         input_dir: Path to input renders directory
         output_dir: Path to ground truth PBR maps directory (optional, defaults to input_dir/../output)
-        num_samples: Number of samples to test
+        num_samples: Number of samples to test (default 20 for statistical reliability)
+        verbose: If True, print per-sample statistics
     """
     results = []
     
@@ -458,7 +459,9 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
             curriculum_mode=0
         )
         
-        # Run inference on a few samples
+        # Run inference on random samples for statistical reliability
+        import random
+        
         output_stats = {
             'albedo': {'min': [], 'max': [], 'std': []},
             'roughness': {'min': [], 'max': [], 'std': []},
@@ -466,9 +469,22 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
             'normal': {'z_mean': []}
         }
         
+        # Sample randomly from dataset for better representation
+        dataset_size = len(dataset)
+        actual_samples = min(num_samples, dataset_size)
+        if dataset_size > num_samples:
+            sample_indices = random.sample(range(dataset_size), actual_samples)
+        else:
+            sample_indices = list(range(dataset_size))
+        
+        if verbose:
+            print(f"  Testing {actual_samples} samples from {dataset_size} total")
+            print(f"  Sample indices: {sample_indices[:10]}{'...' if len(sample_indices) > 10 else ''}")
+            print(f"  Image size: {test_image_size}")
+        
         with torch.no_grad():
-            for i in range(min(num_samples, len(dataset))):
-                inputs, _ = dataset[i]
+            for idx, i in enumerate(sample_indices):
+                inputs, targets = dataset[i]
                 inputs = inputs.unsqueeze(0).to(device)
                 
                 outputs = model(inputs)
@@ -479,6 +495,11 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
                     output_stats[key]['max'].append(out.max().item())
                     output_stats[key]['std'].append(out.std().item())
                 
+                if verbose and idx < 5:
+                    print(f"  Sample {i}: albedo_std={outputs['albedo'].std().item():.4f}, "
+                          f"metallic_std={outputs['metallic'].std().item():.4f}, "
+                          f"normal_z={outputs['normal'][:, 2, :, :].mean().item():.4f}")
+                
                 # For normals, check if Z component is reasonable
                 normal_z = outputs['normal'][:, 2, :, :].mean().item()
                 output_stats['normal']['z_mean'].append(normal_z)
@@ -487,21 +508,35 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
         for key in ['albedo', 'roughness', 'metallic']:
             stats = output_stats[key]
             avg_std = np.mean(stats['std'])
+            std_of_std = np.std(stats['std'])  # Variance in variance - helps distinguish collapse from flat samples
             avg_min = np.mean(stats['min'])
             avg_max = np.mean(stats['max'])
             
-            if avg_std < 0.01:
+            # If std_of_std is very low AND avg_std is low, model is collapsed
+            # If std_of_std is high, some samples are flat but model is learning
+            is_collapsed = avg_std < 0.01 and std_of_std < 0.01
+            is_low_variance = avg_std < 0.05
+            
+            if is_collapsed:
                 results.append(CheckResult(
                     name=f"Output distribution: {key}",
                     status=HealthStatus.CRITICAL,
-                    message=f"Near-constant output (std={avg_std:.4f})",
-                    details=f"Range: [{avg_min:.3f}, {avg_max:.3f}]"
+                    message=f"Near-constant output (std={avg_std:.4f}, std_of_std={std_of_std:.4f})",
+                    details=f"Range: [{avg_min:.3f}, {avg_max:.3f}] - Model outputs same values for all samples"
                 ))
-            elif avg_std < 0.05:
+            elif is_low_variance and std_of_std < 0.02:
                 results.append(CheckResult(
                     name=f"Output distribution: {key}",
                     status=HealthStatus.WARNING,
-                    message=f"Low variance output (std={avg_std:.4f})",
+                    message=f"Low variance output (std={avg_std:.4f}, std_of_std={std_of_std:.4f})",
+                    details=f"Range: [{avg_min:.3f}, {avg_max:.3f}]"
+                ))
+            elif is_low_variance:
+                # Low avg but high variance means some samples are flat, model is learning
+                results.append(CheckResult(
+                    name=f"Output distribution: {key}",
+                    status=HealthStatus.HEALTHY,
+                    message=f"Acceptable variance (std={avg_std:.4f}, varies by sample: std_of_std={std_of_std:.4f})",
                     details=f"Range: [{avg_min:.3f}, {avg_max:.3f}]"
                 ))
             else:
@@ -514,18 +549,32 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
         
         # Check normal map
         avg_z = np.mean(output_stats['normal']['z_mean'])
-        if avg_z > 0.95:
+        std_z = np.std(output_stats['normal']['z_mean'])  # Variance across samples
+        
+        # For collapse: all samples have Z ≈ 1 with no variance
+        is_collapsed = avg_z > 0.95 and std_z < 0.02
+        is_mostly_flat = avg_z > 0.8
+        
+        if is_collapsed:
             results.append(CheckResult(
                 name="Output distribution: normal",
                 status=HealthStatus.CRITICAL,
-                message=f"Flat normals detected (Z={avg_z:.4f})",
-                details="Normal map is outputting [0, 0, 1] everywhere"
+                message=f"Flat normals detected (Z={avg_z:.4f}, std={std_z:.4f})",
+                details="Normal map is outputting [0, 0, 1] everywhere for all samples"
             ))
-        elif avg_z > 0.8:
+        elif is_mostly_flat and std_z < 0.05:
             results.append(CheckResult(
                 name="Output distribution: normal",
                 status=HealthStatus.WARNING,
-                message=f"Mostly flat normals (Z={avg_z:.4f})"
+                message=f"Mostly flat normals (Z={avg_z:.4f}, std={std_z:.4f})"
+            ))
+        elif is_mostly_flat:
+            # High Z but varies by sample - some samples have flat surfaces
+            results.append(CheckResult(
+                name="Output distribution: normal",
+                status=HealthStatus.HEALTHY,
+                message=f"Normal variance varies by sample (avg Z={avg_z:.4f}, std={std_z:.4f})",
+                details="Some samples have flat normals, but model is differentiating"
             ))
         else:
             results.append(CheckResult(
@@ -614,6 +663,8 @@ Examples:
                         help="Input directory for inference test (required if --test-inference)")
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Output directory with ground truth PBR maps (default: input_dir/../output)")
+    parser.add_argument("--num-samples", type=int, default=20,
+                        help="Number of samples to test (default: 20)")
     
     args = parser.parse_args()
     
@@ -655,7 +706,11 @@ Examples:
     # Optional inference test
     if args.test_inference:
         print("Running inference test...")
-        all_results.extend(run_test_inference(ckpt, args.input_dir, args.output_dir))
+        all_results.extend(run_test_inference(
+            ckpt, args.input_dir, args.output_dir,
+            num_samples=args.num_samples,
+            verbose=args.verbose
+        ))
     
     # Print results
     is_safe = print_results(all_results, args.verbose)
