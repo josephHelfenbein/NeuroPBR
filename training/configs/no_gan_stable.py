@@ -64,14 +64,18 @@ def get_config():
     # ========== Loss (rebalanced for no-GAN) ==========
     config.loss.w_l1 = 1.0
     config.loss.w_ssim = 0.5       # Bumped from 0.3 - helps preserve structure
-    config.loss.w_normal = 0.7    # Bumped from 0.5 - normals need extra attention
+    config.loss.w_normal = 1.5    # Strong emphasis on normal angular loss
     config.loss.w_gan = 0.0       # No GAN
 
-    # Per-map weights (slightly emphasize normal to compensate for no GAN)
+    # Per-map L1 weights
+    # Metallic and normal need heavy boost because:
+    # - Metallic: ~80% of materials are non-metallic, so constant 0 minimizes L1
+    # - Normal: flat [0,0,1] is a "safe" output for smooth surfaces
+    # Without boosting, these heads don't learn
     config.loss.w_albedo = 1.0
     config.loss.w_roughness = 1.0
-    config.loss.w_metallic = 1.0
-    config.loss.w_normal_map = 1.2  # Extra emphasis on normal reconstruction
+    config.loss.w_metallic = 3.0     # Heavy boost - minority class
+    config.loss.w_normal_map = 2.5   # Heavy boost - critical for shading
 
     # ========== Data (2048×2048 native resolution) ==========
     config.data.image_size = (2048, 2048)   # Input resolution
