@@ -482,10 +482,17 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
             print(f"  Sample indices: {sample_indices[:10]}{'...' if len(sample_indices) > 10 else ''}")
             print(f"  Image size: {test_image_size}")
         
+        # Also track ground truth stats for comparison
+        gt_stats = {
+            'metallic': {'min': [], 'max': [], 'std': []},
+            'normal': {'z_mean': []}
+        }
+        
         with torch.no_grad():
             for idx, i in enumerate(sample_indices):
                 inputs, targets = dataset[i]
                 inputs = inputs.unsqueeze(0).to(device)
+                targets = targets.unsqueeze(0).to(device)
                 
                 outputs = model(inputs)
                 
@@ -495,14 +502,38 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
                     output_stats[key]['max'].append(out.max().item())
                     output_stats[key]['std'].append(out.std().item())
                 
+                # Track ground truth for metallic and normal
+                # Targets are normalized [-1, 1], denormalize to [0, 1] for comparison
+                gt_metallic = targets[:, 2, 0:1, :, :]  # metallic is channel 2
+                gt_metallic_denorm = gt_metallic * 0.5 + 0.5  # denormalize
+                gt_stats['metallic']['std'].append(gt_metallic_denorm.std().item())
+                
+                # Ground truth normal (channel 3)
+                gt_normal = targets[:, 3, :, :, :]  # shape [1, 3, H, W]
+                # Normals in dataset are normalized RGB, need to convert to actual normals
+                gt_normal_denorm = gt_normal * 0.5 + 0.5  # [0, 1]
+                gt_normal_vec = gt_normal_denorm * 2.0 - 1.0  # [-1, 1]
+                gt_normal_z = gt_normal_vec[:, 2, :, :].mean().item()
+                gt_stats['normal']['z_mean'].append(gt_normal_z)
+                
                 if verbose and idx < 5:
-                    print(f"  Sample {i}: albedo_std={outputs['albedo'].std().item():.4f}, "
-                          f"metallic_std={outputs['metallic'].std().item():.4f}, "
-                          f"normal_z={outputs['normal'][:, 2, :, :].mean().item():.4f}")
+                    print(f"  Sample {i}: pred_albedo_std={outputs['albedo'].std().item():.4f}, "
+                          f"pred_metallic_std={outputs['metallic'].std().item():.4f}, "
+                          f"pred_normal_z={outputs['normal'][:, 2, :, :].mean().item():.4f}")
+                    print(f"            gt_metallic_std={gt_metallic_denorm.std().item():.4f}, "
+                          f"gt_normal_z={gt_normal_z:.4f}")
                 
                 # For normals, check if Z component is reasonable
                 normal_z = outputs['normal'][:, 2, :, :].mean().item()
                 output_stats['normal']['z_mean'].append(normal_z)
+        
+        # Print ground truth summary if verbose
+        if verbose:
+            print(f"\n  Ground truth summary:")
+            print(f"    metallic std: avg={np.mean(gt_stats['metallic']['std']):.4f}, "
+                  f"std_of_std={np.std(gt_stats['metallic']['std']):.4f}")
+            print(f"    normal Z: avg={np.mean(gt_stats['normal']['z_mean']):.4f}, "
+                  f"std={np.std(gt_stats['normal']['z_mean']):.4f}")
         
         # Analyze output statistics
         for key in ['albedo', 'roughness', 'metallic']:
