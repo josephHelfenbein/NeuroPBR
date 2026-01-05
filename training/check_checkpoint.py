@@ -436,6 +436,16 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
                 message=f"Could not find output directory: {output_path}"
             )]
         
+        # Get image size from config or use sensible default
+        # Use full resolution if we have enough VRAM, otherwise a smaller size
+        # that still works with the architecture
+        config_image_size = getattr(config.data, 'image_size', (2048, 2048))
+        
+        # For inference test, use the model's native resolution
+        # Downscaling can cause architecture mismatches
+        test_image_size = config_image_size
+        test_output_size = getattr(config.data, 'output_size', config_image_size)
+        
         # Create dataset
         dataset = PBRDataset(
             input_dir=str(input_path),
@@ -443,8 +453,8 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
             metadata_path=str(metadata_path),
             transform_mean=[0.5, 0.5, 0.5],
             transform_std=[0.5, 0.5, 0.5],
-            image_size=(512, 512),  # Use smaller size for quick test
-            output_size=(512, 512),
+            image_size=test_image_size,
+            output_size=test_output_size,
             curriculum_mode=0
         )
         
