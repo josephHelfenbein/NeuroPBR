@@ -402,7 +402,36 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
             name = k.replace('_orig_mod.', '').replace('module.', '')
             new_state_dict[name] = v
         
-        model.load_state_dict(new_state_dict, strict=False)
+        # Check for missing/unexpected keys
+        model_keys = set(model.state_dict().keys())
+        ckpt_keys = set(new_state_dict.keys())
+        missing = model_keys - ckpt_keys
+        unexpected = ckpt_keys - model_keys
+        
+        if verbose and (missing or unexpected):
+            print(f"  State dict loading:")
+            if missing:
+                print(f"    Missing keys ({len(missing)}): {list(missing)[:5]}...")
+            if unexpected:
+                print(f"    Unexpected keys ({len(unexpected)}): {list(unexpected)[:5]}...")
+        
+        load_result = model.load_state_dict(new_state_dict, strict=False)
+        if verbose:
+            if load_result.missing_keys:
+                print(f"    PyTorch reports missing: {load_result.missing_keys[:5]}...")
+            if load_result.unexpected_keys:
+                print(f"    PyTorch reports unexpected: {load_result.unexpected_keys[:5]}...")
+        
+        # Verify output heads specifically
+        head_keys = [k for k in new_state_dict.keys() if 'heads' in k or 'head' in k]
+        loaded_heads = [k for k in head_keys if k not in load_result.missing_keys]
+        if verbose:
+            print(f"    Output head keys in checkpoint: {len(head_keys)}")
+            print(f"    Sample head keys: {head_keys[:3]}...")
+            # Check normal head specifically
+            normal_head_keys = [k for k in head_keys if 'normal' in k]
+            print(f"    Normal head keys: {normal_head_keys}")
+        
         model.eval()
         
         # Load a few samples
