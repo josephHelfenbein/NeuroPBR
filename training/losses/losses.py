@@ -23,17 +23,13 @@ class WeightedL1Loss(nn.Module):
     """Weighted L1 loss across multiple prediction targets.
     
     For metallic, uses sample-aware weighting: if a sample has ANY metallic pixels,
-    the metallic loss for that sample is boosted significantly to compensate for
-    the ~80% non-metallic samples in the dataset where pred=target=0 gives zero gradient.
-    
-    Also includes variance regularization to prevent collapse to constant outputs.
+    the metallic loss for that sample is boosted to compensate for the ~80% 
+    non-metallic samples in the dataset where pred=target=0 gives zero gradient.
     """
-    def __init__(self, weights: Dict[str, float], metallic_boost: float = 10.0, 
-                 variance_reg_weight: float = 0.1):
+    def __init__(self, weights: Dict[str, float], metallic_boost: float = 5.0):
         super().__init__()
         self.weights = weights
         self.metallic_boost = metallic_boost  # Boost for samples that ARE metallic
-        self.variance_reg_weight = variance_reg_weight  # Penalize low variance outputs
 
     def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
         total_loss = 0.0
@@ -43,8 +39,6 @@ class WeightedL1Loss(nn.Module):
             if weight > 0 and name in pred and name in target:
                 # Special handling for metallic to address class imbalance
                 if name == "metallic":
-                    # Check if this sample has any metallic regions (target > threshold)
-                    # Use per-sample loss with adaptive weighting
                     pred_m = pred[name]
                     target_m = target[name]
                     
@@ -54,6 +48,7 @@ class WeightedL1Loss(nn.Module):
                     # Check if target has metallic content (max > 0.1 means it's metallic)
                     batch_size = target_m.shape[0]
                     sample_losses = []
+                    has_any_metallic = False
                     
                     for b in range(batch_size):
                         sample_target = target_m[b]
@@ -62,24 +57,13 @@ class WeightedL1Loss(nn.Module):
                         # If this sample has metallic regions, boost its loss
                         has_metallic = sample_target.max() > 0.1
                         if has_metallic:
-                            # Boost metallic samples to compensate for class imbalance
                             sample_l1 = sample_l1 * self.metallic_boost
+                            has_any_metallic = True
                             
                         sample_losses.append(sample_l1)
                     
                     l1 = torch.stack(sample_losses).mean()
-                    loss_dict["metallic_boosted"] = any(target[name][b].max() > 0.1 for b in range(batch_size))
-                    
-                    # Variance regularization: penalize if metallic output has near-zero variance
-                    # This prevents collapse to constant 0 by encouraging the model to use its
-                    # full output range. Only apply if target has variance (is metallic sample)
-                    pred_std = pred_m.std()
-                    target_std = target_m.std()
-                    if target_std > 0.01:  # Only for metallic samples
-                        # Encourage pred variance to match target variance
-                        variance_loss = torch.abs(pred_std - target_std)
-                        l1 = l1 + self.variance_reg_weight * variance_loss
-                        loss_dict["metallic_var_reg"] = variance_loss.item()
+                    loss_dict["metallic_boosted"] = has_any_metallic
                 else:
                     l1 = F.l1_loss(pred[name], target[name])
                 

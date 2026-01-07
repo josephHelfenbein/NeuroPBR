@@ -229,14 +229,24 @@ class UNetDecoderHeads(nn.Module):
         - Weights should be small (so pre-activation is close to 0)
         - Bias should be 0 (so sigmoid(0) = 0.5)
         
-        For normal (head 3), standard init works since F.normalize handles it.
+        For normal (head 3), we need to avoid the degenerate [0,0,1] direction.
+        Initialize with more variance and random biases to start at varied normals.
         """
         for i, head in enumerate(self.heads):
-            # Small weights to keep pre-activation near 0
-            nn.init.normal_(head.weight, mean=0.0, std=0.01)
-            if head.bias is not None:
-                # Bias = 0 means sigmoid output starts at 0.5
-                nn.init.zeros_(head.bias)
+            if i == 3:  # Normal head
+                # Normal head needs different init to avoid collapse to [0,0,1]
+                # Use larger std and varied bias so F.normalize produces varied normals
+                nn.init.normal_(head.weight, mean=0.0, std=0.1)  # 10x larger std
+                if head.bias is not None:
+                    # Random bias in range [-0.5, 0.5] for each channel
+                    # This ensures initial output is not [0,0,0] which normalizes to [0,0,1]
+                    nn.init.uniform_(head.bias, -0.5, 0.5)
+            else:  # Albedo, roughness, metallic heads
+                # Small weights to keep pre-activation near 0
+                nn.init.normal_(head.weight, mean=0.0, std=0.01)
+                if head.bias is not None:
+                    # Bias = 0 means sigmoid output starts at 0.5
+                    nn.init.zeros_(head.bias)
 
     def forward(self, x, skips):
         reversed_skips = skips[::-1]

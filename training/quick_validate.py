@@ -27,7 +27,7 @@ def main():
     parser.add_argument("checkpoint", type=str, help="Path to checkpoint")
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default=None)
-    parser.add_argument("--config", type=str, default="configs/no_gan_stable.py")
+    parser.add_argument("--config", type=str, default="configs/ultra_stable.py")
     args = parser.parse_args()
     
     sys.path.insert(0, str(Path(__file__).parent))
@@ -94,11 +94,16 @@ def main():
     print(f"{'='*60}")
     
     # Test on 10 random samples
-    metallic_stds = []
-    metallic_grads = []
-    
     import random
     indices = random.sample(range(len(dataset)), min(10, len(dataset)))
+    
+    # Track stats for all heads
+    stats = {
+        'metallic': {'std': [], 'grad': []},
+        'roughness': {'std': [], 'grad': []},
+        'normal': {'z': [], 'grad': []},
+        'albedo': {'std': [], 'grad': []}
+    }
     
     for i in indices:
         inputs, targets_raw = dataset[i]
@@ -116,29 +121,47 @@ def main():
         model.zero_grad()
         outputs = model(inputs)
         
-        metallic_std = outputs['metallic'].std().item()
-        metallic_stds.append(metallic_std)
+        # Collect output stats
+        stats['metallic']['std'].append(outputs['metallic'].std().item())
+        stats['roughness']['std'].append(outputs['roughness'].std().item())
+        stats['albedo']['std'].append(outputs['albedo'].std().item())
+        stats['normal']['z'].append(outputs['normal'][:, 2, :, :].mean().item())
         
         # Compute gradient
         loss, _ = criterion(outputs, target)
         loss.backward()
         
+        # Collect gradient stats for each head
         for name, param in model.named_parameters():
-            if 'heads.2.weight' in name and param.grad is not None:
-                metallic_grads.append(param.grad.norm().item())
-                break
+            if param.grad is not None:
+                if 'heads.0.weight' in name:
+                    stats['albedo']['grad'].append(param.grad.norm().item())
+                elif 'heads.1.weight' in name:
+                    stats['roughness']['grad'].append(param.grad.norm().item())
+                elif 'heads.2.weight' in name:
+                    stats['metallic']['grad'].append(param.grad.norm().item())
+                elif 'heads.3.weight' in name:
+                    stats['normal']['grad'].append(param.grad.norm().item())
     
-    avg_std = np.mean(metallic_stds)
-    max_std = np.max(metallic_stds)
-    avg_grad = np.mean(metallic_grads) if metallic_grads else 0
-    max_grad = np.max(metallic_grads) if metallic_grads else 0
+    print(f"\n{'='*60}")
+    print("OUTPUT STATISTICS")
+    print(f"{'='*60}")
     
-    print(f"\nMetallic Output Statistics:")
-    print(f"  Average std:  {avg_std:.6f}")
-    print(f"  Max std:      {max_std:.6f}")
-    print(f"\nMetallic Gradient Statistics:")
-    print(f"  Average grad: {avg_grad:.2e}")
-    print(f"  Max grad:     {max_grad:.2e}")
+    for head in ['albedo', 'roughness', 'metallic']:
+        avg_std = np.mean(stats[head]['std'])
+        avg_grad = np.mean(stats[head]['grad']) if stats[head]['grad'] else 0
+        print(f"\n{head.upper()}:")
+        print(f"  Output std: {avg_std:.6f}")
+        print(f"  Gradient:   {avg_grad:.2e}")
+    
+    # Normal uses Z-component instead of std
+    avg_z = np.mean(stats['normal']['z'])
+    std_z = np.std(stats['normal']['z'])
+    avg_grad = np.mean(stats['normal']['grad']) if stats['normal']['grad'] else 0
+    print(f"\nNORMAL:")
+    print(f"  Avg Z:      {avg_z:.4f} (1.0 = flat, want < 0.95)")
+    print(f"  Std Z:      {std_z:.4f} (want > 0.01)")
+    print(f"  Gradient:   {avg_grad:.2e}")
     
     print(f"\n{'='*60}")
     print("VERDICT:")
@@ -146,28 +169,44 @@ def main():
     
     is_healthy = True
     
-    if avg_std < 0.001:
-        print("  ✗ CRITICAL: Metallic output variance near zero (collapsed)")
-        print("    → Model is outputting constant values, not learning")
+    # Check metallic
+    metallic_std = np.mean(stats['metallic']['std'])
+    if metallic_std < 0.001:
+        print("  ✗ CRITICAL: Metallic collapsed (std ≈ 0)")
         is_healthy = False
-    elif avg_std < 0.01:
-        print("  ⚠ WARNING: Low metallic variance, may be collapsing")
-        print(f"    → avg_std={avg_std:.6f}, should be > 0.01")
+    elif metallic_std < 0.01:
+        print(f"  ⚠ WARNING: Low metallic variance (std={metallic_std:.4f})")
     else:
-        print(f"  ✓ GOOD: Metallic has healthy variance ({avg_std:.4f})")
+        print(f"  ✓ Metallic OK (std={metallic_std:.4f})")
     
-    if avg_grad < 1e-7:
-        print("  ✗ CRITICAL: Metallic gradients near zero")
-        print("    → Gradients not flowing, training will not improve metallic")
+    # Check roughness
+    roughness_std = np.mean(stats['roughness']['std'])
+    if roughness_std < 0.001:
+        print("  ✗ CRITICAL: Roughness collapsed (std ≈ 0)")
         is_healthy = False
-    elif avg_grad < 1e-5:
-        print("  ⚠ WARNING: Small metallic gradients")
-        print(f"    → avg_grad={avg_grad:.2e}, may learn slowly")
+    elif roughness_std < 0.01:
+        print(f"  ⚠ WARNING: Low roughness variance (std={roughness_std:.4f})")
     else:
-        print(f"  ✓ GOOD: Metallic gradients healthy ({avg_grad:.2e})")
+        print(f"  ✓ Roughness OK (std={roughness_std:.4f})")
+    
+    # Check normal
+    if avg_z > 0.99 and std_z < 0.01:
+        print(f"  ✗ CRITICAL: Normal collapsed to flat (Z={avg_z:.4f})")
+        is_healthy = False
+    elif avg_z > 0.95:
+        print(f"  ⚠ WARNING: Normal mostly flat (Z={avg_z:.4f})")
+    else:
+        print(f"  ✓ Normal OK (Z={avg_z:.4f})")
+    
+    # Check albedo
+    albedo_std = np.mean(stats['albedo']['std'])
+    if albedo_std < 0.01:
+        print(f"  ⚠ WARNING: Low albedo variance (std={albedo_std:.4f})")
+    else:
+        print(f"  ✓ Albedo OK (std={albedo_std:.4f})")
     
     if is_healthy:
-        print("\n  → Continue training, metallic head is learning!")
+        print("\n  → All heads learning, continue training!")
     else:
         print("\n  → ABORT training and investigate!")
     
