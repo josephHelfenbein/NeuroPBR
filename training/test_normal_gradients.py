@@ -147,5 +147,5 @@ def test_normal_head_gradients():
     return True
 
 if __name__ == "__main__":
-    success = test_normal_gradients()
+    success = test_normal_head_gradients()
     sys.exit(0 if success else 1)
