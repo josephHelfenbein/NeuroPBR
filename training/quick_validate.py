@@ -28,6 +28,8 @@ def main():
     parser.add_argument("--input-dir", type=str, required=True)
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--config", type=str, default="configs/ultra_stable.py")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU (use when GPU is busy with training)")
+    parser.add_argument("--small", action="store_true", help="Use smaller image size (512x512) for memory efficiency")
     args = parser.parse_args()
     
     sys.path.insert(0, str(Path(__file__).parent))
@@ -47,7 +49,18 @@ def main():
     else:
         config = TrainConfig()
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Override image size for memory efficiency if requested
+    if args.small:
+        config.data.image_size = (512, 512)
+        config.data.output_size = (512, 512)
+        print("Using reduced image size: 512x512")
+    
+    # Device selection
+    if args.cpu:
+        device = torch.device("cpu")
+        print("Using CPU (slower but won't conflict with training)")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load model
     model = MultiViewPBRGenerator(config).to(device)
