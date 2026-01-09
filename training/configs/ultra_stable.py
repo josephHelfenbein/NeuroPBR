@@ -48,14 +48,14 @@ def get_config():
     # ========== Loss (conservative, balanced) ==========
     config.loss.w_l1 = 1.0
     config.loss.w_ssim = 0.3       # Lower SSIM weight for stability
-    config.loss.w_normal = 1.0     # Moderate normal loss
+    config.loss.w_normal = 2.0     # INCREASED: Normal angular loss (was 1.0)
     config.loss.w_gan = 0.0
 
-    # Per-map L1 weights - BALANCED, no aggressive boosting
+    # Per-map L1 weights - boost normals significantly
     config.loss.w_albedo = 1.0
     config.loss.w_roughness = 1.0
     config.loss.w_metallic = 1.5   # Slight boost only
-    config.loss.w_normal_map = 1.5 # Slight boost only
+    config.loss.w_normal_map = 3.0 # INCREASED: Normal L1 loss (was 1.5)
     
     # Moderate metallic sample boost (5x instead of 10x)
     config.loss.metallic_boost = 5.0

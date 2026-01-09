@@ -218,7 +218,7 @@ class UNetDecoderHeads(nn.Module):
         
         # Initialize output heads to prevent saturation
         # Heads 0,1,2 use sigmoid → init bias to 0 so sigmoid(0)=0.5 (middle of range)
-        # Head 3 uses F.normalize → standard init is fine
+        # Head 3 uses tanh → normalize → needs diverse starting directions
         self._init_heads()
     
     def _init_heads(self):
@@ -229,18 +229,22 @@ class UNetDecoderHeads(nn.Module):
         - Weights should be small (so pre-activation is close to 0)
         - Bias should be 0 (so sigmoid(0) = 0.5)
         
-        For normal (head 3), we need to avoid the degenerate [0,0,1] direction.
-        Initialize with more variance and random biases to start at varied normals.
+        For normal (head 3), we use tanh → normalize, so we need:
+        - Larger weights to push tanh away from linear region (where all outputs similar)
+        - Varied biases to ensure X,Y,Z channels start different
+        This prevents collapse to [0,0,1] by ensuring diverse starting directions.
         """
         for i, head in enumerate(self.heads):
-            if i == 3:  # Normal head
-                # Normal head needs different init to avoid collapse to [0,0,1]
-                # Use larger std and varied bias so F.normalize produces varied normals
-                nn.init.normal_(head.weight, mean=0.0, std=0.1)  # 10x larger std
+            if i == 3:  # Normal head (uses tanh → normalize)
+                # Larger std pushes tanh into saturation region for some pixels
+                # This creates spatial variance in the normal map
+                nn.init.normal_(head.weight, mean=0.0, std=0.5)  # Much larger std
                 if head.bias is not None:
-                    # Random bias in range [-0.5, 0.5] for each channel
-                    # This ensures initial output is not [0,0,0] which normalizes to [0,0,1]
-                    nn.init.uniform_(head.bias, -0.5, 0.5)
+                    # Bias X,Y to non-zero values to break [0,0,1] symmetry
+                    # X and Y should have some activation, Z can vary
+                    head.bias.data[0] = 0.3   # X bias
+                    head.bias.data[1] = 0.3   # Y bias  
+                    head.bias.data[2] = 0.5   # Z bias (slightly higher for surface normals)
             else:  # Albedo, roughness, metallic heads
                 # Small weights to keep pre-activation near 0
                 nn.init.normal_(head.weight, mean=0.0, std=0.01)

@@ -259,7 +259,12 @@ class MultiViewPBRGenerator(nn.Module):
         albedo = torch.sigmoid(albedo)  # [0, 1]
         roughness = torch.sigmoid(roughness)  # [0, 1]
         metallic = torch.sigmoid(metallic)  # [0, 1]
-        normal = F.normalize(normal, p=2, dim=1, eps=1e-6)  # Normalized vector (eps for stability)
+        
+        # Normal activation: use tanh for stable gradients, then normalize
+        # F.normalize alone has gradient issues when input is near-zero or uniform
+        # tanh bounds to [-1,1] first, giving stable gradient flow
+        normal = torch.tanh(normal)  # Bound to [-1, 1] with stable gradients
+        normal = F.normalize(normal, p=2, dim=1, eps=1e-6)  # Then normalize to unit length
         
         return {
             "albedo": albedo,
