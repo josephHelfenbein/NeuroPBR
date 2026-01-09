@@ -54,8 +54,17 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
     state_dict = ckpt.get('generator_state_dict', ckpt.get('model_state_dict', {}))
     new_state_dict = {k.replace('_orig_mod.', '').replace('module.', ''): v for k, v in state_dict.items()}
-    model.load_state_dict(new_state_dict, strict=False)
-    model.train()
+    
+    # Check for loading issues
+    load_result = model.load_state_dict(new_state_dict, strict=False)
+    if load_result.missing_keys:
+        print(f"⚠️  Missing keys: {load_result.missing_keys[:10]}{'...' if len(load_result.missing_keys) > 10 else ''}")
+    if load_result.unexpected_keys:
+        print(f"⚠️  Unexpected keys: {load_result.unexpected_keys[:10]}{'...' if len(load_result.unexpected_keys) > 10 else ''}")
+    
+    # CRITICAL: Use eval mode for inference to get correct BatchNorm behavior
+    # train() mode with batch_size=1 causes bizarre statistics
+    model.eval()
     
     # Load dataset
     input_path = Path(args.input_dir)
@@ -118,18 +127,23 @@ def main():
         }
         target = denormalize_target(target, config.transform.mean, config.transform.std)
         
+        # Forward in eval mode for correct BatchNorm stats
+        model.eval()
         model.zero_grad()
-        outputs = model(inputs)
         
-        # Collect output stats
-        stats['metallic']['std'].append(outputs['metallic'].std().item())
-        stats['roughness']['std'].append(outputs['roughness'].std().item())
-        stats['albedo']['std'].append(outputs['albedo'].std().item())
-        stats['normal']['z'].append(outputs['normal'][:, 2, :, :].mean().item())
-        
-        # Compute gradient
-        loss, _ = criterion(outputs, target)
-        loss.backward()
+        # Enable gradients for this forward pass
+        with torch.enable_grad():
+            outputs = model(inputs)
+            
+            # Collect output stats
+            stats['metallic']['std'].append(outputs['metallic'].std().item())
+            stats['roughness']['std'].append(outputs['roughness'].std().item())
+            stats['albedo']['std'].append(outputs['albedo'].std().item())
+            stats['normal']['z'].append(outputs['normal'][:, 2, :, :].mean().item())
+            
+            # Compute gradient
+            loss, _ = criterion(outputs, target)
+            loss.backward()
         
         # Collect gradient stats for each head
         for name, param in model.named_parameters():
