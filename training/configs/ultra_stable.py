@@ -59,6 +59,11 @@ def get_config():
     
     # Moderate metallic sample boost (5x instead of 10x)
     config.loss.metallic_boost = 5.0
+    
+    # Variance matching: penalize when pred variance < target variance
+    # This prevents mode collapse where model outputs constant values
+    # Applied to roughness and normal maps
+    config.loss.w_variance_match = 5.0  # Strong variance enforcement
 
     # ========== Data ==========
     config.data.image_size = (2048, 2048)

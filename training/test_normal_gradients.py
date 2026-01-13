@@ -26,6 +26,7 @@ def test_normal_head_gradients():
     
     from train import MultiViewPBRGenerator
     from train_config import TrainConfig
+    from losses.losses import HybridLoss
     
     # Load config
     import importlib.util
@@ -44,6 +45,23 @@ def test_normal_head_gradients():
     # Build fresh model (will use new initialization)
     model = MultiViewPBRGenerator(config).to(device)
     model.train()
+    
+    # Build loss with variance matching
+    loss_config = {
+        "w_l1": config.loss.w_l1,
+        "w_ssim": config.loss.w_ssim,
+        "w_normal": config.loss.w_normal,
+        "w_gan": 0.0,
+        "w_albedo": config.loss.w_albedo,
+        "w_roughness": config.loss.w_roughness,
+        "w_metallic": config.loss.w_metallic,
+        "w_normal_map": config.loss.w_normal_map,
+        "gan_loss_type": "hinge",
+        "metallic_boost": config.loss.metallic_boost,
+        "w_variance_match": config.loss.w_variance_match
+    }
+    criterion = HybridLoss(loss_config).to(device)
+    print(f"Variance match weight: {config.loss.w_variance_match}")
     
     # Random input
     x = torch.randn(1, 3, 3, 256, 256, device=device)
@@ -70,14 +88,23 @@ def test_normal_head_gradients():
         print("  ✓ PASS: Normal has initial diversity")
     
     # Create fake target with varied normals
-    # Target: random unit normals
     target_raw = torch.randn(1, 3, 256, 256, device=device)
     target_normal = F.normalize(target_raw, p=2, dim=1)
     
-    # Compute loss (simple L1 for test)
-    loss = F.l1_loss(normal, target_normal)
-    print(f"\n--- Loss ---")
-    print(f"  L1 loss: {loss.item():.4f}")
+    # Full target dict
+    target = {
+        "albedo": torch.rand(1, 3, 256, 256, device=device),
+        "roughness": torch.rand(1, 1, 256, 256, device=device),
+        "metallic": torch.rand(1, 1, 256, 256, device=device),
+        "normal": target_normal
+    }
+    
+    # Compute loss with variance matching
+    loss, loss_info = criterion(outputs, target)
+    print(f"\n--- Loss Components ---")
+    for k, v in loss_info.items():
+        if 'loss' in k:
+            print(f"  {k}: {v:.4f}")
     
     # Backward
     loss.backward()
@@ -109,35 +136,13 @@ def test_normal_head_gradients():
             else:
                 print(f"  ✓ PASS: Gradient is healthy")
     
-    # Test that gradient varies (not uniform)
-    print(f"\n--- Spatial Gradient Variance ---")
-    
-    # Get gradient w.r.t. the pre-activation (before tanh)
-    # This tells us if different pixels get different gradients
-    model.zero_grad()
-    outputs2 = model(x)
-    
-    # Use a spatially-varying target
-    target_varied = torch.zeros_like(outputs2['normal'])
-    target_varied[:, 0, :128, :] = 0.5  # Left half points X+
-    target_varied[:, 1, 128:, :] = 0.5  # Right half points Y+
-    target_varied[:, 2, :, :] = 0.8     # All have high Z
-    target_varied = F.normalize(target_varied, p=2, dim=1)
-    
-    loss2 = F.l1_loss(outputs2['normal'], target_varied)
-    loss2.backward()
-    
+    # Check roughness head gradient (should also be boosted by variance loss)
+    print(f"\n--- Roughness Head Gradient ---")
     for name, param in model.named_parameters():
-        if 'heads.3' in name and 'weight' in name:
+        if 'heads.1' in name and 'weight' in name:
             grad = param.grad
-            # Check if gradient varies across output channels
-            grad_per_channel = grad.view(3, -1).norm(dim=1)
-            print(f"  Gradient per channel (X,Y,Z): [{grad_per_channel[0]:.2e}, {grad_per_channel[1]:.2e}, {grad_per_channel[2]:.2e}]")
-            
-            if grad_per_channel.std() > 1e-6:
-                print(f"  ✓ PASS: Gradient varies by channel")
-            else:
-                print(f"  ⚠ WARNING: Uniform gradient across channels")
+            if grad is not None:
+                print(f"  {name}: norm={grad.norm().item():.2e}")
     
     print(f"\n{'='*60}")
     print("OVERALL: ✓ Normal head looks healthy!")

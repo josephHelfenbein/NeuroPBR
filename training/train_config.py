@@ -111,6 +111,11 @@ class LossConfig:
     # that actually have metallic content (GT > 0.1). Compensates for ~80%
     # non-metallic samples where pred=target=0 gives zero gradient.
     metallic_boost: float = 10.0
+    
+    # Variance matching loss weight: penalizes when prediction variance is lower
+    # than target variance. Prevents mode collapse where model outputs constants.
+    # Applied to roughness and normal. Set to 0 to disable.
+    w_variance_match: float = 0.0
 
     # GAN loss type
     gan_loss_type: Literal["hinge", "bce"] = "hinge"

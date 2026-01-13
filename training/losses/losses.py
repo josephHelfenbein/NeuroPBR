@@ -236,6 +236,26 @@ class HybridLoss(nn.Module):
         self.normal_loss = NormalConsistencyLoss()
         
         self.gan_loss_type = config.get("gan_loss_type", "hinge")
+        
+        # Penalize when pred variance differs from target variance
+        self.w_variance_match = config.get("w_variance_match", 0.0)
+
+    def _variance_matching_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Penalize when prediction variance is lower than target variance.
+        This prevents mode collapse where model outputs constant values.
+        
+        Only penalizes when pred_var < target_var (we want diversity, not forcing noise).
+        """
+        # Compute spatial variance per sample
+        pred_var = pred.var(dim=(-2, -1), keepdim=True).mean()
+        target_var = target.var(dim=(-2, -1), keepdim=True).mean()
+        
+        # Only penalize if pred variance is LESS than target (one-sided)
+        # This encourages matching target diversity without forcing noise
+        variance_gap = F.relu(target_var - pred_var)
+        
+        return variance_gap
 
     def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor],
                 discriminator: Optional[nn.Module] = None) -> Tuple[torch.Tensor, Dict]:
@@ -261,6 +281,17 @@ class HybridLoss(nn.Module):
             total_loss += w_normal * normal_loss
             info["loss_normal"] = normal_loss.item()
             info["normal_angle_deg"] = angle_deg
+        
+        # Variance matching loss to prevent mode collapse
+        if self.w_variance_match > 0:
+            var_loss = 0.0
+            for key in ["roughness", "normal"]:
+                if key in pred and key in target:
+                    vl = self._variance_matching_loss(pred[key], target[key])
+                    var_loss += vl
+                    info[f"loss_var_{key}"] = vl.item()
+            total_loss += self.w_variance_match * var_loss
+            info["loss_variance_total"] = var_loss.item() if isinstance(var_loss, torch.Tensor) else var_loss
         
         w_gan = self.config.get("w_gan", 0.0)
         if w_gan > 0 and discriminator is not None:

@@ -440,7 +440,8 @@ class Trainer:
             "w_metallic": self.config.loss.w_metallic,
             "w_normal_map": self.config.loss.w_normal_map,
             "gan_loss_type": self.config.loss.gan_loss_type,
-            "metallic_boost": getattr(self.config.loss, 'metallic_boost', 10.0)
+            "metallic_boost": getattr(self.config.loss, 'metallic_boost', 10.0),
+            "w_variance_match": getattr(self.config.loss, 'w_variance_match', 0.0)
         }
         return HybridLoss(loss_config).to(self.device)
     
@@ -867,9 +868,18 @@ class Trainer:
         latest_path = checkpoint_dir / "latest.pth"
         torch.save(checkpoint, latest_path)
     
-    def load_checkpoint(self, checkpoint_path: str):
-        """Load checkpoint."""
+    def load_checkpoint(self, checkpoint_path: str, reset_optimizer: bool = False):
+        """Load checkpoint.
+        
+        Args:
+            checkpoint_path: Path to checkpoint file
+            reset_optimizer: If True, only load model weights (not optimizer state).
+                           Useful for fine-tuning with new loss functions.
+        """
         print(f"Loading checkpoint: {checkpoint_path}")
+        if reset_optimizer:
+            print("  → Resetting optimizer (only loading model weights)")
+        
         try:
             with torch.serialization.safe_globals([TrainConfig]):
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
@@ -877,14 +887,20 @@ class Trainer:
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         
         self.generator.load_state_dict(checkpoint["generator_state_dict"])
-        self.g_optimizer.load_state_dict(checkpoint["g_optimizer_state_dict"])
         
-        if self.discriminator and "discriminator_state_dict" in checkpoint:
-            self.discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
-            self.d_optimizer.load_state_dict(checkpoint["d_optimizer_state_dict"])
-        
-        if self.scaler and "scaler_state_dict" in checkpoint:
-            self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        if not reset_optimizer:
+            self.g_optimizer.load_state_dict(checkpoint["g_optimizer_state_dict"])
+            
+            if self.discriminator and "discriminator_state_dict" in checkpoint:
+                self.discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
+                self.d_optimizer.load_state_dict(checkpoint["d_optimizer_state_dict"])
+            
+            if self.scaler and "scaler_state_dict" in checkpoint:
+                self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+        else:
+            # Load discriminator weights even when resetting optimizer
+            if self.discriminator and "discriminator_state_dict" in checkpoint:
+                self.discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
         
         self.current_epoch = min(checkpoint["epoch"] + 1, self.config.training.epochs)
         self.global_step = checkpoint["global_step"]
@@ -1126,7 +1142,8 @@ def main(args):
     # Resume if specified
     if args.resume or config.training.resume_from:
         checkpoint_path = args.resume or config.training.resume_from
-        trainer.load_checkpoint(checkpoint_path)
+        reset_opt = getattr(args, 'reset_optimizer', False)
+        trainer.load_checkpoint(checkpoint_path, reset_optimizer=reset_opt)
     
     # Train
     trainer.train(train_loader, val_loader)
@@ -1160,6 +1177,8 @@ if __name__ == "__main__":
                       help="Number of epochs")
     parser.add_argument("--resume", type=str, default=None,
                       help="Path to checkpoint to resume from")
+    parser.add_argument("--reset-optimizer", action="store_true",
+                      help="When resuming, only load model weights (reset optimizer). Useful for fine-tuning with new loss.")
     parser.add_argument("--checkpoint-dir", type=str, default=None,
                       help="Directory to save checkpoints")
     
