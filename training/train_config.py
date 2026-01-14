@@ -114,8 +114,13 @@ class LossConfig:
     
     # Variance matching loss weight: penalizes when prediction variance is lower
     # than target variance. Prevents mode collapse where model outputs constants.
-    # Applied to roughness and normal. Set to 0 to disable.
+    # Applied to roughness only. Set to 0 to disable.
     w_variance_match: float = 0.0
+    
+    # Normal XY magnitude loss weight: penalizes when predicted normals have
+    # smaller XY magnitude than target. Directly fights [0,0,1] collapse.
+    # Set to 0 to disable.
+    w_normal_xy: float = 0.0
 
     # GAN loss type
     gan_loss_type: Literal["hinge", "bce"] = "hinge"

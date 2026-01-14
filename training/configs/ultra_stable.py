@@ -62,8 +62,12 @@ def get_config():
     
     # Variance matching: penalize when pred variance < target variance
     # This prevents mode collapse where model outputs constant values
-    # Applied to roughness and normal maps
+    # Applied to roughness only (normals use XY loss instead)
     config.loss.w_variance_match = 5.0  # Strong variance enforcement
+    
+    # Normal XY magnitude loss: directly fights [0,0,1] collapse
+    # Penalizes when predicted normals have less surface detail than targets
+    config.loss.w_normal_xy = 10.0  # Strong XY enforcement
 
     # ========== Data ==========
     config.data.image_size = (2048, 2048)

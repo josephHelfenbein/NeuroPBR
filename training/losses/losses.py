@@ -239,6 +239,9 @@ class HybridLoss(nn.Module):
         
         # Penalize when pred variance differs from target variance
         self.w_variance_match = config.get("w_variance_match", 0.0)
+        
+        # Normal XY magnitude matching: penalize flat normals where XY is too small
+        self.w_normal_xy = config.get("w_normal_xy", 0.0)
 
     def _variance_matching_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
@@ -256,6 +259,30 @@ class HybridLoss(nn.Module):
         variance_gap = F.relu(target_var - pred_var)
         
         return variance_gap
+    
+    def _normal_xy_loss(self, pred_normal: torch.Tensor, target_normal: torch.Tensor) -> torch.Tensor:
+        """
+        Penalize when predicted normal XY magnitude is lower than target.
+        
+        This directly addresses the [0,0,1] collapse problem:
+        - Flat normals have XY ≈ 0, Z ≈ 1
+        - Textured normals have larger XY, smaller Z
+        
+        We compute per-pixel XY magnitude and penalize when pred < target.
+        """
+        # XY magnitude per pixel: sqrt(X^2 + Y^2 + eps) for numerical stability
+        eps = 1e-6
+        pred_xy = (pred_normal[:, 0:2, :, :] ** 2).sum(dim=1, keepdim=True).add(eps).sqrt()
+        target_xy = (target_normal[:, 0:2, :, :] ** 2).sum(dim=1, keepdim=True).add(eps).sqrt()
+        
+        # L1 loss on XY magnitude - encourages matching the surface detail level
+        xy_loss = F.l1_loss(pred_xy, target_xy)
+        
+        # Also add a penalty when pred XY is much smaller than target (one-sided)
+        # This specifically fights the collapse to flat
+        xy_gap = F.relu(target_xy - pred_xy).mean()
+        
+        return xy_loss + xy_gap
 
     def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor],
                 discriminator: Optional[nn.Module] = None) -> Tuple[torch.Tensor, Dict]:
@@ -282,10 +309,22 @@ class HybridLoss(nn.Module):
             info["loss_normal"] = normal_loss.item()
             info["normal_angle_deg"] = angle_deg
         
+        # Normal XY magnitude loss - specifically fights [0,0,1] collapse
+        if self.w_normal_xy > 0 and "normal" in pred and "normal" in target:
+            xy_loss = self._normal_xy_loss(pred["normal"], target["normal"])
+            total_loss += self.w_normal_xy * xy_loss
+            info["loss_normal_xy"] = xy_loss.item()
+            # Log the actual XY magnitudes for debugging (with eps for safety)
+            eps = 1e-6
+            pred_xy_mag = (pred["normal"][:, 0:2, :, :] ** 2).sum(dim=1).add(eps).sqrt().mean().item()
+            target_xy_mag = (target["normal"][:, 0:2, :, :] ** 2).sum(dim=1).add(eps).sqrt().mean().item()
+            info["pred_normal_xy_mag"] = pred_xy_mag
+            info["target_normal_xy_mag"] = target_xy_mag
+        
         # Variance matching loss to prevent mode collapse
         if self.w_variance_match > 0:
             var_loss = 0.0
-            for key in ["roughness", "normal"]:
+            for key in ["roughness"]:  # Remove normal - use XY loss instead
                 if key in pred and key in target:
                     vl = self._variance_matching_loss(pred[key], target[key])
                     var_loss += vl
