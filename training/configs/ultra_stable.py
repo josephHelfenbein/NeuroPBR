@@ -42,8 +42,11 @@ def get_config():
     config.model.decoder_type = "shared_heads"
     config.model.decoder_sr_scale = 0
 
-    # No GAN
-    config.model.use_gan = False
+    # GAN for realistic outputs
+    config.model.use_gan = True
+    config.model.discriminator_type = "configurable"
+    config.model.discriminator_n_layers = 6
+    config.model.discriminator_ndf = 64
 
     # ========== Loss (conservative, balanced) ==========
     config.loss.w_l1 = 1.0
@@ -85,6 +88,12 @@ def get_config():
     config.optimizer.g_lr = 1e-4        # LOWER LR for stability
     config.optimizer.g_betas = (0.9, 0.999)
     config.optimizer.g_weight_decay = 1e-4
+    
+    # Discriminator optimizer
+    config.optimizer.d_optimizer = "adamw"
+    config.optimizer.d_lr = 4e-5        # Lower than G for stability
+    config.optimizer.d_betas = (0.0, 0.9)  # No momentum for D
+    config.optimizer.d_weight_decay = 1e-4
 
     # Scheduler with longer warmup
     config.optimizer.scheduler = "cosine"
@@ -96,9 +105,12 @@ def get_config():
     config.training.use_amp = True
     config.training.grad_clip_norm = 0.5  # TIGHTER gradient clipping
 
-    # GAN disabled
-    config.training.gan_start_epoch = 999
-    config.training.d_steps_per_g_step = 0
+    # GAN schedule - start at epoch 35
+    config.training.gan_start_epoch = 35
+    config.training.d_steps_per_g_step = 1
+    
+    # GAN loss weight
+    config.loss.w_gan = 0.02  # Conservative GAN weight
 
     # Save every epoch for monitoring
     config.training.save_every_n_epochs = 1

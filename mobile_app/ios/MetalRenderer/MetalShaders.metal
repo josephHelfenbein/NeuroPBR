@@ -70,19 +70,16 @@ float3 applyNormalMap(float3 normalSample, float3x3 tbn) {
 }
 
 float3x3 computeTBN(float3 N, float3 p, float2 uv) {
-    // get edge vectors of the pixel triangle
     float3 dp1 = dfdx(p);
     float3 dp2 = dfdy(p);
     float2 duv1 = dfdx(uv);
     float2 duv2 = dfdy(uv);
 
-    // solve the linear system
     float3 dp2perp = cross(dp2, N);
     float3 dp1perp = cross(N, dp1);
     float3 T = dp2perp * duv1.x + dp1perp * duv2.x;
     float3 B = dp2perp * duv1.y + dp1perp * duv2.y;
 
-    // construct a scale-invariant frame 
     float invmax = rsqrt(max(dot(T,T), dot(B,B)));
     return float3x3(T * invmax, B * invmax, N);
 }
@@ -123,11 +120,9 @@ fragment float4 background_fragment(
     float fov = frame.cameraPosFov.w;
     float tanHalfFov = tan(fov * 0.5);
 
-    // Camera looks down -Z. Right is +X. Up is +Y.
     float3 rayDirCam = normalize(float3(ndc.x * aspect * tanHalfFov, ndc.y * tanHalfFov, -1.0));
     float3 rayDir = normalize((frame.cameraToWorld * float4(rayDirCam, 0.0)).xyz);
     
-    // Apply environment rotation
     float3 envDir = rotateEnv(rayDir, frame.iblParams.y);
     
     float3 color = envMap.sample(linearSampler, envDir).rgb * frame.iblParams.x;
@@ -154,7 +149,6 @@ fragment float4 pbr_fragment(
     float3 N = normalize(in.normal);
     float2 uv = in.uv * 2.0; // Tile 2x
     
-    // TBN
     float3x3 TBN = computeTBN(N, in.worldPos, uv);
 
     float3 albedo = albedoMap.sample(linearSampler, uv).rgb * material.baseTint.rgb;
@@ -162,7 +156,7 @@ fragment float4 pbr_fragment(
     float metallic = clamp(metallicMap.sample(linearSampler, uv).r * material.scalars.y, 0.0, 1.0);
 
     float3 shadingN = N;
-    float3 rawNormalMap = float3(0.5, 0.5, 1.0); // Default flat normal
+    float3 rawNormalMap = float3(0.5, 0.5, 1.0);
     if (material.featureToggle.x > 0.5) {
         float3 mapN = normalMap.sample(linearSampler, uv).rgb;
         rawNormalMap = mapN;
@@ -176,25 +170,20 @@ fragment float4 pbr_fragment(
 
     float3 F0 = mix(float3(0.04), albedo, metallic);
     
-    // Fresnel-Schlick approximation for energy conservation
     float NdotV = max(dot(shadingN, V), 0.001);
     float3 F = F0 + (1.0 - F0) * pow(1.0 - NdotV, 5.0);
 
-    // Apply environment rotation to lookup vectors
     float3 rotN = rotateEnv(shadingN, frame.iblParams.y);
     float3 rotR = rotateEnv(R, frame.iblParams.y);
 
     float3 irradiance = irradianceMap.sample(clampSampler, rotN).rgb;
     irradiance = min(irradiance, float3(100.0));
     
-    // Energy conservation: kD is reduced by Fresnel reflection and metalness
     float3 kD = (1.0 - F) * (1.0 - metallic);
     float3 diffuse = kD * irradiance * albedo / kPi;
 
-    // Map roughness to valid mip levels (0 to count-1) to avoid out-of-bounds sampling
-    // Add minimum LOD bias to reduce pixelation on bright specular highlights
     float maxLod = max(frame.iblParams.z - 1.0, 0.0);
-    float minLod = 0.5; // Slight blur to avoid harsh aliasing on shiny surfaces
+    float minLod = 0.5;
     float lod = max(roughness * maxLod, minLod);
     float3 prefiltered = prefilteredMap.sample(clampSampler, rotR, level(lod)).rgb;
     prefiltered = min(prefiltered, float3(100.0));
@@ -202,26 +191,22 @@ fragment float4 pbr_fragment(
     float2 brdf = brdfLUT.sample(clampSampler, float2(NdotV, roughness)).rg;
     brdf = clamp(brdf, float2(0.0), float2(1.0));
     
-    // Specular reflection using split-sum approximation
-    // For rough dielectrics, attenuate specular to prevent overly bright reflections
     float3 specular = prefiltered * (F0 * brdf.x + brdf.y);
     
-    // Roughness-based specular attenuation for non-metals to reduce excessive reflections
     float specularAttenuation = mix(1.0, 1.0 - roughness * 0.5, 1.0 - metallic);
     specular *= specularAttenuation;
 
     float3 color = (diffuse + specular) * frame.iblParams.x;
 
-    // Channel inspector overrides - these bypass tone mapping for accurate display
     if (material.scalars.w > 0.5) {
         if (material.scalars.w < 1.5) {
-            return float4(albedo, 1.0); // Albedo - show raw color
+            return float4(albedo, 1.0);
         } else if (material.scalars.w < 2.5) {
-            return float4(float3(roughness), 1.0); // Roughness grayscale
+            return float4(float3(roughness), 1.0);
         } else if (material.scalars.w < 3.5) {
-            return float4(float3(metallic), 1.0); // Metallic grayscale
+            return float4(float3(metallic), 1.0);
         } else {
-            return float4(rawNormalMap, 1.0); // Normal map - show raw texture
+            return float4(rawNormalMap, 1.0);
         }
     }
 

@@ -101,7 +101,6 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     identity(uniforms.cameraToWorld);
     identity(uniforms.worldToCamera);
 
-    // Calculate effective position based on zoom
     float diff[3];
     subtract(camera_.position, camera_.target, diff);
     
@@ -129,7 +128,6 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     float trueUp[3];
     cross(side, forward, trueUp);
 
-    // World To Camera (View Matrix)
     auto &view = uniforms.worldToCamera;
     view[0] = side[0];
     view[1] = trueUp[0];
@@ -151,7 +149,6 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     view[14] = forward[0] * effectivePos[0] + forward[1] * effectivePos[1] + forward[2] * effectivePos[2];
     view[15] = 1.0f;
 
-    // Camera To World (Inverse View Matrix)
     auto &invView = uniforms.cameraToWorld;
     invView[0] = side[0];
     invView[1] = side[1];
@@ -173,7 +170,6 @@ void Renderer::computeMatrices(FrameUniforms &uniforms) const {
     invView[14] = effectivePos[2];
     invView[15] = 1.0f;
 
-    // Projection Matrix
     const float aspect = config_.height == 0 ? 1.0f : static_cast<float>(config_.width) / static_cast<float>(config_.height);
     const float fovRad = camera_.fovY * (kPi / 180.0f);
     const float f = 1.0f / std::tan(fovRad * 0.5f);
