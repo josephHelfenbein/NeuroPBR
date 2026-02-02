@@ -1,6 +1,3 @@
-// GenerateEnvMaps - Command-line tool to precompute environment maps using Metal
-// Uses the same Metal shaders as the iOS app
-
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
@@ -11,7 +8,6 @@
 #include <string>
 #include <cmath>
 
-// Include the EnvironmentPrefilter from the iOS project
 #import "../../ios/MetalRenderer/EnvironmentPrefilter.h"
 
 #pragma mark - HDR Loading
@@ -153,7 +149,6 @@ HDRImage LoadHDR(const char* path) {
 
 static const uint8_t KTX_IDENTIFIER[12] = {0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A};
 
-// OpenGL constants
 static const uint32_t GL_RGBA = 0x1908;
 static const uint32_t GL_HALF_FLOAT = 0x140B;
 static const uint32_t GL_RGBA16F = 0x881A;
@@ -183,10 +178,9 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
     NSUInteger mipCount = texture.mipmapLevelCount;
     MTLPixelFormat srcFormat = texture.pixelFormat;
     
-    // Determine source format properties
     bool isFloat32 = (srcFormat == MTLPixelFormatRGBA32Float);
-    NSUInteger srcBytesPerPixel = isFloat32 ? 16 : 8; // RGBA32Float = 16, RGBA16Float = 8
-    NSUInteger dstBytesPerPixel = 8; // Always output as RGBA16Float
+    NSUInteger srcBytesPerPixel = isFloat32 ? 16 : 8;
+    NSUInteger dstBytesPerPixel = 8;
     
     std::ofstream file(path, std::ios::binary);
     if (!file) {
@@ -194,10 +188,8 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
         return false;
     }
     
-    // Write identifier
     file.write(reinterpret_cast<const char*>(KTX_IDENTIFIER), 12);
     
-    // Write header - always output as RGBA16F
     uint32_t endianness = 0x04030201;
     uint32_t glType = GL_HALF_FLOAT;
     uint32_t glTypeSize = 2;
@@ -226,12 +218,10 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
     file.write(reinterpret_cast<const char*>(&numberOfMipmapLevels), 4);
     file.write(reinterpret_cast<const char*>(&bytesOfKeyValueData), 4);
     
-    // Read back texture data and write to file
     for (NSUInteger mip = 0; mip < mipCount; ++mip) {
         NSUInteger mipSize = MAX(1, size >> mip);
         NSUInteger srcBytesPerRow = mipSize * srcBytesPerPixel;
         NSUInteger dstBytesPerRow = mipSize * dstBytesPerPixel;
-        // Align bytesPerRow to 256-byte boundary to avoid AGX warnings
         NSUInteger alignedSrcBytesPerRow = ((srcBytesPerRow + 255) / 256) * 256;
         NSUInteger dstBytesPerFace = mipSize * mipSize * dstBytesPerPixel;
         uint32_t imageSize = (uint32_t)(dstBytesPerFace * 6);
@@ -242,7 +232,6 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
         std::vector<uint8_t> faceData(dstBytesPerFace);
         
         for (NSUInteger face = 0; face < 6; ++face) {
-            // Get texture data with aligned row stride
             [texture getBytes:alignedFaceData.data()
                   bytesPerRow:alignedSrcBytesPerRow
                 bytesPerImage:alignedSrcBytesPerRow * mipSize
@@ -250,13 +239,11 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
                   mipmapLevel:mip
                         slice:face];
             
-            // Convert and copy to output buffer
             for (NSUInteger row = 0; row < mipSize; ++row) {
                 const uint8_t* srcRow = alignedFaceData.data() + row * alignedSrcBytesPerRow;
                 uint8_t* dstRow = faceData.data() + row * dstBytesPerRow;
                 
                 if (isFloat32) {
-                    // Convert RGBA32Float to RGBA16Float
                     const float* srcPixels = reinterpret_cast<const float*>(srcRow);
                     uint16_t* dstPixels = reinterpret_cast<uint16_t*>(dstRow);
                     for (NSUInteger x = 0; x < mipSize; ++x) {
@@ -266,7 +253,6 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
                         dstPixels[x * 4 + 3] = floatToHalf(srcPixels[x * 4 + 3]);
                     }
                 } else {
-                    // Already RGBA16Float, just copy
                     memcpy(dstRow, srcRow, dstBytesPerRow);
                 }
             }
@@ -274,7 +260,6 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
             file.write(reinterpret_cast<const char*>(faceData.data()), dstBytesPerFace);
         }
         
-        // Padding to 4-byte boundary
         uint32_t padding = (4 - (imageSize % 4)) % 4;
         if (padding > 0) {
             uint8_t zeros[4] = {0, 0, 0, 0};
@@ -287,9 +272,8 @@ bool saveCubemapKTX(id<MTLTexture> texture, const std::string& path) {
 
 bool saveBRDFLUT(id<MTLTexture> texture, const std::string& path) {
     NSUInteger size = texture.width;
-    NSUInteger bytesPerPixel = 4; // RG16F
+    NSUInteger bytesPerPixel = 4;
     NSUInteger bytesPerRow = size * bytesPerPixel;
-    // Align bytesPerRow to 256-byte boundary to avoid AGX warnings
     NSUInteger alignedBytesPerRow = ((bytesPerRow + 255) / 256) * 256;
     
     std::vector<uint8_t> alignedData(alignedBytesPerRow * size);
@@ -300,28 +284,24 @@ bool saveBRDFLUT(id<MTLTexture> texture, const std::string& path) {
            fromRegion:MTLRegionMake2D(0, 0, size, size)
           mipmapLevel:0];
     
-    // Copy to tightly packed buffer
     for (NSUInteger row = 0; row < size; ++row) {
         memcpy(data.data() + row * bytesPerRow,
                alignedData.data() + row * alignedBytesPerRow,
                bytesPerRow);
     }
     
-    // Save as KTX format (2D texture, single mip level)
     std::ofstream file(path, std::ios::binary);
     if (!file) {
         NSLog(@"Failed to open file for writing: %s", path.c_str());
         return false;
     }
     
-    // KTX header (same structure as cubemaps)
     uint8_t identifier[12] = {0xAB, 0x4B, 0x54, 0x58, 0x20, 0x31, 0x31, 0xBB, 0x0D, 0x0A, 0x1A, 0x0A};
     file.write(reinterpret_cast<const char*>(identifier), 12);
     
     uint32_t endianness = 0x04030201;
     file.write(reinterpret_cast<const char*>(&endianness), 4);
     
-    // OpenGL format for RG16F
     uint32_t glType = 0x140B;  // GL_HALF_FLOAT
     uint32_t glTypeSize = 2;
     uint32_t glFormat = 0x8227;  // GL_RG
@@ -350,7 +330,6 @@ bool saveBRDFLUT(id<MTLTexture> texture, const std::string& path) {
     file.write(reinterpret_cast<const char*>(&numberOfMipmapLevels), 4);
     file.write(reinterpret_cast<const char*>(&bytesOfKeyValueData), 4);
     
-    // Single mip level
     uint32_t imageSize = (uint32_t)data.size();
     file.write(reinterpret_cast<const char*>(&imageSize), 4);
     file.write(reinterpret_cast<const char*>(data.data()), data.size());
@@ -375,7 +354,6 @@ void printUsage(const char* programName) {
 
 int main(int argc, const char* argv[]) {
     @autoreleasepool {
-        // Default parameters
         NSString *inputDir = @"../assets/hdris";
         NSString *outputDir = @"../assets/env_maps";
         NSUInteger faceSize = 1024;
@@ -384,7 +362,6 @@ int main(int argc, const char* argv[]) {
         NSUInteger specularSamples = 1024;
         NSUInteger diffuseSamples = 512;
         
-        // Parse command line arguments
         for (int i = 1; i < argc; i++) {
             std::string arg = argv[i];
             if (arg == "-i" || arg == "--input") {
@@ -407,7 +384,6 @@ int main(int argc, const char* argv[]) {
             }
         }
         
-        // Resolve paths
         NSFileManager *fm = [NSFileManager defaultManager];
         NSString *cwd = [fm currentDirectoryPath];
         
@@ -424,14 +400,12 @@ int main(int argc, const char* argv[]) {
         NSLog(@"Input directory: %@", inputDir);
         NSLog(@"Output directory: %@", outputDir);
         
-        // Create output directory
         NSError *error = nil;
         if (![fm createDirectoryAtPath:outputDir withIntermediateDirectories:YES attributes:nil error:&error]) {
             NSLog(@"Failed to create output directory: %@", error.localizedDescription);
             return 1;
         }
         
-        // Find HDR files
         NSArray<NSString*> *contents = [fm contentsOfDirectoryAtPath:inputDir error:&error];
         if (!contents) {
             NSLog(@"Failed to read input directory: %@", error.localizedDescription);
@@ -452,7 +426,6 @@ int main(int argc, const char* argv[]) {
         
         NSLog(@"Found %lu HDR file(s)", (unsigned long)hdrFiles.count);
         
-        // Initialize Metal
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device) {
             NSLog(@"Metal is not supported on this device");
@@ -462,15 +435,12 @@ int main(int argc, const char* argv[]) {
         
         id<MTLCommandQueue> commandQueue = [device newCommandQueue];
         
-        // Load the Metal library from the iOS project
         NSString *metalLibPath = [[[NSBundle mainBundle] bundlePath] stringByAppendingPathComponent:@"default.metallib"];
         id<MTLLibrary> library = nil;
         
-        // Try loading from bundle first
         library = [device newDefaultLibrary];
         
         if (!library) {
-            // Try compiling the shader source directly
             NSString *shaderPath = @"../../ios/MetalRenderer/EnvironmentPrefilter.metal";
             if (![shaderPath hasPrefix:@"/"]) {
                 shaderPath = [cwd stringByAppendingPathComponent:shaderPath];
@@ -493,18 +463,15 @@ int main(int argc, const char* argv[]) {
         
         NSLog(@"Metal library loaded successfully");
         
-        // Create the prefilter
         NPBREnvironmentPrefilter *prefilter = [[NPBREnvironmentPrefilter alloc] initWithDevice:device
                                                                                        library:library
                                                                                   commandQueue:commandQueue];
         
-        // Generate and save BRDF LUT once
         NSString *brdfPath = [outputDir stringByAppendingPathComponent:@"brdf_lut.ktx"];
         if (![fm fileExistsAtPath:brdfPath]) {
             NSLog(@"Generating BRDF LUT...");
             id<MTLTexture> brdfLUT = [prefilter sharedBRDFLUT];
             if (brdfLUT) {
-                // Need to copy to shared storage for reading
                 MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:brdfLUT.pixelFormat
                                                                                                width:brdfLUT.width
                                                                                               height:brdfLUT.height
@@ -536,18 +503,16 @@ int main(int argc, const char* argv[]) {
             NSLog(@"BRDF LUT already exists: %@", brdfPath);
         }
         
-        // Process each HDR file
         MTKTextureLoader *textureLoader = [[MTKTextureLoader alloc] initWithDevice:device];
         
-        // Resolution multipliers and suffixes for progressive loading
         struct ResolutionLevel {
             float multiplier;
             NSString *suffix;
         };
         std::vector<ResolutionLevel> resolutionLevels = {
             {0.25f, @"_q"},  // Quarter resolution
-            {0.5f, @"_h"},   // Half resolution
-            {1.0f, @""}      // Full resolution
+            {0.5f, @"_h"},  // Half resolution
+            {1.0f, @""}. // Full resolution
         };
         
         for (NSString *hdrFile in hdrFiles) {
@@ -557,7 +522,6 @@ int main(int argc, const char* argv[]) {
                 
                 NSLog(@"\nProcessing: %@", baseName);
                 
-                // Load HDR image
                 NSLog(@"  Loading HDR...");
                 HDRImage hdrImage;
                 try {
@@ -568,7 +532,6 @@ int main(int argc, const char* argv[]) {
                 }
                 NSLog(@"  HDR size: %dx%d", hdrImage.width, hdrImage.height);
                 
-                // Create Metal texture from HDR
                 MTLTextureDescriptor *hdrDesc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
                                                                                                    width:hdrImage.width
                                                                                                   height:hdrImage.height
@@ -582,13 +545,11 @@ int main(int argc, const char* argv[]) {
                                 withBytes:hdrImage.pixels.data()
                               bytesPerRow:hdrImage.width * sizeof(HDRPixel)];
                 
-                // Generate environment maps at multiple resolutions for progressive loading
                 for (const auto& level : resolutionLevels) {
                     NSUInteger levelFaceSize = (NSUInteger)(faceSize * level.multiplier);
                     NSUInteger levelIrradianceSize = MAX(16, (NSUInteger)(irradianceSize * level.multiplier));
                     NSUInteger levelPrefilterSize = (NSUInteger)(prefilterSize * level.multiplier);
                     
-                    // Use fewer samples for lower resolutions (faster generation)
                     NSUInteger levelSpecularSamples = level.multiplier < 1.0f ? (NSUInteger)(specularSamples * level.multiplier) : specularSamples;
                     NSUInteger levelDiffuseSamples = level.multiplier < 1.0f ? (NSUInteger)(diffuseSamples * level.multiplier) : diffuseSamples;
                     levelSpecularSamples = MAX(64, levelSpecularSamples);
@@ -611,7 +572,6 @@ int main(int argc, const char* argv[]) {
                         continue;
                     }
                     
-                    // Copy textures to shared storage for saving
                     auto copyToShared = ^id<MTLTexture>(id<MTLTexture> src) {
                         MTLTextureDescriptor *desc = [MTLTextureDescriptor textureCubeDescriptorWithPixelFormat:src.pixelFormat
                                                                                                            size:src.width
@@ -643,7 +603,6 @@ int main(int argc, const char* argv[]) {
                         return dst;
                     };
                     
-                    // Save environment cubemap
                     NSString *envPath = [outputDir stringByAppendingPathComponent:
                                          [NSString stringWithFormat:@"%@%@_env.ktx", baseName, level.suffix]];
                     id<MTLTexture> sharedEnv = copyToShared(products.environment);
@@ -651,7 +610,6 @@ int main(int argc, const char* argv[]) {
                         NSLog(@"    Saved: %@", envPath);
                     }
                     
-                    // Save irradiance cubemap
                     NSString *irrPath = [outputDir stringByAppendingPathComponent:
                                          [NSString stringWithFormat:@"%@%@_irradiance.ktx", baseName, level.suffix]];
                     id<MTLTexture> sharedIrr = copyToShared(products.irradiance);
@@ -659,7 +617,6 @@ int main(int argc, const char* argv[]) {
                         NSLog(@"    Saved: %@", irrPath);
                     }
                     
-                    // Save prefiltered cubemap
                     NSString *pfPath = [outputDir stringByAppendingPathComponent:
                                         [NSString stringWithFormat:@"%@%@_prefiltered.ktx", baseName, level.suffix]];
                     id<MTLTexture> sharedPf = copyToShared(products.prefiltered);
