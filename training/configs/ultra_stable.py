@@ -33,10 +33,10 @@ def get_config():
     config.model.decoder_type = "shared_heads"
     config.model.decoder_sr_scale = 0
 
-    # GAN for realistic outputs
+    # GAN for realistic outputs (weakened to prevent mode collapse)
     config.model.use_gan = True
     config.model.discriminator_type = "configurable"
-    config.model.discriminator_n_layers = 6
+    config.model.discriminator_n_layers = 4
     config.model.discriminator_ndf = 64
 
     # Loss
@@ -54,6 +54,7 @@ def get_config():
     config.loss.metallic_boost = 5.0
     config.loss.w_variance_match = 5.0
     config.loss.w_normal_xy = 10.0
+    config.loss.w_color_mean = 5.0
 
     # Data
     config.data.image_size = (2048, 2048)
@@ -72,9 +73,9 @@ def get_config():
     config.optimizer.g_betas = (0.9, 0.999)
     config.optimizer.g_weight_decay = 1e-4
     
-    # Discriminator optimizer
+    # Discriminator optimizer (lower LR to reduce dominance over generator)
     config.optimizer.d_optimizer = "adamw"
-    config.optimizer.d_lr = 4e-5
+    config.optimizer.d_lr = 2e-5
     config.optimizer.d_betas = (0.0, 0.9)
     config.optimizer.d_weight_decay = 1e-4
 
@@ -92,8 +93,8 @@ def get_config():
     config.training.gan_start_epoch = 35
     config.training.d_steps_per_g_step = 1
     
-    # GAN loss weight
-    config.loss.w_gan = 0.1
+    # GAN loss weight (reduced to prevent discriminator dominating reconstruction)
+    config.loss.w_gan = 0.05
 
     # Save every epoch for monitoring
     config.training.save_every_n_epochs = 1

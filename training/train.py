@@ -574,6 +574,13 @@ class Trainer:
         epoch_d_loss = 0.0
         
         use_gan = self.config.model.use_gan and epoch >= self.config.training.gan_start_epoch
+
+        # Compute GAN weight ramp-up factor (linear from 0 to 1 over gan_ramp_epochs)
+        gan_weight_scale = 0.0
+        if use_gan:
+            gan_ramp = getattr(self.config.training, 'gan_ramp_epochs', 15)
+            epochs_since_gan_start = epoch - self.config.training.gan_start_epoch
+            gan_weight_scale = min(1.0, epochs_since_gan_start / max(gan_ramp, 1))
         
         for batch_idx, (input_renders, pbr_maps) in enumerate(pbar):
             # input_renders: (B, 3, 3, H, W) - 3 rendered views (dirty)
@@ -627,12 +634,12 @@ class Trainer:
                         real_logits = self.discriminator(real_concat)
                         fake_logits = self.discriminator(fake_concat)
                         
-                        # Discriminator loss
+                        # Discriminator loss (scaled by GAN ramp-up)
                         d_loss = discriminator_loss(
                             real_logits,
                             fake_logits,
                             self.config.loss.gan_loss_type
-                        ) * self.config.loss.w_discriminator
+                        ) * self.config.loss.w_discriminator * gan_weight_scale
                     
                     # Backward
                     if self.scaler:
@@ -657,26 +664,32 @@ class Trainer:
                 g_loss, loss_info = self.criterion(
                     pred_pbr,
                     target,
-                    discriminator=discriminator_for_loss
+                    discriminator=discriminator_for_loss,
+                    gan_weight_scale=gan_weight_scale
                 )
             
             # Backward
+            # When GAN is active, boost clip norm so GAN grads don't starve reconstruction
+            clip_norm = self.config.training.grad_clip_norm
+            if clip_norm and use_gan:
+                clip_norm = clip_norm * (1.0 + gan_weight_scale)
+
             if self.scaler:
                 self.scaler.scale(g_loss).backward()
-                if self.config.training.grad_clip_norm:
+                if clip_norm:
                     self.scaler.unscale_(self.g_optimizer)
                     torch.nn.utils.clip_grad_norm_(
                         self.generator.parameters(),
-                        self.config.training.grad_clip_norm
+                        clip_norm
                     )
                 self.scaler.step(self.g_optimizer)
                 self.scaler.update()
             else:
                 g_loss.backward()
-                if self.config.training.grad_clip_norm:
+                if clip_norm:
                     torch.nn.utils.clip_grad_norm_(
                         self.generator.parameters(),
-                        self.config.training.grad_clip_norm
+                        clip_norm
                     )
                 self.g_optimizer.step()
             

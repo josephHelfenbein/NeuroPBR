@@ -188,7 +188,7 @@ PY
 | `lightweight` | ResNet50, no GAN | Fast baseline |
 | `configs/high_quality.py` | ResNet101, deeper ViT | Highest fidelity |
 | `configs/fast_iteration.py` | ResNet18, fewer epochs | Rapid experimentation |
-| `configs/normal_focused.py` | Normal-heavy loss weights | Emphasize normals |
+| `configs/ultra_stable.py` | Anti-collapse losses, delayed GAN, long warmup | Stable 2048×2048 training |
 
 ### Custom Config Template
 ```python
@@ -225,6 +225,9 @@ Run via `python train.py --config configs/my_config.py ...`.
 | SSIM | Structural similarity (albedo) | `w_ssim` | 0.3 |
 | Normal | Angular error for normals | `w_normal` | 0.5 |
 | GAN | Adversarial realism | `w_gan` | 0.05 |
+| Variance Match | Prevents mode collapse | `w_variance_match` | 0.0 |
+| Normal XY | Prevents flat normal collapse | `w_normal_xy` | 0.0 |
+| Color Mean | Global albedo color correction | `w_color_mean` | 0.0 |
 
 ### Per-Map Weights
 ```python
@@ -234,9 +237,34 @@ cfg.loss.w_metallic = 1.0
 cfg.loss.w_normal_map = 1.0
 ```
 
+### Metallic Boost
+The `metallic_boost` parameter compensates for class imbalance (~80% of samples are non-metallic). When a sample has metallic content (max > 0.1), its metallic loss is multiplied by this factor:
+```python
+cfg.loss.metallic_boost = 5.0  # Default; higher values weight metallic samples more
+```
+
+### Anti-Collapse Losses
+These losses prevent common training collapse modes:
+
+- **Variance Matching** (`w_variance_match`): Penalizes when prediction variance is lower than target variance. Prevents the model from outputting constant values.
+  ```python
+  cfg.loss.w_variance_match = 5.0  # Recommended for stable training
+  ```
+
+- **Normal XY** (`w_normal_xy`): Penalizes when predicted normal XY magnitude is lower than target. Specifically fights collapse to flat [0,0,1] normals.
+  ```python
+  cfg.loss.w_normal_xy = 10.0  # Recommended for normal quality
+  ```
+
+- **Color Mean** (`w_color_mean`): Matches per-channel spatial mean between prediction and target albedo. Provides a clean, low-noise gradient for global color correction.
+  ```python
+  cfg.loss.w_color_mean = 5.0  # Recommended for color accuracy
+  ```
+
 ### Recipes
-- Emphasize normals → raise `w_normal`, `w_normal_map`
-- Photographic albedo → bump `w_albedo`, `w_ssim`
+- Emphasize normals → raise `w_normal`, `w_normal_map`, `w_normal_xy`
+- Photographic albedo → bump `w_albedo`, `w_ssim`, `w_color_mean`
+- Prevent mode collapse → enable `w_variance_match`
 - Disable GAN → set `cfg.model.use_gan = False`, `cfg.loss.w_gan = 0.0`
 
 ### GAN Modes
@@ -394,7 +422,51 @@ tensorboard --logdir checkpoints/logs
 | OOM (Fragmentation) | Set `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` environment variable before running scripts |
 | Unstable GAN | Lower `g_lr/d_lr`, tighter `grad_clip_norm`, delay GAN start, freeze BN |
 | Slow convergence | Increase LR, use cosine scheduler with warmup, raise L1/normal weights |
-| Poor normal quality | Boost `w_normal` & `w_normal_map`, verify dataset normalization |
+| Poor normal quality | Boost `w_normal` & `w_normal_map`, enable `w_normal_xy`, verify dataset normalization |
+| Mode collapse (constant outputs) | Enable `w_variance_match`, use `ultra_stable.py` config |
+| Flat normals ([0,0,1] collapse) | Enable `w_normal_xy` (recommended: 10.0) |
+| Wrong global color | Enable `w_color_mean` (recommended: 5.0) |
+
+---
+
+## Diagnostic & Validation Scripts
+
+The training directory includes several utilities for validating data and diagnosing training issues.
+
+### Dataset Validation
+`validate_dataset.py` scans image files and/or shards for corruption, truncation, and NaN/Inf values.
+
+```bash
+# Validate image dataset (dry-run, report only)
+python validate_dataset.py --input-dir ./data/input --output-dir ./data/output
+
+# Validate and delete corrupted files
+python validate_dataset.py --input-dir ./data/input --output-dir ./data/output --delete
+
+# Validate distillation shards
+python validate_dataset.py --shards-dir ./data/shards_1024
+
+# Validate both images and shards
+python validate_dataset.py --input-dir ./data/input --output-dir ./data/output --shards-dir ./data/shards_1024
+```
+
+### Checkpoint Health Check
+`check_checkpoint.py` analyzes a saved checkpoint to detect signs of model collapse, training instability, or other issues.
+
+```bash
+# Basic health check
+python check_checkpoint.py checkpoints/checkpoint_epoch_0050.pth
+
+# Verbose output with weight statistics
+python check_checkpoint.py checkpoints/checkpoint_epoch_0050.pth --verbose
+
+# Include test inference on sample data
+python check_checkpoint.py checkpoints/checkpoint_epoch_0050.pth --test-inference --input-dir ./data/input
+
+# Check gradient flow per output head (use when metallic/normal heads aren't learning)
+python check_checkpoint.py checkpoints/checkpoint_epoch_0050.pth \
+  --test-inference --check-gradients --input-dir ./data/input
+```
 
 ---
 

@@ -239,9 +239,12 @@ class HybridLoss(nn.Module):
         
         # Penalize when pred variance differs from target variance
         self.w_variance_match = config.get("w_variance_match", 0.0)
-        
+
         # Normal XY magnitude matching: penalize flat normals where XY is too small
         self.w_normal_xy = config.get("w_normal_xy", 0.0)
+
+        # Color mean matching: direct global color correction signal for albedo
+        self.w_color_mean = config.get("w_color_mean", 0.0)
 
     def _variance_matching_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
@@ -259,7 +262,19 @@ class HybridLoss(nn.Module):
         variance_gap = F.relu(target_var - pred_var)
         
         return variance_gap
-    
+
+    def _color_mean_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Match per-channel spatial mean between prediction and target.
+
+        Gives a clean, low-noise gradient for global color correction.
+        L1 per-pixel is noisy at small batch sizes — this directly says
+        "your average R/G/B is wrong by X" without per-pixel noise.
+        """
+        pred_mean = pred.mean(dim=(-2, -1))    # (B, C)
+        target_mean = target.mean(dim=(-2, -1))  # (B, C)
+        return F.l1_loss(pred_mean, target_mean)
+
     def _normal_xy_loss(self, pred_normal: torch.Tensor, target_normal: torch.Tensor) -> torch.Tensor:
         """
         Penalize when predicted normal XY magnitude is lower than target.
@@ -285,7 +300,8 @@ class HybridLoss(nn.Module):
         return xy_loss + xy_gap
 
     def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor],
-                discriminator: Optional[nn.Module] = None) -> Tuple[torch.Tensor, Dict]:
+                discriminator: Optional[nn.Module] = None,
+                gan_weight_scale: float = 1.0) -> Tuple[torch.Tensor, Dict]:
         info = {}
         total_loss = 0.0
         
@@ -301,7 +317,13 @@ class HybridLoss(nn.Module):
             ssim_loss = self.ssim_loss(pred["albedo"], target["albedo"])
             total_loss += w_ssim * ssim_loss
             info["loss_ssim"] = ssim_loss.item()
-        
+
+        # Color mean matching - direct global color correction for albedo
+        if self.w_color_mean > 0 and "albedo" in pred and "albedo" in target:
+            color_mean_loss = self._color_mean_loss(pred["albedo"], target["albedo"])
+            total_loss += self.w_color_mean * color_mean_loss
+            info["loss_color_mean"] = color_mean_loss.item()
+
         w_normal = self.config.get("w_normal", 0.5)
         if w_normal > 0 and "normal" in pred and "normal" in target:
             normal_loss, angle_deg = self.normal_loss(pred["normal"], target["normal"])
@@ -324,7 +346,7 @@ class HybridLoss(nn.Module):
         # Variance matching loss to prevent mode collapse
         if self.w_variance_match > 0:
             var_loss = 0.0
-            for key in ["roughness"]:  # Remove normal - use XY loss instead
+            for key in ["roughness", "albedo"]:  # Albedo variance prevents color collapse
                 if key in pred and key in target:
                     vl = self._variance_matching_loss(pred[key], target[key])
                     var_loss += vl
@@ -340,11 +362,12 @@ class HybridLoss(nn.Module):
                 pred["metallic"],
                 pred["normal"]
             ], dim=1)
-            
+
             fake_logits = discriminator(pred_concat)
             gan_loss = generator_gan_loss(fake_logits, self.gan_loss_type)
-            total_loss += w_gan * gan_loss
+            total_loss += w_gan * gan_weight_scale * gan_loss
             info["loss_gan_g"] = gan_loss.item()
+            info["gan_weight_scale"] = gan_weight_scale
         
         if "albedo" in pred and "albedo" in target:
             mae = F.l1_loss(pred["albedo"], target["albedo"]).item()

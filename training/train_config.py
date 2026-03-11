@@ -122,6 +122,11 @@ class LossConfig:
     # Set to 0 to disable.
     w_normal_xy: float = 0.0
 
+    # Color mean matching loss weight: penalizes when per-channel spatial mean
+    # of predicted albedo differs from target. Gives a clean global color signal
+    # that cuts through per-pixel noise. Set to 0 to disable.
+    w_color_mean: float = 0.0
+
     # GAN loss type
     gan_loss_type: Literal["hinge", "bce"] = "hinge"
 
@@ -176,6 +181,7 @@ class TrainingConfig:
 
     # GAN training schedule
     gan_start_epoch: int = 5  # Start GAN training after N epochs
+    gan_ramp_epochs: int = 15  # Linearly ramp GAN weight over this many epochs
     d_steps_per_g_step: int = 1  # How many D updates per G update
 
     # Validation
