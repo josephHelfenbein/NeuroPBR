@@ -355,15 +355,16 @@ def check_optimizer_state(ckpt: Dict) -> List[CheckResult]:
     return results
 
 
-def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_samples: int = 20, verbose: bool = False) -> List[CheckResult]:
+def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_samples: int = 20, verbose: bool = False, check_gradients: bool = False) -> List[CheckResult]:
     """Run actual inference to check output distributions.
-    
+
     Args:
         ckpt: Loaded checkpoint dict
         input_dir: Path to input renders directory
         output_dir: Path to ground truth PBR maps directory (optional, defaults to input_dir/../output)
         num_samples: Number of samples to test (default 20 for statistical reliability)
         verbose: If True, print per-sample statistics
+        check_gradients: If True, run backward pass to check per-head gradient flow
     """
     results = []
     
@@ -522,27 +523,48 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
             'metallic': {'min': [], 'max': [], 'std': []},
             'normal': {'z_mean': []}
         }
-        
-        with torch.no_grad():
+
+        # Gradient stats per head (only populated if check_gradients=True)
+        head_names = ['albedo', 'roughness', 'metallic', 'normal']
+        grad_stats = {name: [] for name in head_names}
+
+        # Build loss function if checking gradients
+        criterion = None
+        if check_gradients:
+            from train import denormalize_target
+            from losses.losses import HybridLoss
+            loss_config = {
+                "w_l1": 1.0, "w_ssim": 0.0, "w_normal": 0.0,
+                "w_gan": 0.0, "w_albedo": 1.0, "w_roughness": 1.0,
+                "w_metallic": 1.0, "w_normal_map": 1.0,
+                "gan_loss_type": "hinge", "metallic_boost": 1.0
+            }
+            criterion = HybridLoss(loss_config).to(device)
+
+        grad_context = torch.enable_grad() if check_gradients else torch.no_grad()
+        with grad_context:
             for idx, i in enumerate(sample_indices):
                 inputs, targets = dataset[i]
                 inputs = inputs.unsqueeze(0).to(device)
                 targets = targets.unsqueeze(0).to(device)
-                
+
+                if check_gradients:
+                    model.zero_grad()
+
                 outputs = model(inputs)
-                
+
                 for key in ['albedo', 'roughness', 'metallic']:
                     out = outputs[key]
                     output_stats[key]['min'].append(out.min().item())
                     output_stats[key]['max'].append(out.max().item())
                     output_stats[key]['std'].append(out.std().item())
-                
+
                 # Track ground truth for metallic and normal
                 # Targets are normalized [-1, 1], denormalize to [0, 1] for comparison
                 gt_metallic = targets[:, 2, 0:1, :, :]  # metallic is channel 2
                 gt_metallic_denorm = gt_metallic * 0.5 + 0.5  # denormalize
                 gt_stats['metallic']['std'].append(gt_metallic_denorm.std().item())
-                
+
                 # Ground truth normal (channel 3)
                 gt_normal = targets[:, 3, :, :, :]  # shape [1, 3, H, W]
                 # Normals in dataset are normalized RGB, need to convert to actual normals
@@ -550,17 +572,36 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
                 gt_normal_vec = gt_normal_denorm * 2.0 - 1.0  # [-1, 1]
                 gt_normal_z = gt_normal_vec[:, 2, :, :].mean().item()
                 gt_stats['normal']['z_mean'].append(gt_normal_z)
-                
+
                 if verbose and idx < 5:
                     print(f"  Sample {i}: pred_albedo_std={outputs['albedo'].std().item():.4f}, "
                           f"pred_metallic_std={outputs['metallic'].std().item():.4f}, "
                           f"pred_normal_z={outputs['normal'][:, 2, :, :].mean().item():.4f}")
                     print(f"            gt_metallic_std={gt_metallic_denorm.std().item():.4f}, "
                           f"gt_normal_z={gt_normal_z:.4f}")
-                
+
                 # For normals, check if Z component is reasonable
                 normal_z = outputs['normal'][:, 2, :, :].mean().item()
                 output_stats['normal']['z_mean'].append(normal_z)
+
+                # Run backward pass and collect per-head gradient norms
+                if check_gradients and criterion is not None:
+                    target = {
+                        "albedo": targets[:, 0],
+                        "roughness": targets[:, 1, 0:1],
+                        "metallic": targets[:, 2, 0:1],
+                        "normal": targets[:, 3]
+                    }
+                    target = denormalize_target(target, [0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+                    loss, _ = criterion(outputs, target)
+                    loss.backward()
+
+                    for name, param in model.named_parameters():
+                        if param.grad is not None:
+                            for hi, head_name in enumerate(head_names):
+                                if f'heads.{hi}' in name and 'weight' in name:
+                                    grad_stats[head_name].append(param.grad.norm().item())
+                                    break
         
         # Print ground truth summary if verbose
         if verbose:
@@ -648,7 +689,41 @@ def run_test_inference(ckpt: Dict, input_dir: str, output_dir: str = None, num_s
                 status=HealthStatus.HEALTHY,
                 message=f"Normal variance looks good (avg Z={avg_z:.4f})"
             ))
-        
+
+        # Analyze gradient flow per head
+        if check_gradients:
+            for head_name in head_names:
+                grads = grad_stats[head_name]
+                if not grads:
+                    results.append(CheckResult(
+                        name=f"Gradient flow: {head_name}",
+                        status=HealthStatus.WARNING,
+                        message="No gradient data collected (head weights not found)"
+                    ))
+                    continue
+
+                avg_grad = np.mean(grads)
+                if avg_grad < 1e-7:
+                    results.append(CheckResult(
+                        name=f"Gradient flow: {head_name}",
+                        status=HealthStatus.CRITICAL,
+                        message=f"No gradient flow (avg norm={avg_grad:.2e})",
+                        details="Head is not learning — gradients are near zero"
+                    ))
+                elif avg_grad < 1e-4:
+                    results.append(CheckResult(
+                        name=f"Gradient flow: {head_name}",
+                        status=HealthStatus.WARNING,
+                        message=f"Weak gradient flow (avg norm={avg_grad:.2e})",
+                        details="Head may be learning very slowly"
+                    ))
+                else:
+                    results.append(CheckResult(
+                        name=f"Gradient flow: {head_name}",
+                        status=HealthStatus.HEALTHY,
+                        message=f"Gradients flowing (avg norm={avg_grad:.2e})"
+                    ))
+
     except Exception as e:
         results.append(CheckResult(
             name="Test inference",
@@ -719,6 +794,7 @@ Examples:
     python check_checkpoint.py checkpoints/best_model.pth
     python check_checkpoint.py checkpoints/best_model.pth --verbose
     python check_checkpoint.py checkpoints/best_model.pth --test-inference --input-dir ./data/input --output-dir ./data/output
+    python check_checkpoint.py checkpoints/best_model.pth --test-inference --check-gradients --input-dir ./data/input
         """
     )
     parser.add_argument("checkpoint", type=str, help="Path to checkpoint file")
@@ -731,9 +807,15 @@ Examples:
                         help="Output directory with ground truth PBR maps (default: input_dir/../output)")
     parser.add_argument("--num-samples", type=int, default=20,
                         help="Number of samples to test (default: 20)")
-    
+    parser.add_argument("--check-gradients", action="store_true",
+                        help="Run backward pass to check per-head gradient flow (use with --test-inference)")
+
     args = parser.parse_args()
-    
+
+    if args.check_gradients and not args.test_inference:
+        print("Error: --check-gradients requires --test-inference")
+        sys.exit(1)
+
     if args.test_inference and not args.input_dir:
         print("Error: --input-dir required when using --test-inference")
         sys.exit(1)
@@ -772,10 +854,13 @@ Examples:
     # Optional inference test
     if args.test_inference:
         print("Running inference test...")
+        if args.check_gradients:
+            print("Gradient flow check enabled (will run backward pass)")
         all_results.extend(run_test_inference(
             ckpt, args.input_dir, args.output_dir,
             num_samples=args.num_samples,
-            verbose=args.verbose
+            verbose=args.verbose,
+            check_gradients=args.check_gradients
         ))
     
     # Print results
