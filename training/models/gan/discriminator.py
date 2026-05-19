@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from torch.nn.utils import spectral_norm
 
 """
 Training:
@@ -52,20 +53,23 @@ class PatchGANDiscriminator(nn.Module):
         """
         classname = m.__class__.__name__
         if classname.find('Conv') != -1:
-            nn.init.normal_(m.weight.data, 0.0, 0.02)
+            if hasattr(m, 'weight') and m.weight is not None:
+                nn.init.normal_(m.weight.data, 0.0, 0.02)
             if hasattr(m, 'bias') and m.bias is not None:
                 nn.init.constant_(m.bias.data, 0.0)
-        elif classname.find('BatchNorm') != -1:
-            nn.init.normal_(m.weight.data, 1.0, 0.02)
-            nn.init.constant_(m.bias.data, 0.0)
+        elif classname.find('BatchNorm') != -1 or classname.find('InstanceNorm') != -1:
+            if hasattr(m, 'weight') and m.weight is not None:
+                nn.init.normal_(m.weight.data, 1.0, 0.02)
+            if hasattr(m, 'bias') and m.bias is not None:
+                nn.init.constant_(m.bias.data, 0.0)
 
     def _build_model(self):
         sequence = []
 
         # First layer: Conv -> LeakyReLU (no normalization)
         sequence += [
-            nn.Conv2d(self.in_channels, self.n_filters,
-                      kernel_size=4, stride=2, padding=1),
+            spectral_norm(nn.Conv2d(self.in_channels, self.n_filters,
+                                    kernel_size=4, stride=2, padding=1)),
             nn.LeakyReLU(0.2, True)
         ]
 
@@ -77,11 +81,11 @@ class PatchGANDiscriminator(nn.Module):
             multiplier = min(2 ** n, 8)  # Cap at 16x base filters
 
             sequence += [
-                nn.Conv2d(self.n_filters * prev_multiplier,
-                          self.n_filters * multiplier,
-                          kernel_size=4, stride=2, padding=1,
-                          bias=False),
-                nn.BatchNorm2d(self.n_filters * multiplier),
+                spectral_norm(nn.Conv2d(self.n_filters * prev_multiplier,
+                                        self.n_filters * multiplier,
+                                        kernel_size=4, stride=2, padding=1,
+                                        bias=False)),
+                nn.InstanceNorm2d(self.n_filters * multiplier, affine=True),
                 nn.LeakyReLU(0.2, True)
             ]
 
@@ -89,18 +93,18 @@ class PatchGANDiscriminator(nn.Module):
         prev_multiplier = multiplier
         multiplier = min(2 ** self.n_layers, 8)
         sequence += [
-            nn.Conv2d(self.n_filters * prev_multiplier,
-                      self.n_filters * multiplier,
-                      kernel_size=4, stride=1, padding=1,
-                      bias=False),
-            nn.BatchNorm2d(self.n_filters * multiplier),
+            spectral_norm(nn.Conv2d(self.n_filters * prev_multiplier,
+                                    self.n_filters * multiplier,
+                                    kernel_size=4, stride=1, padding=1,
+                                    bias=False)),
+            nn.InstanceNorm2d(self.n_filters * multiplier, affine=True),
             nn.LeakyReLU(0.2, True)
         ]
 
         # Output layer: 1 channel prediction map
         sequence += [
-            nn.Conv2d(self.n_filters * multiplier, 1,
-                      kernel_size=4, stride=1, padding=1)
+            spectral_norm(nn.Conv2d(self.n_filters * multiplier, 1,
+                                    kernel_size=4, stride=1, padding=1))
         ]
 
         # sigmoid activation

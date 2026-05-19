@@ -32,7 +32,17 @@ class WeightedL1Loss(nn.Module):
         self.metallic_boost = metallic_boost  # Boost for samples that ARE metallic
 
     def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
-        total_loss = 0.0
+        # Defensive init: ensure total_loss is always a 0-d tensor even if no weighted
+        # term contributes (otherwise downstream .item()/.backward() would crash on a float).
+        ref = None
+        if pred:
+            ref = next(iter(pred.values()))
+        elif target:
+            ref = next(iter(target.values()))
+        if ref is not None:
+            total_loss = torch.zeros((), device=ref.device, dtype=ref.dtype)
+        else:
+            total_loss = torch.zeros(())
         loss_dict = {}
         
         for name, weight in self.weights.items():
@@ -303,8 +313,18 @@ class HybridLoss(nn.Module):
                 discriminator: Optional[nn.Module] = None,
                 gan_weight_scale: float = 1.0) -> Tuple[torch.Tensor, Dict]:
         info = {}
-        total_loss = 0.0
-        
+        # Defensive init: ensure total_loss is always a 0-d tensor even if every
+        # weighted term is zero or skipped (otherwise .item()/.backward() crashes on a float).
+        ref = None
+        if pred:
+            ref = next(iter(pred.values()))
+        elif target:
+            ref = next(iter(target.values()))
+        if ref is not None:
+            total_loss = torch.zeros((), device=ref.device, dtype=ref.dtype)
+        else:
+            total_loss = torch.zeros(())
+
         w_l1 = self.config.get("w_l1", 1.0)
         if w_l1 > 0:
             l1_loss, l1_dict = self.l1_loss(pred, target)

@@ -223,12 +223,20 @@ class TrainingConfig:
 @dataclass
 class TransformConfig:
     """Data normalization configuration."""
-    # Normalization stats
+    # TARGET PBR map normalization stats.
+    # Must stay at 0.5/0.5 so RGB-encoded normal maps decode to [-1, 1].
     mean: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
     std: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
 
-    # Use ImageNet pretrained stats for ResNet
-    # If True: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+    # INPUT render normalization stats (fed to the encoder).
+    # Decoupled from target stats so the pretrained ResNet encoder can
+    # receive proper ImageNet-normalized input without breaking targets.
+    input_mean: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+    input_std: List[float] = field(default_factory=lambda: [0.5, 0.5, 0.5])
+
+    # Use ImageNet pretrained stats for ResNet.
+    # If True: input_mean=[0.485, 0.456, 0.406], input_std=[0.229, 0.224, 0.225]
+    # Targets (mean/std) are left at 0.5/0.5.
     use_imagenet_stats: bool = False
 
 
@@ -272,10 +280,12 @@ class TrainConfig:
             channels = self.model.encoder_channels
             self.model.decoder_skip_channels = channels[::-1]  # Reverse
 
-        # Set ImageNet normalization if using pretrained ResNet
+        # Set ImageNet normalization for the INPUT renders if using a
+        # pretrained ResNet encoder. Target stats (mean/std) stay at 0.5/0.5
+        # so normal maps still decode to [-1, 1].
         if self.transform.use_imagenet_stats:
-            self.transform.mean = [0.485, 0.456, 0.406]
-            self.transform.std = [0.229, 0.224, 0.225]
+            self.transform.input_mean = [0.485, 0.456, 0.406]
+            self.transform.input_std = [0.229, 0.224, 0.225]
 
     def to_dict(self):
         """Convert config to dictionary for logging."""

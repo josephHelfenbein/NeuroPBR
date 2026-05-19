@@ -12,6 +12,14 @@ encoders are based off inputs of 1024x1024 imgs
 '''
 
 
+def _gn_groups(channels: int) -> int:
+    """Largest divisor of `channels` that is <= 32, for GroupNorm num_groups."""
+    for g in (32, 16, 8, 4, 2, 1):
+        if channels % g == 0:
+            return g
+    return 1
+
+
 class ConvBlock(nn.Module):
     """double conv"""
 
@@ -22,10 +30,10 @@ class ConvBlock(nn.Module):
         # keeps output size the same, and doesn't recompute bias
         self.conv1 = nn.Conv2d(in_channel, out_channel,
                                kernel_size=3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channel)
+        self.bn1 = nn.GroupNorm(_gn_groups(out_channel), out_channel)
         self.conv2 = nn.Conv2d(out_channel, out_channel,
                                kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channel)
+        self.bn2 = nn.GroupNorm(_gn_groups(out_channel), out_channel)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -69,12 +77,12 @@ class StrideEncoderBlock(nn.Module):
         # First conv: regular conv for feature extraction
         self.conv1 = nn.Conv2d(in_channel, out_channel,
                                kernel_size=3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channel)
+        self.bn1 = nn.GroupNorm(_gn_groups(out_channel), out_channel)
 
         # Second conv: downsampling
         self.conv2 = nn.Conv2d(out_channel, out_channel,
                                kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channel)
+        self.bn2 = nn.GroupNorm(_gn_groups(out_channel), out_channel)
 
         self.relu = nn.ReLU(inplace=True)
 
@@ -233,6 +241,7 @@ class UNetResNetEncoder(nn.Module):
 
         self.skip = skip
         self.freeze_backbone = freeze_backbone
+        self.freeze_bn = freeze_bn
 
         if freeze_backbone:
             for name, module in self.encoder_stack[:6].named_modules():
@@ -241,11 +250,29 @@ class UNetResNetEncoder(nn.Module):
                         param.requires_grad = False
 
         if freeze_bn:
-            for module in self.encoder_stack[:6].modules():
+            # Freeze gamma/beta on every BN in the backbone (not just the
+            # first 6 layers — partial freezing leaves layer3/layer4 BN
+            # chasing batch-of-2 noise while the early layers stay calibrated).
+            for module in self.encoder_stack.modules():
                 if isinstance(module, nn.BatchNorm2d):
-                    # Freeze BN learnable parameters (gamma, beta)
                     for param in module.parameters():
                         param.requires_grad = False
+                    # Put it in eval mode now so running_mean / running_var
+                    # stop updating immediately. .train() override below keeps
+                    # them in eval mode through .train(True) calls.
+                    module.eval()
+
+    def train(self, mode: bool = True):
+        """Keep BN modules in eval() when freeze_bn=True, even when the parent
+        is switched to train(). Without this override, calling .train() on the
+        Trainer would put the frozen BNs back into training mode and they'd
+        start updating running_mean/running_var from batch-of-2 statistics."""
+        super().train(mode)
+        if self.freeze_bn:
+            for module in self.encoder_stack.modules():
+                if isinstance(module, nn.BatchNorm2d):
+                    module.eval()
+        return self
 
     def forward(self, x):
         skips = None

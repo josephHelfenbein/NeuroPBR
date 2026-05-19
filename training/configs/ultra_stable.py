@@ -18,9 +18,16 @@ def get_config():
     # Model
     config.model.encoder_type = "resnet"
     config.model.encoder_backbone = "resnet50"
-    config.model.encoder_stride = 1
+    # stride=2 gives a 64x64 latent (~12k cross-view ViT tokens).
+    # 16x less attention compute than stride=1 (128x128, ~49k tokens) and far
+    # easier on activation memory for the high-res early layers. SR head
+    # (configured below) upsamples the decoder output back to 2048.
+    config.model.encoder_stride = 2
     config.model.freeze_backbone = False
-    config.model.freeze_bn = False
+    # Freeze pretrained ResNet BN: with per-view batch=2 the BN running stats
+    # are too noisy to be useful. freeze_bn=True keeps the well-calibrated
+    # ImageNet statistics (encoder also overrides .train() to keep BN in eval).
+    config.model.freeze_bn = True
 
     # Transformer for cross-view fusion
     config.model.use_transformer = True
@@ -31,7 +38,11 @@ def get_config():
 
     # Decoder
     config.model.decoder_type = "shared_heads"
-    config.model.decoder_sr_scale = 0
+    # decoder_sr_scale=2: with stride=2, decoder produces 1024x1024; SR head
+    # upsamples to 2048x2048. Set explicitly here because TrainConfig.__post_init__
+    # runs before this override is applied (it would set sr_scale=2 by default
+    # for stride=2 anyway, but we keep this explicit for clarity).
+    config.model.decoder_sr_scale = 2
 
     # GAN for realistic outputs (weakened to prevent mode collapse)
     config.model.use_gan = True
@@ -43,7 +54,6 @@ def get_config():
     config.loss.w_l1 = 1.0
     config.loss.w_ssim = 0.3
     config.loss.w_normal = 2.0
-    config.loss.w_gan = 0.0
 
     # Per-map L1 weights
     config.loss.w_albedo = 1.5
@@ -59,13 +69,23 @@ def get_config():
     # Data
     config.data.image_size = (2048, 2048)
     config.data.output_size = (2048, 2048)
-    config.data.num_views = 3
-    config.data.batch_size = 2
+    config.data.batch_size = 4
     config.data.num_workers = 8
     config.data.prefetch_factor = 2
     config.data.pin_memory = True
     config.data.horizontal_flip = True
     config.data.vertical_flip = False
+
+    # Transform: normalize input renders with ImageNet stats so the pretrained
+    # ResNet encoder receives its expected input distribution. Target PBR maps
+    # stay at 0.5/0.5 normalization (decoupled in train_config).
+    config.transform.use_imagenet_stats = True
+    # TrainConfig.__post_init__ already ran at TrainConfig() construction above,
+    # so flipping use_imagenet_stats here does NOT retroactively update
+    # input_mean/input_std. Set them explicitly so the encoder actually receives
+    # ImageNet-normalized input.
+    config.transform.input_mean = [0.485, 0.456, 0.406]
+    config.transform.input_std = [0.229, 0.224, 0.225]
 
     # Optimizer
     config.optimizer.g_optimizer = "adamw"
@@ -96,8 +116,11 @@ def get_config():
     # GAN loss weight (reduced to prevent discriminator dominating reconstruction)
     config.loss.w_gan = 0.05
 
-    # Save every epoch for monitoring
-    config.training.save_every_n_epochs = 1
+    # Checkpointing: latest.pth is always overwritten every epoch (resume
+    # safety), best_model.pth is written whenever val loss improves, and
+    # checkpoint_epoch_XXXX.pth snapshots are kept every 5 epochs (each
+    # ~3.3 GB; every-epoch would be ~330 GB over a 100-epoch run).
+    config.training.save_every_n_epochs = 5
     config.training.save_best_only = False
 
     # Logging

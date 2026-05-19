@@ -98,6 +98,16 @@ def denormalize_target(target: Dict[str, torch.Tensor], mean: List[float], std: 
     Returns:
         Dict with albedo/roughness/metallic in [0,1], normal stays in [-1,1]
     """
+    # The normal-map skipping logic below assumes the dataset normalized
+    # normals with mean=std=0.5, which maps RGB encoding [0,1] -> [-1,1].
+    # If targets were normalized with any other stats, normals would NOT be
+    # in [-1,1] here and skipping denormalization would be silently wrong.
+    assert all(abs(m - 0.5) < 1e-6 for m in mean) and all(abs(s - 0.5) < 1e-6 for s in std), (
+        f"denormalize_target requires target mean/std == 0.5 (got mean={mean}, std={std}). "
+        "Normal-map denormalization is intentionally skipped and only valid for 0.5/0.5 "
+        "target normalization; other stats would leave normals outside [-1,1]."
+    )
+
     result = {}
     for name, tensor in target.items():
         # Skip normal - it should stay as actual normal vectors in [-1,1]
@@ -136,6 +146,17 @@ class MultiViewPBRGenerator(nn.Module):
         # Create encoder (shared across all views)
         self.encoder = self._build_encoder(config.model)
         self.latent_channels, self.encoder_skip_channels = self._inspect_encoder()
+
+        # Learned multi-view skip fusion: one 1x1 conv per skip level that fuses
+        # the 3 views' skip features (concatenated on channels) back to ch.
+        # encoder_skip_channels is deep->shallow; the encoder emits skips
+        # shallow->deep, so reverse to get per-skip channel counts in encoder order.
+        skip_channels_encoder_order = list(reversed(self.encoder_skip_channels))
+        self.skip_fusion = nn.ModuleList([
+            nn.Conv2d(self.num_views * ch, ch, kernel_size=1)
+            for ch in skip_channels_encoder_order
+        ])
+
         target_dim = config.model.transformer_dim
         if self.latent_channels == target_dim:
             self.latent_proj = nn.Identity()
@@ -173,11 +194,12 @@ class MultiViewPBRGenerator(nn.Module):
     
     def _inspect_encoder(self) -> Tuple[int, List[int]]:
         """Determine the encoder's latent and skip channel counts."""
-        image_size = getattr(self.config.data, "image_size", (1024, 1024))
+        # Channel counts are independent of spatial size, so use a small dummy
+        # to avoid a full-resolution forward (memory spike) at init.
         in_ch = self.config.model.encoder_in_channels
         device = next(self.encoder.parameters()).device
         dtype = next(self.encoder.parameters()).dtype
-        dummy = torch.zeros(1, in_ch, image_size[0], image_size[1], device=device, dtype=dtype)
+        dummy = torch.zeros(1, in_ch, 256, 256, device=device, dtype=dtype)
         was_training = self.encoder.training
         self.encoder.eval()
         with torch.no_grad():
@@ -227,19 +249,24 @@ class MultiViewPBRGenerator(nn.Module):
         
         # Encode each view separately (shared encoder weights)
         latents = []
-        aggregated_skips = None
-        
+        per_view_skips = []  # list (len=num_views) of skip lists (encoder order)
+
         for i in range(num_views):
             view = views[:, i]  # (B, C, H, W)
             latent, skips = self.encoder(view)
             latent = self.latent_proj(latent)
             latents.append(latent)
-            if aggregated_skips is None:
-                aggregated_skips = [s for s in skips]
-            else:
-                aggregated_skips = [acc + s for acc, s in zip(aggregated_skips, skips)]
-        
-        skips_list = [s / num_views for s in aggregated_skips] if aggregated_skips else []
+            per_view_skips.append(skips)
+
+        # Learned skip fusion: for each skip level concatenate the 3 views on
+        # channels and apply the corresponding 1x1 conv to fuse back to ch.
+        skips_list = []
+        if per_view_skips and per_view_skips[0]:
+            num_skip_levels = len(per_view_skips[0])
+            for level in range(num_skip_levels):
+                level_views = [per_view_skips[v][level] for v in range(num_views)]
+                fused_skip = self.skip_fusion[level](torch.cat(level_views, dim=1))
+                skips_list.append(fused_skip)
         
         # Fuse latents with transformer
         if self.config.model.use_transformer:
@@ -389,10 +416,13 @@ class Trainer:
         self.amp_config = gpu_optimization.get_amp_config()
         self.amp_dtype = self.amp_config["dtype"]
         
+        # GradScaler is only needed for float16 AMP; bfloat16 has fp32 dynamic
+        # range and does not require loss scaling.
+        use_scaler = self.use_amp and self.amp_dtype == torch.float16
         scaler_kwargs = {}
-        if self.use_amp and GRADSCALER_SUPPORTS_DEVICE:
+        if use_scaler and GRADSCALER_SUPPORTS_DEVICE:
             scaler_kwargs["device_type"] = self.amp_device_type
-        self.scaler = GradScaler(**scaler_kwargs) if self.use_amp else None
+        self.scaler = GradScaler(**scaler_kwargs) if use_scaler else None
         
         # Logging
         self.writer = None
@@ -442,7 +472,8 @@ class Trainer:
             "gan_loss_type": self.config.loss.gan_loss_type,
             "metallic_boost": getattr(self.config.loss, 'metallic_boost', 10.0),
             "w_variance_match": getattr(self.config.loss, 'w_variance_match', 0.0),
-            "w_normal_xy": getattr(self.config.loss, 'w_normal_xy', 0.0)
+            "w_normal_xy": getattr(self.config.loss, 'w_normal_xy', 0.0),
+            "w_color_mean": getattr(self.config.loss, 'w_color_mean', 0.0),
         }
         return HybridLoss(loss_config).to(self.device)
     
@@ -510,7 +541,7 @@ class Trainer:
             )
             d_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.d_optimizer,
-                T_max=self.config.training.epochs - warmup_epochs,
+                T_max=max(self.config.training.epochs - self.config.training.gan_start_epoch, 1),
                 eta_min=self.config.optimizer.scheduler_min_lr
             ) if self.d_optimizer else None
         
@@ -579,7 +610,8 @@ class Trainer:
         gan_weight_scale = 0.0
         if use_gan:
             gan_ramp = getattr(self.config.training, 'gan_ramp_epochs', 15)
-            epochs_since_gan_start = epoch - self.config.training.gan_start_epoch
+            # +1 so the ramp is already non-zero on gan_start_epoch itself
+            epochs_since_gan_start = epoch - self.config.training.gan_start_epoch + 1
             gan_weight_scale = min(1.0, epochs_since_gan_start / max(gan_ramp, 1))
         
         for batch_idx, (input_renders, pbr_maps) in enumerate(pbar):
@@ -634,18 +666,23 @@ class Trainer:
                         real_logits = self.discriminator(real_concat)
                         fake_logits = self.discriminator(fake_concat)
                         
-                        # Discriminator loss (scaled by GAN ramp-up)
+                        # Discriminator loss. NOTE: the GAN ramp (gan_weight_scale)
+                        # is intentionally NOT applied here - with Adam it is
+                        # near a no-op and only misleadingly zeroes D on the
+                        # first GAN epoch. The ramp is applied to the generator's
+                        # GAN loss instead (inside HybridLoss).
                         d_loss = discriminator_loss(
                             real_logits,
                             fake_logits,
                             self.config.loss.gan_loss_type
-                        ) * self.config.loss.w_discriminator * gan_weight_scale
-                    
-                    # Backward
+                        ) * self.config.loss.w_discriminator
+
+                    # Backward. scaler.update() must be called exactly once per
+                    # training iteration, so it is deferred to after the
+                    # generator step below.
                     if self.scaler:
                         self.scaler.scale(d_loss).backward()
                         self.scaler.step(self.d_optimizer)
-                        self.scaler.update()
                     else:
                         d_loss.backward()
                         self.d_optimizer.step()
@@ -865,20 +902,29 @@ class Trainer:
         
         if self.scaler:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
-        
-        # Save regular checkpoint (unless save_best_only is True)
-        if not self.config.training.save_best_only:
+
+        # Save scheduler state so the LR schedule resumes correctly
+        if self.g_scheduler:
+            checkpoint["g_scheduler_state_dict"] = self.g_scheduler.state_dict()
+        if self.d_scheduler:
+            checkpoint["d_scheduler_state_dict"] = self.d_scheduler.state_dict()
+
+        # Per-epoch snapshot: only on the configured cadence (and only if
+        # save_best_only is False). Skipping this still leaves latest.pth and
+        # best_model.pth fresh below.
+        snapshot_due = (epoch % self.config.training.save_every_n_epochs == 0)
+        if snapshot_due and not self.config.training.save_best_only:
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch:04d}.pth"
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved checkpoint: {checkpoint_path}")
-        
-        # Save best checkpoint
+
+        # Save best checkpoint whenever val loss improves
         if is_best:
             best_path = checkpoint_dir / "best_model.pth"
             torch.save(checkpoint, best_path)
             print(f"Saved best model: {best_path}")
-        
-        # Save latest
+
+        # Always overwrite latest.pth so resume picks up the most recent epoch
         latest_path = checkpoint_dir / "latest.pth"
         torch.save(checkpoint, latest_path)
     
@@ -911,6 +957,12 @@ class Trainer:
             
             if self.scaler and "scaler_state_dict" in checkpoint:
                 self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
+
+            # Restore scheduler state so the LR schedule continues, not restarts
+            if self.g_scheduler and "g_scheduler_state_dict" in checkpoint:
+                self.g_scheduler.load_state_dict(checkpoint["g_scheduler_state_dict"])
+            if self.d_scheduler and "d_scheduler_state_dict" in checkpoint:
+                self.d_scheduler.load_state_dict(checkpoint["d_scheduler_state_dict"])
         else:
             # Load discriminator weights even when resetting optimizer
             if self.discriminator and "discriminator_state_dict" in checkpoint:
@@ -957,9 +1009,10 @@ class Trainer:
                 if is_best:
                     self.best_val_loss = val_loss
                 
-                # Save checkpoint
-                if epoch % self.config.training.save_every_n_epochs == 0:
-                    self.save_checkpoint(epoch, val_loss, is_best)
+                # Save checkpoint every epoch — save_checkpoint itself gates
+                # the per-epoch snapshot file on save_every_n_epochs, but
+                # latest.pth and best_model.pth always update.
+                self.save_checkpoint(epoch, val_loss, is_best)
             
             # Step schedulers (skip during warmup)
             if epoch >= self.warmup_epochs:
@@ -974,7 +1027,7 @@ class Trainer:
                     if isinstance(self.d_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                         if val_loss is not None:
                             self.d_scheduler.step(val_loss)
-                    else:
+                    elif epoch >= self.config.training.gan_start_epoch:
                         self.d_scheduler.step()
         
         print("\n" + "="*80)
@@ -982,16 +1035,17 @@ class Trainer:
         print("="*80)
 
 
-def set_seed(seed: int):
+def set_seed(seed: int, deterministic: bool = False):
     """Set random seed for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    
+
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        if deterministic:
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
 
 
 def main(args):
@@ -1071,7 +1125,7 @@ def main(args):
         raise ValueError("Metadata path is not set. Pass --metadata-path or keep render_metadata.json under the input directory")
     
     # Set seed
-    set_seed(config.training.seed)
+    set_seed(config.training.seed, deterministic=config.training.deterministic)
     
     # Apply GPU optimizations
     gpu_optimization.apply_global_optimizations()
@@ -1101,23 +1155,28 @@ def main(args):
     # Get dataloaders
     print("Loading datasets...")
     
-    # Prepare transform stats
-    if config.transform.use_imagenet_stats:
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
-    else:
-        mean = config.transform.mean
-        std = config.transform.std
-    
+    # Transform stats: input renders and target PBR maps are normalized
+    # independently. Input renders may use ImageNet stats (for the pretrained
+    # encoder); targets must stay at 0.5/0.5 so normal maps decode to [-1,1].
+    input_mean = config.transform.input_mean
+    input_std = config.transform.input_std
+    target_mean = config.transform.mean
+    target_std = config.transform.std
+
     train_loader = get_dataloader(
         input_dir=config.data.input_dir,
         output_dir=config.data.output_dir,
         metadata_path=config.data.metadata_path,
-        transform_mean=mean,
-        transform_std=std,
+        transform_mean=target_mean,
+        transform_std=target_std,
+        input_mean=input_mean,
+        input_std=input_std,
+        target_mean=target_mean,
+        target_std=target_std,
         batch_size=config.data.batch_size,
         shuffle=True,
         num_workers=config.data.num_workers,
+        prefetch_factor=config.data.prefetch_factor,
         pin_memory=config.data.pin_memory,
         persistent_workers=config.data.persistent_workers,
         use_dirty=config.data.use_dirty_renders,
@@ -1125,18 +1184,24 @@ def main(args):
         split="train",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,  # Use input size for now
+        output_size=config.data.output_size,
         seed=config.training.seed
     )
-    
+
     val_loader = get_dataloader(
         input_dir=config.data.input_dir,
         output_dir=config.data.output_dir,
         metadata_path=config.data.metadata_path,
-        transform_mean=mean,
-        transform_std=std,
+        transform_mean=target_mean,
+        transform_std=target_std,
+        input_mean=input_mean,
+        input_std=input_std,
+        target_mean=target_mean,
+        target_std=target_std,
         batch_size=config.data.batch_size,
         shuffle=False,
         num_workers=config.data.num_workers,
+        prefetch_factor=config.data.prefetch_factor,
         pin_memory=config.data.pin_memory,
         persistent_workers=False,
         use_dirty=config.data.use_dirty_renders,
@@ -1144,9 +1209,10 @@ def main(args):
         split="val",
         val_ratio=config.data.val_ratio,
         image_size=config.data.image_size,  # Use input size for now
+        output_size=config.data.output_size,
         seed=config.training.seed
     )
-    
+
     print(f"Train batches: {len(train_loader)}")
     print(f"Val batches: {len(val_loader)}")
     

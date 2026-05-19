@@ -8,6 +8,14 @@ decoders are based off outputting 2048x2048 images
 based on the fact that encoders are 1024x1024
 '''
 
+
+def _gn_groups(channels: int) -> int:
+    """Largest divisor of `channels` that is <= 32, for GroupNorm num_groups."""
+    for g in (32, 16, 8, 4, 2, 1):
+        if channels % g == 0:
+            return g
+    return 1
+
 class ConvBlock(nn.Module):
     """double conv"""
     def __init__(self, in_channel: int, out_channel: int):
@@ -16,9 +24,9 @@ class ConvBlock(nn.Module):
 
         # keeps output size the same, and doesn't recompute bias
         self.conv1 = nn.Conv2d(in_channel, out_channel, kernel_size=3, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channel)
+        self.bn1 = nn.GroupNorm(_gn_groups(out_channel), out_channel)
         self.conv2 = nn.Conv2d(out_channel, out_channel, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channel)
+        self.bn2 = nn.GroupNorm(_gn_groups(out_channel), out_channel)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
@@ -39,7 +47,7 @@ class DecoderBlock(nn.Module):
         self.upsample = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
             nn.Conv2d(in_channel, out_channel, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channel),
+            nn.GroupNorm(_gn_groups(out_channel), out_channel),
             nn.ReLU(inplace=True)
         )
 
@@ -68,12 +76,12 @@ def _build_sr_2x():
             # Lighter SR Head for memory efficiency
             # Reduce channels from 64->128 to 64->64
             nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.GroupNorm(_gn_groups(64), 64),
             nn.ReLU(inplace=True),
 
             # PixelShuffle 2x requires 4x channels (64*4 = 256)
             nn.Conv2d(64, 64 * 4, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(256),
+            nn.GroupNorm(_gn_groups(256), 256),
             nn.ReLU(inplace=True),
 
             # Super-resolve 1024 -> 2048
@@ -82,7 +90,7 @@ def _build_sr_2x():
             # Final refinement at 2048x2048
             # Keep it lightweight (32 channels instead of 64)
             nn.Conv2d(64, 32, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(32),
+            nn.GroupNorm(_gn_groups(32), 32),
             nn.ReLU(inplace=True),
             
             # Project back to 64 for the final heads
@@ -94,29 +102,29 @@ def _build_sr_4x():
     return nn.Sequential(
         # 2x
         nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
-        nn.BatchNorm2d(128),
+        nn.GroupNorm(_gn_groups(128), 128),
         nn.ReLU(inplace=True),
 
         nn.Conv2d(128, 64 * 4, kernel_size=3, padding=1, bias=False),
-        nn.BatchNorm2d(64 * 4),
+        nn.GroupNorm(_gn_groups(64 * 4), 64 * 4),
         nn.ReLU(inplace=True),
 
         nn.PixelShuffle(upscale_factor=2), # 512→1024
 
         # 2x
         nn.Conv2d(64, 128, kernel_size=3, padding=1, bias=False),
-        nn.BatchNorm2d(128),
+        nn.GroupNorm(_gn_groups(128), 128),
         nn.ReLU(inplace=True),
 
         nn.Conv2d(128, 64 * 4, kernel_size=3, padding=1, bias=False),
-        nn.BatchNorm2d(64 * 4),
+        nn.GroupNorm(_gn_groups(64 * 4), 64 * 4),
         nn.ReLU(inplace=True),
 
         nn.PixelShuffle(upscale_factor=2),  # 1024→2048
 
         # Refine
         nn.Conv2d(64, 64, kernel_size=3, padding=1, bias=False),
-        nn.BatchNorm2d(64),
+        nn.GroupNorm(_gn_groups(64), 64),
         nn.ReLU(inplace=True)
     )
 
@@ -223,27 +231,31 @@ class UNetDecoderHeads(nn.Module):
     
     def _init_heads(self):
         """Initialize output heads to prevent early saturation.
-        
+
         For sigmoid outputs (albedo, roughness, metallic), we want initial outputs
         around 0.5 to avoid gradient vanishing. This means:
         - Weights should be small (so pre-activation is close to 0)
         - Bias should be 0 (so sigmoid(0) = 0.5)
-        
-        For normal (head 3), we use tanh → normalize, so we need:
-        - Larger weights to push tanh away from linear region (where all outputs similar)
-        - Varied biases to ensure X,Y,Z channels start different
-        This prevents collapse to [0,0,1] by ensuring diverse starting directions.
+
+        For normal (head 3), we use tanh → normalize. To avoid collapse to [0,0,1]
+        while still letting gradients flow at init:
+        - Asymmetric biases (X=0.3, Y=0.3, Z=0.5) break the [0,0,1] symmetry so
+          X/Y/Z start with different activations.
+        - Weight std is kept modest so tanh stays in its responsive range
+          (large std with 64 input channels would saturate tanh and kill gradients).
         """
         for i, head in enumerate(self.heads):
             if i == 3:  # Normal head (uses tanh → normalize)
-                # Larger std pushes tanh into saturation region for some pixels
-                # This creates spatial variance in the normal map
-                nn.init.normal_(head.weight, mean=0.0, std=0.5)  # Much larger std
+                # Modest std keeps pre-activation small enough that tanh isn't
+                # saturated at init, so gradients flow through the normal head.
+                # The asymmetric biases below (not the weight std) are what
+                # break the [0,0,1] symmetry.
+                nn.init.normal_(head.weight, mean=0.0, std=0.1)  # Modest std keeps tanh responsive at init
                 if head.bias is not None:
-                    # Bias X,Y to non-zero values to break [0,0,1] symmetry
-                    # X and Y should have some activation, Z can vary
+                    # Asymmetric biases break [0,0,1] symmetry so X,Y,Z channels
+                    # start with different activations.
                     head.bias.data[0] = 0.3   # X bias
-                    head.bias.data[1] = 0.3   # Y bias  
+                    head.bias.data[1] = 0.3   # Y bias
                     head.bias.data[2] = 0.5   # Z bias (slightly higher for surface normals)
             else:  # Albedo, roughness, metallic heads
                 # Small weights to keep pre-activation near 0

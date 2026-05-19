@@ -51,8 +51,19 @@ class PBRDataset(Dataset):
         curriculum_mode: int = 0,
         split: Optional[Literal["train", "val"]] = None,
         val_ratio: float = 0.1,
-        seed: int = 42  # For reproducible splits
+        seed: int = 42,  # For reproducible splits
+        input_mean: Optional[List] = None,  # Input render norm (falls back to transform_mean)
+        input_std: Optional[List] = None,   # Input render norm (falls back to transform_std)
+        target_mean: Optional[List] = None, # Target PBR norm (falls back to transform_mean)
+        target_std: Optional[List] = None   # Target PBR norm (falls back to transform_std)
     ):
+        # transform_mean/transform_std act as the shared fallback for both
+        # the input render transform and the target PBR transform.
+        input_mean = input_mean if input_mean is not None else transform_mean
+        input_std = input_std if input_std is not None else transform_std
+        target_mean = target_mean if target_mean is not None else transform_mean
+        target_std = target_std if target_std is not None else transform_std
+
         self.input_dir = Path(input_dir)
         self.output_dir = Path(output_dir)
         self.use_dirty = use_dirty
@@ -84,11 +95,11 @@ class PBRDataset(Dataset):
         transform_list.extend([
             transforms.ToTensor(),
             transforms.Normalize(
-                mean=transform_mean,
-                std=transform_std
+                mean=input_mean,
+                std=input_std
             )
         ])
-        
+
         self.transform = transforms.Compose(transform_list)
         
         # Transform for target PBR maps (may be different size)
@@ -98,8 +109,8 @@ class PBRDataset(Dataset):
         target_transform_list.extend([
             transforms.ToTensor(),
             transforms.Normalize(
-                mean=transform_mean,
-                std=transform_std
+                mean=target_mean,
+                std=target_std
             )
         ])
         self.target_transform = transforms.Compose(target_transform_list)
@@ -283,7 +294,11 @@ class DistillationShardDataset(Dataset):
         # Split args
         split: Optional[Literal["train", "val"]] = None,
         val_ratio: float = 0.1,
-        seed: int = 42
+        seed: int = 42,
+        input_mean: Optional[List] = None,
+        input_std: Optional[List] = None,
+        target_mean: Optional[List] = None,
+        target_std: Optional[List] = None
     ):
         self.shards_dir = Path(shards_dir)
         if not self.shards_dir.exists():
@@ -303,7 +318,11 @@ class DistillationShardDataset(Dataset):
             curriculum_mode=curriculum_mode,
             split=None, # We handle splitting via shard indices
             val_ratio=val_ratio,
-            seed=seed
+            seed=seed,
+            input_mean=input_mean,
+            input_std=input_std,
+            target_mean=target_mean,
+            target_std=target_std
         )
 
         # Find all shards
@@ -400,6 +419,7 @@ def get_dataloader(
         batch_size,
         shuffle=True,
         num_workers=4,
+        prefetch_factor=2,  # batches each worker prefetches
         pin_memory=True,
         persistent_workers=True,
         sampler=None,
@@ -411,7 +431,11 @@ def get_dataloader(
         output_size=None,  # Target image size (if different from input, e.g., for SR training)
     seed=42,  # Seed for reproducible splits
         metadata_path: Optional[str] = None,
-        shards_dir: Optional[str] = None
+        shards_dir: Optional[str] = None,
+        input_mean: Optional[List] = None,   # Input render norm (falls back to transform_mean)
+        input_std: Optional[List] = None,    # Input render norm (falls back to transform_std)
+        target_mean: Optional[List] = None,  # Target PBR norm (falls back to transform_mean)
+        target_std: Optional[List] = None    # Target PBR norm (falls back to transform_std)
 ):
     if shards_dir:
         ds = DistillationShardDataset(
@@ -427,7 +451,11 @@ def get_dataloader(
             curriculum_mode=curriculum_mode,
             split=split,
             val_ratio=val_ratio,
-            seed=seed
+            seed=seed,
+            input_mean=input_mean,
+            input_std=input_std,
+            target_mean=target_mean,
+            target_std=target_std
         )
     else:
         ds = PBRDataset(
@@ -442,9 +470,14 @@ def get_dataloader(
             curriculum_mode=curriculum_mode,
             split=split,
             val_ratio=val_ratio,
-            seed=seed
+            seed=seed,
+            input_mean=input_mean,
+            input_std=input_std,
+            target_mean=target_mean,
+            target_std=target_std
         )
 
+    # prefetch_factor and persistent_workers are only valid with num_workers > 0
     return DataLoader(
         ds,
         batch_size=batch_size,
@@ -452,7 +485,7 @@ def get_dataloader(
         sampler=sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        persistent_workers=persistent_workers,
-        prefetch_factor=2
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        prefetch_factor=prefetch_factor if num_workers > 0 else None
     )
 
