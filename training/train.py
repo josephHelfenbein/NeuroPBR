@@ -37,6 +37,7 @@ Usage:
     torchrun --nproc_per_node=4 train.py --distributed --input-dir /path/to/data/input --output-dir /path/to/data/output
 """
 
+import os
 import sys
 import argparse
 import random
@@ -51,7 +52,10 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 
 import utils.gpu_optimization as gpu_optimization
@@ -130,6 +134,54 @@ def denormalize_target(target: Dict[str, torch.Tensor], mean: List[float], std: 
         result[name] = tensor * std_t + mean_t
     
     return result
+
+
+def setup_distributed() -> Tuple[bool, int, int, int]:
+    """Initialize the default process group from torchrun env vars.
+
+    Returns (is_distributed, rank, local_rank, world_size). When the env
+    vars are missing this is a no-op and returns (False, 0, 0, 1).
+    """
+    if "LOCAL_RANK" not in os.environ:
+        return False, 0, 0, 1
+
+    local_rank = int(os.environ["LOCAL_RANK"])
+    rank = int(os.environ.get("RANK", local_rank))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("Distributed training requires CUDA but no GPU is available.")
+    torch.cuda.set_device(local_rank)
+
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    if not dist.is_initialized():
+        dist.init_process_group(backend=backend, rank=rank, world_size=world_size)
+
+    return True, rank, local_rank, world_size
+
+
+def cleanup_distributed():
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def _unwrap_model(model: nn.Module) -> nn.Module:
+    """Strip DDP and torch.compile wrappers to access the underlying module.
+
+    Handles both wrap orders:
+      - compile-then-DDP:  DDP(OptimizedModule(_orig_mod=Model))
+      - DDP-then-compile:  OptimizedModule(_orig_mod=DDP(Model))
+    """
+    for _ in range(4):  # ample headroom; deepest real stack is 2 wrappers
+        if isinstance(model, DDP):
+            model = model.module
+            continue
+        inner = getattr(model, "_orig_mod", None)
+        if inner is not None and inner is not model:
+            model = inner
+            continue
+        break
+    return model
 
 
 class MultiViewPBRGenerator(nn.Module):
@@ -314,7 +366,11 @@ class Trainer:
         if auto_selected:
             if cuda_available:
                 max_index = max(torch.cuda.device_count() - 1, 0)
-                device_index = min(self.rank, max_index)
+                # Under DDP, pick by LOCAL rank (intra-node index). Using the
+                # global rank would map e.g. rank=8 on a node with 8 GPUs to
+                # min(8, 7)=7, putting two processes on cuda:7.
+                index_source = self.local_rank if self.is_distributed else self.rank
+                device_index = min(index_source, max_index)
                 return torch.device(f"cuda:{device_index}")
             if mps_available:
                 return torch.device("mps")
@@ -337,9 +393,12 @@ class Trainer:
             f"Unknown device option '{preferred_device}'. Use 'auto', 'cuda', 'cuda:0', 'mps', or 'cpu'."
         )
 
-    def __init__(self, config: TrainConfig, rank: int = 0):
+    def __init__(self, config: TrainConfig, rank: int = 0, local_rank: int = 0, world_size: int = 1):
         self.config = config
         self.rank = rank
+        self.local_rank = local_rank
+        self.world_size = world_size
+        self.is_distributed = world_size > 1 and dist.is_available() and dist.is_initialized()
         self.is_main_process = (rank == 0)
 
         # Set device
@@ -351,17 +410,11 @@ class Trainer:
             auto_selected = (self.device_preference is None) or (self.device_preference.lower() == "auto")
             if self.device.type == "cpu" and auto_selected:
                 print("  No CUDA/MPS devices detected; training will run on CPU.")
-        
+
         # Build models
         self.generator = MultiViewPBRGenerator(config).to(self.device)
         self.generator = gpu_optimization.optimize_model_memory_format(self.generator, self.device)
-        
-        # Apply torch.compile to Generator
-        self.generator, gen_compile_info = gpu_optimization.apply_torch_compile(
-            self.generator, 
-            model_name="generator"
-        )
-        
+
         if config.model.use_gan:
             # Choose discriminator type based on config
             if config.model.discriminator_type == "configurable":
@@ -376,28 +429,57 @@ class Trainer:
                     in_channels=config.model.discriminator_in_channels,
                     ndf=config.model.discriminator_ndf
                 ).to(self.device)
-            
+
             if self.discriminator:
                 self.discriminator = gpu_optimization.optimize_model_memory_format(self.discriminator, self.device)
-                
-                # Apply torch.compile to Discriminator
-                self.discriminator, disc_compile_info = gpu_optimization.apply_torch_compile(
-                    self.discriminator,
-                    model_name="discriminator"
-                )
         else:
             self.discriminator = None
+
+        # Wrap with DDP BEFORE torch.compile. SyncBN is required because the
+        # encoder/decoder/discriminator all use BatchNorm; without it stats
+        # would drift between ranks.
+        if self.is_distributed:
+            self.generator = nn.SyncBatchNorm.convert_sync_batchnorm(self.generator)
+            self.generator = DDP(
+                self.generator,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+                find_unused_parameters=False,
+                broadcast_buffers=False,
+            )
+            if self.discriminator is not None:
+                self.discriminator = nn.SyncBatchNorm.convert_sync_batchnorm(self.discriminator)
+                self.discriminator = DDP(
+                    self.discriminator,
+                    device_ids=[self.local_rank],
+                    output_device=self.local_rank,
+                    find_unused_parameters=False,
+                    broadcast_buffers=False,
+                )
+
+        # Apply torch.compile AFTER DDP so DDP sees the original graph.
+        self.generator, gen_compile_info = gpu_optimization.apply_torch_compile(
+            self.generator,
+            model_name="generator"
+        )
+        if self.discriminator is not None:
+            self.discriminator, disc_compile_info = gpu_optimization.apply_torch_compile(
+                self.discriminator,
+                model_name="discriminator"
+            )
+        else:
             disc_compile_info = {"status": "disabled", "reason": "GAN disabled"}
         
-        # Print compilation status
-        print(f"  Generator Compile: {gen_compile_info['status']} ({gen_compile_info.get('mode', 'N/A')})")
-        if gen_compile_info.get('warning'):
-            print(f"  ⚠️  Generator: {gen_compile_info['warning']}")
-            
-        if self.discriminator:
-            print(f"  Discriminator Compile: {disc_compile_info['status']} ({disc_compile_info.get('mode', 'N/A')})")
-            if disc_compile_info.get('warning'):
-                print(f"  ⚠️  Discriminator: {disc_compile_info['warning']}")
+        # Print compilation status (rank 0 only to keep logs clean under DDP)
+        if self.is_main_process:
+            print(f"  Generator Compile: {gen_compile_info['status']} ({gen_compile_info.get('mode', 'N/A')})")
+            if gen_compile_info.get('warning'):
+                print(f"  ⚠️  Generator: {gen_compile_info['warning']}")
+
+            if self.discriminator:
+                print(f"  Discriminator Compile: {disc_compile_info['status']} ({disc_compile_info.get('mode', 'N/A')})")
+                if disc_compile_info.get('warning'):
+                    print(f"  ⚠️  Discriminator: {disc_compile_info['warning']}")
         
         # Build loss
         self.criterion = self._build_loss()
@@ -598,7 +680,12 @@ class Trainer:
         self.generator.train()
         if self.discriminator:
             self.discriminator.train()
-        
+
+        # DistributedSampler needs set_epoch each epoch to vary the shuffle.
+        sampler = getattr(train_loader, "sampler", None)
+        if isinstance(sampler, DistributedSampler):
+            sampler.set_epoch(epoch)
+
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=not self.is_main_process)
         
         epoch_g_loss = 0.0
@@ -853,9 +940,22 @@ class Trainer:
             return float("inf")
         
         avg_loss = total_loss / num_batches
-        
+
         # Average metrics
         avg_metrics = {key: sum(vals) / len(vals) for key, vals in all_metrics.items()}
+
+        # Under DDP each rank only sees a slice of val data; all-reduce so the
+        # rank-0 log and the best-model decision use the true global average.
+        if self.is_distributed:
+            payload = torch.tensor(
+                [avg_loss] + [avg_metrics[k] for k in sorted(avg_metrics)],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            dist.all_reduce(payload, op=dist.ReduceOp.AVG)
+            avg_loss = payload[0].item()
+            for i, k in enumerate(sorted(avg_metrics), start=1):
+                avg_metrics[k] = payload[i].item()
         
         if self.is_main_process:
             print(f"\n[Validation] Epoch {epoch}")
@@ -889,15 +989,15 @@ class Trainer:
         checkpoint = {
             "epoch": epoch,
             "global_step": self.global_step,
-            "generator_state_dict": self.generator.state_dict(),
+            "generator_state_dict": _unwrap_model(self.generator).state_dict(),
             "g_optimizer_state_dict": self.g_optimizer.state_dict(),
             "config": self.config,
             "val_loss": val_loss,
             "best_val_loss": self.best_val_loss
         }
-        
+
         if self.discriminator:
-            checkpoint["discriminator_state_dict"] = self.discriminator.state_dict()
+            checkpoint["discriminator_state_dict"] = _unwrap_model(self.discriminator).state_dict()
             checkpoint["d_optimizer_state_dict"] = self.d_optimizer.state_dict()
         
         if self.scaler:
@@ -936,25 +1036,43 @@ class Trainer:
             reset_optimizer: If True, only load model weights (not optimizer state).
                            Useful for fine-tuning with new loss functions.
         """
-        print(f"Loading checkpoint: {checkpoint_path}")
-        if reset_optimizer:
-            print("  → Resetting optimizer (only loading model weights)")
-        
+        if self.is_main_process:
+            print(f"Loading checkpoint: {checkpoint_path}")
+            if reset_optimizer:
+                print("  → Resetting optimizer (only loading model weights)")
+
         try:
             with torch.serialization.safe_globals([TrainConfig]):
                 checkpoint = torch.load(checkpoint_path, map_location=self.device)
         except pickle.UnpicklingError:
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        
-        self.generator.load_state_dict(checkpoint["generator_state_dict"])
-        
+
+        def _strip_prefixes(state_dict):
+            """Strip _orig_mod./module. prefixes left by torch.compile/DDP in
+            older checkpoints (saved before _unwrap_model existed)."""
+            cleaned = {}
+            for k, v in state_dict.items():
+                name = k
+                if name.startswith("_orig_mod."):
+                    name = name[len("_orig_mod."):]
+                if name.startswith("module."):
+                    name = name[len("module."):]
+                cleaned[name] = v
+            return cleaned
+
+        _unwrap_model(self.generator).load_state_dict(
+            _strip_prefixes(checkpoint["generator_state_dict"])
+        )
+
         if not reset_optimizer:
             self.g_optimizer.load_state_dict(checkpoint["g_optimizer_state_dict"])
-            
+
             if self.discriminator and "discriminator_state_dict" in checkpoint:
-                self.discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
+                _unwrap_model(self.discriminator).load_state_dict(
+                    _strip_prefixes(checkpoint["discriminator_state_dict"])
+                )
                 self.d_optimizer.load_state_dict(checkpoint["d_optimizer_state_dict"])
-            
+
             if self.scaler and "scaler_state_dict" in checkpoint:
                 self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
@@ -966,13 +1084,16 @@ class Trainer:
         else:
             # Load discriminator weights even when resetting optimizer
             if self.discriminator and "discriminator_state_dict" in checkpoint:
-                self.discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
-        
+                _unwrap_model(self.discriminator).load_state_dict(
+                    _strip_prefixes(checkpoint["discriminator_state_dict"])
+                )
+
         self.current_epoch = min(checkpoint["epoch"] + 1, self.config.training.epochs)
         self.global_step = checkpoint["global_step"]
         self.best_val_loss = checkpoint.get("best_val_loss", float('inf'))
-        
-        print(f"Resumed from epoch {self.current_epoch}")
+
+        if self.is_main_process:
+            print(f"Resumed from epoch {self.current_epoch}")
     
     def train(self, train_loader: DataLoader, val_loader: DataLoader):
         """Main training loop."""
@@ -1050,22 +1171,21 @@ def set_seed(seed: int, deterministic: bool = False):
 
 def main(args):
     """Main training function."""
-    # Check for distributed training
-    if args.distributed:
-        print("="*80)
-        print("WARNING: Distributed training is not yet fully implemented!")
-        print("The --distributed flag is parsed but DDP setup is not complete.")
-        print("Multi-GPU training will fail. Please use single GPU for now.")
-        print("="*80)
-        print("\nTo implement distributed training, you need to:")
-        print("1. Initialize torch.distributed with torch.distributed.init_process_group()")
-        print("2. Wrap models with DistributedDataParallel")
-        print("3. Use DistributedSampler for dataloaders")
-        print("4. Properly handle rank/world_size for logging and checkpointing")
-        print("="*80)
-        import sys
-        sys.exit(1)
-    
+    # Detect torchrun. The --distributed flag is accepted for backwards-compat
+    # but the env vars (LOCAL_RANK/RANK/WORLD_SIZE set by torchrun) are what
+    # actually drive distributed mode.
+    use_distributed = args.distributed or ("LOCAL_RANK" in os.environ)
+    if use_distributed:
+        is_distributed, rank, local_rank, world_size = setup_distributed()
+        if not is_distributed:
+            raise RuntimeError(
+                "--distributed was set but torchrun env vars are missing. "
+                "Launch with: torchrun --nproc_per_node=N train.py --distributed ..."
+            )
+    else:
+        is_distributed, rank, local_rank, world_size = False, 0, 0, 1
+    is_main = (rank == 0)
+
     # Load config
     if args.config == "default":
         config = get_default_config()
@@ -1134,26 +1254,37 @@ def main(args):
     if config.training.auto_resize_on_low_vram:
         config = gpu_optimization.optimize_resolution_for_vram(config)
 
-    gpu_optimization.print_verification_commands()
+    if is_main:
+        gpu_optimization.print_verification_commands()
 
-    # Auto-tune batch size if not specified via CLI
-    if args.batch_size is None:
-        optimal_bs = gpu_optimization.calculate_optimal_batch_size(
-            config.model, 
-            input_shape=(3, config.data.image_size[0], config.data.image_size[1])
-        )
-        if optimal_bs != config.data.batch_size:
-            print(f"  Adjusting batch size from {config.data.batch_size} to {optimal_bs} based on VRAM")
-            config.data.batch_size = optimal_bs
-            
-    # Auto-tune num_workers
-    optimal_workers = gpu_optimization.get_optimal_num_workers(config.data.batch_size)
-    if config.data.num_workers != optimal_workers:
-        print(f"  Adjusting num_workers from {config.data.num_workers} to {optimal_workers}")
-        config.data.num_workers = optimal_workers
+    # Under DDP, num_workers is per-process and batch_size is per-GPU. The
+    # GPU-count-aware auto-tune below would multiply both by world_size and
+    # over-subscribe the box, so skip it. The user controls per-GPU batch via
+    # --batch-size; effective batch = batch_size * world_size.
+    if not is_distributed:
+        if args.batch_size is None:
+            optimal_bs = gpu_optimization.calculate_optimal_batch_size(
+                config.model,
+                input_shape=(3, config.data.image_size[0], config.data.image_size[1])
+            )
+            if optimal_bs != config.data.batch_size:
+                print(f"  Adjusting batch size from {config.data.batch_size} to {optimal_bs} based on VRAM")
+                config.data.batch_size = optimal_bs
+
+        optimal_workers = gpu_optimization.get_optimal_num_workers(config.data.batch_size)
+        if config.data.num_workers != optimal_workers:
+            print(f"  Adjusting num_workers from {config.data.num_workers} to {optimal_workers}")
+            config.data.num_workers = optimal_workers
+    else:
+        # Conservative per-process worker count; users can override via config.
+        if config.data.num_workers > 8:
+            if is_main:
+                print(f"  [DDP] Capping num_workers per rank from {config.data.num_workers} to 8")
+            config.data.num_workers = 8
     
     # Get dataloaders
-    print("Loading datasets...")
+    if is_main:
+        print("Loading datasets...")
     
     # Transform stats: input renders and target PBR maps are normalized
     # independently. Input renders may use ImageNet stats (for the pretrained
@@ -1163,70 +1294,119 @@ def main(args):
     target_mean = config.transform.mean
     target_std = config.transform.std
 
-    train_loader = get_dataloader(
+    # We build datasets first so we can wrap them in a DistributedSampler when
+    # running under torchrun. get_dataloader accepts a sampler kwarg and will
+    # disable its own shuffle when one is supplied.
+    from utils.dataset import PBRDataset, DistillationShardDataset
+
+    common_ds_kwargs = dict(
         input_dir=config.data.input_dir,
         output_dir=config.data.output_dir,
         metadata_path=config.data.metadata_path,
-        transform_mean=target_mean,
-        transform_std=target_std,
         input_mean=input_mean,
         input_std=input_std,
         target_mean=target_mean,
         target_std=target_std,
-        batch_size=config.data.batch_size,
-        shuffle=True,
-        num_workers=config.data.num_workers,
-        prefetch_factor=config.data.prefetch_factor,
-        pin_memory=config.data.pin_memory,
-        persistent_workers=config.data.persistent_workers,
+        image_size=config.data.image_size,
+        output_size=config.data.output_size,
         use_dirty=config.data.use_dirty_renders,
         curriculum_mode=config.data.render_curriculum,
-        split="train",
         val_ratio=config.data.val_ratio,
-        image_size=config.data.image_size,  # Use input size for now
-        output_size=config.data.output_size,
-        seed=config.training.seed
+        seed=config.training.seed,
     )
 
-    val_loader = get_dataloader(
-        input_dir=config.data.input_dir,
-        output_dir=config.data.output_dir,
-        metadata_path=config.data.metadata_path,
-        transform_mean=target_mean,
-        transform_std=target_std,
-        input_mean=input_mean,
-        input_std=input_std,
-        target_mean=target_mean,
-        target_std=target_std,
-        batch_size=config.data.batch_size,
-        shuffle=False,
-        num_workers=config.data.num_workers,
-        prefetch_factor=config.data.prefetch_factor,
-        pin_memory=config.data.pin_memory,
-        persistent_workers=False,
-        use_dirty=config.data.use_dirty_renders,
-        curriculum_mode=config.data.render_curriculum,
-        split="val",
-        val_ratio=config.data.val_ratio,
-        image_size=config.data.image_size,  # Use input size for now
-        output_size=config.data.output_size,
-        seed=config.training.seed
-    )
+    train_sampler = None
+    val_sampler = None
+    if is_distributed:
+        # Build datasets directly so we can wrap with DistributedSampler.
+        # PBRDataset takes legacy transform_mean/std args for back-compat; use
+        # target stats since they only matter when input stats are missing.
+        train_ds = PBRDataset(
+            transform_mean=target_mean,
+            transform_std=target_std,
+            split="train",
+            **common_ds_kwargs,
+        )
+        val_ds = PBRDataset(
+            transform_mean=target_mean,
+            transform_std=target_std,
+            split="val",
+            **common_ds_kwargs,
+        )
+        train_sampler = DistributedSampler(
+            train_ds, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True
+        )
+        val_sampler = DistributedSampler(
+            val_ds, num_replicas=world_size, rank=rank, shuffle=False, drop_last=False
+        )
 
-    print(f"Train batches: {len(train_loader)}")
-    print(f"Val batches: {len(val_loader)}")
-    
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=config.data.batch_size,
+            sampler=train_sampler,
+            num_workers=config.data.num_workers,
+            pin_memory=config.data.pin_memory,
+            persistent_workers=config.data.persistent_workers,
+            prefetch_factor=config.data.prefetch_factor,
+            drop_last=True,
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=config.data.batch_size,
+            sampler=val_sampler,
+            num_workers=config.data.num_workers,
+            pin_memory=config.data.pin_memory,
+            persistent_workers=False,
+            prefetch_factor=config.data.prefetch_factor,
+        )
+    else:
+        train_loader = get_dataloader(
+            transform_mean=target_mean,
+            transform_std=target_std,
+            batch_size=config.data.batch_size,
+            shuffle=True,
+            num_workers=config.data.num_workers,
+            prefetch_factor=config.data.prefetch_factor,
+            pin_memory=config.data.pin_memory,
+            persistent_workers=config.data.persistent_workers,
+            split="train",
+            **common_ds_kwargs,
+        )
+
+        val_loader = get_dataloader(
+            transform_mean=target_mean,
+            transform_std=target_std,
+            batch_size=config.data.batch_size,
+            shuffle=False,
+            num_workers=config.data.num_workers,
+            prefetch_factor=config.data.prefetch_factor,
+            pin_memory=config.data.pin_memory,
+            persistent_workers=False,
+            split="val",
+            **common_ds_kwargs,
+        )
+
+    if is_main:
+        print(f"Train batches: {len(train_loader)}")
+        print(f"Val batches: {len(val_loader)}")
+        if is_distributed:
+            print(f"Distributed: world_size={world_size}, "
+                  f"per-GPU batch={config.data.batch_size}, "
+                  f"effective batch={config.data.batch_size * world_size}")
+
     # Create trainer
-    trainer = Trainer(config, rank=0)
-    
+    trainer = Trainer(config, rank=rank, local_rank=local_rank, world_size=world_size)
+
     # Resume if specified
     if args.resume or config.training.resume_from:
         checkpoint_path = args.resume or config.training.resume_from
         reset_opt = getattr(args, 'reset_optimizer', False)
         trainer.load_checkpoint(checkpoint_path, reset_optimizer=reset_opt)
-    
-    # Train
-    trainer.train(train_loader, val_loader)
+
+    try:
+        trainer.train(train_loader, val_loader)
+    finally:
+        cleanup_distributed()
 
 
 if __name__ == "__main__":
@@ -1262,9 +1442,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-dir", type=str, default=None,
                       help="Directory to save checkpoints")
     
-    # Distributed (for future)
+    # Distributed: torchrun sets LOCAL_RANK/RANK/WORLD_SIZE automatically, so
+    # this flag is just an explicit assert that we're launched correctly.
     parser.add_argument("--distributed", action="store_true",
-                      help="Use distributed training")
+                      help="Multi-GPU via torch.distributed. Launch with: "
+                           "torchrun --standalone --nproc_per_node=N train.py --distributed ...")
     
     args = parser.parse_args()
     
