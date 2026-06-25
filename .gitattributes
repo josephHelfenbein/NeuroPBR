@@ -10,4 +10,6 @@ mobile_app/ios/** linguist-vendored
 # Un-vendor iOS user code
 mobile_app/ios/MetalRenderer/** linguist-vendored=false
 mobile_app/ios/Runner/** linguist-vendored=false
+mobile_app/ios/PBRModelHandler.swift linguist-vendored=false
+mobile_app/ios/ImageProcessor.swift linguist-vendored=false
 mobile_app/ios/Runner/GeneratedPluginRegistrant.* linguist-vendored
