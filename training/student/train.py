@@ -32,7 +32,14 @@ GradScaler = _GradScaler
 
 # Import components from parent directory
 from train import MultiViewPBRGenerator
-from train_config import TrainConfig, get_default_config
+from train_config import (
+    TrainConfig,
+    get_default_config,
+    get_default_student_config,
+    load_config_file,
+    teacher_input_stats,
+    validate_output_size,
+)
 from models.encoders.unet import UNetMobileNetV3Encoder
 from models.decoders.unet import UNetDecoderHeads
 from models.transformers.vision_transformer import ViTCrossViewFusion
@@ -131,7 +138,7 @@ class StudentGenerator(MultiViewPBRGenerator):
         if self.return_features:
             result["bottleneck_features"] = fused
             if len(skips_list) >= 2:
-                result["decoder_skip_0"] = skips_list[-1]  # Last (highest res) skip
+                result["decoder_skip_0"] = skips_list[-1]  # Last (deepest, lowest res) skip
                 result["decoder_skip_1"] = skips_list[-2]  # Second last skip
         
         return result
@@ -372,7 +379,14 @@ class DistillationLoss(nn.Module):
         return total_loss, loss_info
 
 
-def _resize_dict_tensors(tensor_dict: Dict[str, torch.Tensor], target_size: Tuple[int, int]) -> Dict[str, torch.Tensor]:
+PBR_KEYS = ("albedo", "roughness", "metallic", "normal")
+
+
+def _resize_dict_tensors(
+    tensor_dict: Dict[str, torch.Tensor],
+    target_size: Tuple[int, int],
+    keys: Optional[Tuple[str, ...]] = None
+) -> Dict[str, torch.Tensor]:
     """
     Resize all tensors in a dict to target_size.
     Used to match teacher/target resolution to student output resolution.
@@ -380,12 +394,15 @@ def _resize_dict_tensors(tensor_dict: Dict[str, torch.Tensor], target_size: Tupl
     Args:
         tensor_dict: Dict of tensors with shape (B, C, H, W)
         target_size: (H, W) to resize to
+        keys: If given, only these keys are resized and returned
     
     Returns:
         Dict with resized tensors
     """
     resized = {}
     for key, tensor in tensor_dict.items():
+        if keys is not None and key not in keys:
+            continue
         if tensor.shape[-2:] != target_size:
             # Use bilinear for smooth downsampling
             resized_tensor = F.interpolate(
@@ -515,7 +532,9 @@ class Trainer:
         alpha: float = 0.3,
         rank: int = 0,
         use_feature_distillation: bool = False,
-        lambda_feat: float = 0.1
+        lambda_feat: float = 0.1,
+        input_mean: Optional[list] = None,
+        input_std: Optional[list] = None
     ):
         self.config = config
         self.rank = rank
@@ -568,6 +587,7 @@ class Trainer:
             self.teacher.eval()
             for param in self.teacher.parameters():
                 param.requires_grad = False
+            self._setup_teacher_input_norm(input_mean, input_std)
             if self.is_main_process and use_feature_distillation:
                 print("  Feature distillation enabled: will extract intermediate features from teacher")
         else:
@@ -671,6 +691,26 @@ class Trainer:
 
         return teacher
 
+    def _setup_teacher_input_norm(self, student_mean: list, student_std: list):
+        """Precompute the affine map from the student's input normalization to the teacher's."""
+        teacher_mean, teacher_std = teacher_input_stats(self.teacher.config)
+        self._teacher_in_scale = None
+        if (list(student_mean), list(student_std)) != (teacher_mean, teacher_std):
+            def _stat(values):
+                return torch.tensor(values, dtype=torch.float32, device=self.device).view(1, 1, -1, 1, 1)
+            mean_s, std_s = _stat(student_mean), _stat(student_std)
+            mean_t, std_t = _stat(teacher_mean), _stat(teacher_std)
+            self._teacher_in_scale = std_s / std_t
+            self._teacher_in_shift = (mean_s - mean_t) / std_t
+            if self.is_main_process:
+                print(f"  Re-normalizing teacher inputs to mean={teacher_mean}, std={teacher_std}")
+
+    def _teacher_input(self, views: torch.Tensor) -> torch.Tensor:
+        """Re-normalize student inputs (B, views, C, H, W) to the teacher's input stats."""
+        if self._teacher_in_scale is None:
+            return views
+        return views * self._teacher_in_scale + self._teacher_in_shift
+
     def _get_teacher_features(self, views: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
         Extract intermediate features from teacher model for feature distillation.
@@ -681,19 +721,23 @@ class Trainer:
         
         # Encode each view
         latents = []
-        aggregated_skips = None
+        per_view_skips = []  # list (len=num_views) of skip lists (encoder order)
         
         for i in range(num_views):
             view = views[:, i]
             latent, skips = self.teacher.encoder(view)
             latent = self.teacher.latent_proj(latent)
             latents.append(latent)
-            if aggregated_skips is None:
-                aggregated_skips = [s for s in skips]
-            else:
-                aggregated_skips = [acc + s for acc, s in zip(aggregated_skips, skips)]
+            per_view_skips.append(skips)
         
-        skips_list = [s / num_views for s in aggregated_skips] if aggregated_skips else []
+        # Learned skip fusion: per level, concat the views on channels -> 1x1 conv
+        skips_list = []
+        if per_view_skips and per_view_skips[0]:
+            num_skip_levels = len(per_view_skips[0])
+            for level in range(num_skip_levels):
+                level_views = [per_view_skips[v][level] for v in range(num_views)]
+                fused_skip = self.teacher.skip_fusion[level](torch.cat(level_views, dim=1))
+                skips_list.append(fused_skip)
         
         # Fuse latents
         if self.teacher.config.model.use_transformer:
@@ -710,7 +754,8 @@ class Trainer:
         albedo = torch.sigmoid(albedo)
         roughness = torch.sigmoid(roughness)
         metallic = torch.sigmoid(metallic)
-        normal = F.normalize(normal, p=2, dim=1)
+        normal = torch.tanh(normal)
+        normal = F.normalize(normal, p=2, dim=1, eps=1e-6)
         
         result = {
             "albedo": albedo,
@@ -842,7 +887,7 @@ class Trainer:
             if self.use_feature_distillation and self.teacher is not None:
                 # Run teacher to get outputs AND intermediate features
                 with torch.no_grad():
-                    teacher_pred_live = self._get_teacher_features(input_renders)
+                    teacher_pred_live = self._get_teacher_features(self._teacher_input(input_renders))
                 # Merge live predictions with shard predictions (prefer live for features)
                 if teacher_pred is not None:
                     # Use shards for outputs, live for features
@@ -855,7 +900,7 @@ class Trainer:
                 if self.teacher is None:
                      raise RuntimeError("Teacher model not loaded and no teacher predictions in batch!")
                 with torch.no_grad():
-                    teacher_pred = self.teacher(input_renders)
+                    teacher_pred = self.teacher(self._teacher_input(input_renders))
 
             # Train student
             self.optimizer.zero_grad()
@@ -894,7 +939,7 @@ class Trainer:
                 
                 # Resize teacher predictions and targets to match student output size
                 # This handles training at lower resolution than shards (e.g., 512 input → 1024 output vs 2048 shards)
-                teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
+                teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size, keys=PBR_KEYS)
                 target_resized = _resize_dict_tensors(target, student_size)
                 
                 # Denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
@@ -1084,7 +1129,7 @@ class Trainer:
                      # Let's assume we skip soft loss or fail.
                      # For now, let's fail to be safe.
                      raise RuntimeError("Teacher model not loaded and no teacher predictions in batch!")
-                teacher_pred = self.teacher(input_renders)
+                teacher_pred = self.teacher(self._teacher_input(input_renders))
             
             # Student forward (features not needed for validation)
             if self._student_needs_return_features_arg:
@@ -1104,7 +1149,7 @@ class Trainer:
 
             # Resize teacher/target to match student output size
             student_size = student_pred["albedo"].shape[-2:]
-            teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size)
+            teacher_pred_resized = _resize_dict_tensors(teacher_pred, student_size, keys=PBR_KEYS)
             target_resized = _resize_dict_tensors(target, student_size)
             
             # Denormalize ground truth from [-1,1] to [0,1] for sigmoid outputs
@@ -1193,7 +1238,8 @@ class Trainer:
             checkpoint["scaler_state_dict"] = self.scaler.state_dict()
 
         # Save regular checkpoint
-        if not self.config.training.save_best_only:
+        snapshot_due = (epoch % self.config.training.save_every_n_epochs == 0)
+        if snapshot_due and not self.config.training.save_best_only:
             checkpoint_path = checkpoint_dir / f"student_epoch_{epoch:04d}.pth"
             torch.save(checkpoint, checkpoint_path)
             print(f"Saved student checkpoint: {checkpoint_path}")
@@ -1263,8 +1309,7 @@ class Trainer:
                     self.best_val_loss = val_loss
 
                 # Save checkpoint
-                if epoch % self.config.training.save_every_n_epochs == 0:
-                    self.save_checkpoint(epoch, val_loss, is_best)
+                self.save_checkpoint(epoch, val_loss, is_best)
 
             # Step scheduler (skip during warmup)
             if epoch >= self.warmup_epochs:
@@ -1296,14 +1341,9 @@ def main(args):
     """Main training function."""
     # Load student config
     if args.config == "default":
-        config = get_default_config()
+        config = get_default_student_config()
     else:
-        # Load custom config file
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("custom_config", args.config)
-        custom_config = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(custom_config)
-        config = custom_config.get_config()
+        config = load_config_file(args.config)
 
     prev_input_dir = config.data.input_dir
     prev_metadata_path = config.data.metadata_path
@@ -1342,6 +1382,8 @@ def main(args):
         config.training.epochs = args.epochs
     if args.checkpoint_dir:
         config.training.checkpoint_dir = args.checkpoint_dir
+
+    validate_output_size(config)
 
     # Validate paths
     if not args.shards_dir:
@@ -1419,7 +1461,9 @@ def main(args):
         alpha=args.alpha,
         rank=0,
         use_feature_distillation=args.use_feature_distillation,
-        lambda_feat=args.lambda_feat
+        lambda_feat=args.lambda_feat,
+        input_mean=mean,
+        input_std=std
     )
 
     # Resume if specified
@@ -1439,7 +1483,7 @@ if __name__ == "__main__":
 
     # Config
     parser.add_argument("--config", type=str, default="default",
-                      help="Config to use: 'default' or path to custom config (e.g., configs/mobilenetv3_2048.py)")
+                      help="Config to use: 'default' (= configs/mobilenetv3_512.py) or path to custom config (e.g., configs/mobilenetv3_2048.py)")
 
     # Distillation hyperparameters
     parser.add_argument("--temperature", type=float, default=4.0,

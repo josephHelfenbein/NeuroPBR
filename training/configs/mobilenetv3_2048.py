@@ -4,8 +4,11 @@ Configuration for MobileNetV3-Large backbone at 2048×2048 resolution.
 Optimized for mobile deployment on 4GB iPhone.
 Based on memory profiling showing ~100 MB usage on Mac (FP32).
 
+Note: the default teacher outputs 512×512, so 2048 shards are upsampled 4×.
+
 Usage:
-    python train.py --config configs/mobilenetv3_2048.py \
+    python student/train.py --config configs/mobilenetv3_2048.py \
+        --shards-dir teacher_shards_2048 \
         --input-dir /path/to/data/input \
         --output-dir /path/to/data/output
 """

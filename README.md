@@ -155,9 +155,9 @@ Key options:
 
 - `--input-dir / --output-dir / --metadata-path` let you point to any folder layout.
 - `--render-curriculum {0|1|2}` picks clean-only, dataset-balanced clean+dirty, or dirty-only inputs (`--use-dirty` remains a shortcut for `2`).
-- The dataloader loads images at native 2048×2048 resolution.
+- Without `--config`, training uses `configs/ultra_stable.py` (512×512, ResNet50, stride 2, SR ×2); the dataloader resizes to the config's `image_size` / `output_size`.
 - `--device {auto|cuda|cuda:0|cpu}` forces the accelerator if auto-detection doesn't pick the GPU you expect.
-- Preset configs like `--config quick_test` or `--config lightweight` adjust model/compute tradeoffs.
+- Other configs in `training/configs/` (e.g. `--config configs/high_quality.py` or `configs/fast_iteration.py` at 2048×2048) adjust model/compute tradeoffs.
 
 Refer to `training/README.md` for the loss breakdown, advanced configs, and troubleshooting steps.
 
@@ -165,13 +165,14 @@ Refer to `training/README.md` for the loss breakdown, advanced configs, and trou
 
 For iOS deployment, train a lightweight student model via knowledge distillation:
 
-1.  **Generate Shards**: Pre-compute teacher outputs at 1024×1024 (matching student SR output).
+1.  **Generate Shards**: Pre-compute teacher outputs at the teacher's native 512×512.
     ```bash
     python teacher_infer.py \
       --checkpoint checkpoints/best_model.pth \
-      --data-root ./data \
-      --shards-dir ./data/shards_1024 \
-      --shard-output-size 1024
+      --input-dir ./data/input \
+      --output-dir ./data/output \
+      --metadata-path ./data/input/render_metadata.json \
+      --shards-dir ./data/shards_512
     ```
 2.  **Train Student**: Train the MobileNetV3-based model on these shards.
 
@@ -179,12 +180,12 @@ For iOS deployment, train a lightweight student model via knowledge distillation
     ```bash
     python student/train.py \
       --config configs/mobilenetv3_512.py \
-      --shards-dir ./data/shards_1024 \
+      --shards-dir ./data/shards_512 \
       --input-dir ./data/input \
       --output-dir ./data/output
     ```
 
-    **Option B: ConvAttn bottleneck (experimental, higher resolution potential):**
+    **Option B: ConvAttn bottleneck (experimental, 1024×1024 output; its 1024 shards are upsampled from the 512 teacher):**
     ```bash
     python student/train.py \
       --config configs/convattn_student.py \

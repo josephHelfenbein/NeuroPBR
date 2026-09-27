@@ -1,7 +1,8 @@
 """
-Configuration for Ultra-stable backbone at 2048×2048 resolution.
+Configuration for Ultra-stable backbone at 512×512 resolution.
 
 This config uses very conservative settings to prevent any collapse.
+This is the default teacher config.
 
 Usage:
     python train.py --config configs/ultra_stable.py \
@@ -18,14 +19,14 @@ def get_config():
     # Model
     config.model.encoder_type = "resnet"
     config.model.encoder_backbone = "resnet50"
-    # stride=2 gives a 64x64 latent (~12k cross-view ViT tokens).
-    # 16x less attention compute than stride=1 (128x128, ~49k tokens) and far
-    # easier on activation memory for the high-res early layers. SR head
-    # (configured below) upsamples the decoder output back to 2048.
+    # stride=2 gives a 16x16 latent per view at 512 input (768 cross-view ViT
+    # tokens total). 16x less attention compute than stride=1 (32x32/view,
+    # 3072 tokens) and easier on activation memory for the high-res early
+    # layers. SR head (configured below) upsamples the decoder output back to 512.
     config.model.encoder_stride = 2
     config.model.freeze_backbone = False
-    # Freeze pretrained ResNet BN: with per-view batch=2 the BN running stats
-    # are too noisy to be useful. freeze_bn=True keeps the well-calibrated
+    # Freeze pretrained ResNet BN: with a small per-GPU batch the BN running
+    # stats are too noisy to be useful. freeze_bn=True keeps the well-calibrated
     # ImageNet statistics (encoder also overrides .train() to keep BN in eval).
     config.model.freeze_bn = True
 
@@ -38,11 +39,14 @@ def get_config():
 
     # Decoder
     config.model.decoder_type = "shared_heads"
-    # decoder_sr_scale=2: with stride=2, decoder produces 1024x1024; SR head
-    # upsamples to 2048x2048. Set explicitly here because TrainConfig.__post_init__
-    # runs before this override is applied (it would set sr_scale=2 by default
-    # for stride=2 anyway, but we keep this explicit for clarity).
+    # decoder_sr_scale=2: with stride=2, decoder produces 256x256; SR head
+    # upsamples to 512x512. Set explicitly here because TrainConfig.__post_init__
+    # runs before this override is applied.
     config.model.decoder_sr_scale = 2
+
+    # At 512 the ViT/decoder activations are small, so skip their recompute
+    config.model.checkpoint_transformer = False
+    config.model.checkpoint_decoder = False
 
     # GAN for realistic outputs (weakened to prevent mode collapse)
     config.model.use_gan = True
@@ -67,8 +71,8 @@ def get_config():
     config.loss.w_color_mean = 5.0
 
     # Data
-    config.data.image_size = (2048, 2048)
-    config.data.output_size = (2048, 2048)
+    config.data.image_size = (512, 512)
+    config.data.output_size = (512, 512)
     config.data.batch_size = 4
     config.data.num_workers = 8
     config.data.prefetch_factor = 2

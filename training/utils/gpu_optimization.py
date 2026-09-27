@@ -62,10 +62,9 @@ def apply_global_optimizations():
     # 2. Enable cuDNN Benchmark Mode
     # This tells PyTorch to spend a little time at the start to find the absolute fastest 
     # algorithm for your specific convolution layer sizes. Great if input sizes don't change!
-    # However, it can use extra memory. Disable if VRAM is tight.
-    gpu_info = detect_gpu_capabilities()
-    if gpu_info["is_available"] and gpu_info["total_memory_gb"] < 16:
-         print("[GPU Optimization] Low VRAM detected: Disabling cuDNN benchmark mode to save memory")
+    # Leave it off if set_seed() enabled deterministic mode.
+    if torch.backends.cudnn.deterministic:
+         print("[GPU Optimization] Deterministic mode: leaving cuDNN benchmark mode disabled")
          torch.backends.cudnn.benchmark = False
     else:
          print("[GPU Optimization] Enabling cuDNN benchmark mode")
@@ -124,6 +123,7 @@ def optimize_model_memory_format(model, device):
 def calculate_optimal_batch_size(model_config, input_shape=(3, 2048, 2048), safety_margin=0.8):
     """
     Tries to guess the best batch size that will fit in your VRAM.
+    Only used when config.data.auto_batch_size is True.
     
     Args:
         model_config: The model configuration object.
@@ -406,7 +406,7 @@ def verify_compilation(model, model_name):
 
 def optimize_resolution_for_vram(config):
     """
-    Automatically adjusts image resolution if VRAM is limited.
+    Automatically lowers image resolution to at most 1024 if VRAM is limited.
     """
     gpu_info = detect_gpu_capabilities()
     if not gpu_info["is_available"]:
@@ -416,12 +416,19 @@ def optimize_resolution_for_vram(config):
     
     # User requested threshold: 16GB
     if total_vram_gb <= 16.0:
+        max_dim = 1024
+        image_size = tuple(min(d, max_dim) for d in config.data.image_size)
+        output_size = tuple(min(d, max_dim) for d in config.data.output_size)
+        if image_size == tuple(config.data.image_size) and output_size == tuple(config.data.output_size):
+            return config
+
         print(f"[GPU Optimization] Detected {total_vram_gb:.1f}GB VRAM (<= 16GB).")
-        print("[GPU Optimization] Auto-resizing inputs and outputs to 1024x1024 to prevent OOM.")
+        print(f"[GPU Optimization] Auto-resizing inputs {config.data.image_size} -> {image_size} "
+              f"and outputs {config.data.output_size} -> {output_size} to prevent OOM.")
         
         # Update config
-        config.data.image_size = (1024, 1024)
-        config.data.output_size = (1024, 1024)
+        config.data.image_size = image_size
+        config.data.output_size = output_size
         
         # Ensure decoder doesn't try to upsample if we want 1024 output
         # If encoder stride is 1, output is same as input.

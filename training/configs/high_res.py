@@ -1,7 +1,7 @@
 """
 Quick config example for 2048x2048 training with 6-layer discriminator.
 
-Copy this to configs/high_res.py and use with:
+Use with:
     python train.py --config configs/high_res.py \
         --input-dir /path/to/data/input \
         --output-dir /path/to/data/output
@@ -21,7 +21,7 @@ def get_config() -> TrainConfig:
     config.data.num_workers = 8
     
     # Model: 6-layer discriminator
-    config.model.encoder_stride = 1  # 2048 → 2048
+    config.model.encoder_stride = 2  # 2048 → 1024
     config.model.decoder_sr_scale = 2  # Upsample decoder output back to 2048
     config.model.discriminator_type = "configurable"
     config.model.discriminator_n_layers = 6  # Large receptive field

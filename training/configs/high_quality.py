@@ -15,6 +15,7 @@ def get_config():
     # Model
     config.model.encoder_backbone = "resnet101"
     config.model.encoder_stride = 2
+    config.model.decoder_sr_scale = 2  # Upsample 1024 decoder output to 2048
     config.model.transformer_depth = 6
     config.model.transformer_num_heads = 32
     config.model.use_gan = True
@@ -36,6 +37,7 @@ def get_config():
     
     # Data
     config.data.image_size = (2048, 2048)
+    config.data.output_size = (2048, 2048)
     config.data.batch_size = 1  # Reduced for 2048x2048
     config.data.num_workers = 8
     

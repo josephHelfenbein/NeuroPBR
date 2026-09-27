@@ -41,8 +41,9 @@ class ConvBlock(nn.Module):
 import torch.utils.checkpoint as checkpoint
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channel, skip_channel, out_channel):
+    def __init__(self, in_channel, skip_channel, out_channel, grad_checkpoint: bool = True):
         super().__init__()
+        self.grad_checkpoint = grad_checkpoint
 
         self.upsample = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False),
@@ -55,7 +56,7 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x, skip):
         # Use checkpointing for the heavy upsampling and convolution
-        if self.training and x.requires_grad:
+        if self.grad_checkpoint and self.training and x.requires_grad:
              return checkpoint.checkpoint(self._forward_impl, x, skip, use_reentrant=False)
         else:
              return self._forward_impl(x, skip)
@@ -189,7 +190,7 @@ class UNetDecoder(nn.Module):
 
 
 class UNetDecoderHeads(nn.Module):
-    def __init__(self, in_channel: int, skip_channels: List[int], out_channels: List[int], sr_scale: Literal[0, 2, 4] = 2):
+    def __init__(self, in_channel: int, skip_channels: List[int], out_channels: List[int], sr_scale: Literal[0, 2, 4] = 2, grad_checkpoint: bool = True):
         """shared decoder implementation"""
         super().__init__()
         self.decoders = nn.ModuleList()
@@ -197,7 +198,7 @@ class UNetDecoderHeads(nn.Module):
         for skip_channel in skip_channels:
             out_ch = skip_channel if skip_channel <= 64 else skip_channel // 2
             self.decoders.append(
-                DecoderBlock(in_channel, skip_channel, out_ch)
+                DecoderBlock(in_channel, skip_channel, out_ch, grad_checkpoint=grad_checkpoint)
             )
             in_channel = out_ch
 

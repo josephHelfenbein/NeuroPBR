@@ -11,7 +11,7 @@ NeuroPBR trains a deep model that:
 1. Consumes **three rendered views** (clean or dirty) per material
 2. Encodes each with a shared ResNet/UNet backbone
 3. Fuses view features via a **Vision Transformer cross-view block**
-4. Decodes to **four 2048×2048 PBR maps** (albedo, roughness, metallic, normal)
+4. Decodes to **four PBR maps** (albedo, roughness, metallic, normal), 512×512 with the default config
 5. Improves realism with **optional GAN losses** plus reconstruction terms
 
 <img src="../renderer/assets/readme-images/teacher-architecture.png">
@@ -62,6 +62,7 @@ output/
 `render_metadata.json` must map `sample_XXXX` folders to `material_name` directories. Both directories are specified in the arguments when running training.
 
 ### 3. Basic Training
+Without `--config`, training uses the default config `configs/ultra_stable.py` (512×512, ResNet50, encoder stride 2, SR ×2).
 ```bash
 python train.py --input-dir ./data/input --output-dir ./data/output
 # Explicit CUDA selection
@@ -74,13 +75,10 @@ python train.py --input-dir ./data/input --output-dir ./data/output --render-cur
 python train.py --input-dir ./data/input --output-dir ./data/output --checkpoint-dir ./my_checkpoints
 ```
 
-### 4. Alternate Presets
+### 4. Alternate Configs
 ```bash
-# Quick smoke test
-python train.py --config quick_test --input-dir ./data/input --output-dir ./data/output --batch-size 2
-
-# Lightweight / no GAN
-python train.py --config lightweight --input-dir ./data/input --output-dir ./data/output
+# Fast experiments (ResNet18, 2-layer ViT)
+python train.py --config configs/fast_iteration.py --input-dir ./data/input --output-dir ./data/output
 
 # Custom config file
 python train.py --config configs/my_config.py --input-dir ./data/input --output-dir ./data/output
@@ -144,7 +142,7 @@ config.training.seed = 42    # reproducible shuffling
 Samples are shuffled once per run and split deterministically with the seed.
 
 ### On-the-Fly Resizing
-Both inputs and targets are loaded at native 2048×2048 resolution (default `config.data.image_size`). No downscaling is applied by default.
+Inputs are resized to `config.data.image_size` and targets to `config.data.output_size` (512×512 in the default `configs/ultra_stable.py`; 2048×2048 in the 2048 configs).
 
 ### Dataset Verification Snippet
 ```bash
@@ -183,12 +181,14 @@ PY
 ### Preset Configurations
 | Name | Highlights | Use Case |
 | --- | --- | --- |
-| `default` | ResNet50 encoder, ViT depth 4, GAN starts epoch 5 | Production training |
-| `quick_test` | ResNet18, ViT depth 2, 20 epochs | Debug / smoke tests |
-| `lightweight` | ResNet50, no GAN | Fast baseline |
-| `configs/high_quality.py` | ResNet101, deeper ViT | Highest fidelity |
-| `configs/fast_iteration.py` | ResNet18, fewer epochs | Rapid experimentation |
-| `configs/ultra_stable.py` | Anti-collapse losses, delayed GAN, long warmup | Stable 2048×2048 training |
+| `configs/ultra_stable.py` (**default**, `--config default`) | 512×512, ResNet50, stride 2 + SR ×2, anti-collapse losses, delayed GAN, long warmup | Default teacher training |
+| `configs/high_quality.py` | 2048×2048, ResNet101, deeper ViT | Highest fidelity |
+| `configs/fast_iteration.py` | 2048×2048, ResNet18, 2-layer ViT, fewer epochs | Rapid experimentation |
+| `configs/high_res.py` | 2048×2048, 6-layer discriminator | High-resolution teacher |
+| `configs/mobilenetv3_512.py` | MobileNetV3-Large, 512×512 | Default student (`student/train.py`) |
+| `configs/mobilenetv3_2048.py`, `configs/convattn_student.py` | MobileNetV3-Large students | See [Student Training](#student-training-distillation) |
+
+`train.py` fails fast if `image_size`, `encoder_stride` and `decoder_sr_scale` can't produce `output_size`.
 
 ### Custom Config Template
 ```python
@@ -281,7 +281,8 @@ cfg.loss.gan_loss_type = 'bce'
 ```python
 cfg.model.encoder_type = 'resnet'
 cfg.model.encoder_backbone = 'resnet50'  # 18 / 34 / 50 / 101 / 152
-cfg.model.encoder_stride = 1             # keep 2048 resolution
+cfg.model.encoder_stride = 2             # decoder produces image_size / 2
+cfg.model.decoder_sr_scale = 2           # SR head upsamples back to image_size
 
 cfg.model.encoder_type = 'unet'
 cfg.model.encoder_channels = [64,128,256,512,1024,2048]
@@ -444,10 +445,10 @@ python validate_dataset.py --input-dir ./data/input --output-dir ./data/output
 python validate_dataset.py --input-dir ./data/input --output-dir ./data/output --delete
 
 # Validate distillation shards
-python validate_dataset.py --shards-dir ./data/shards_1024
+python validate_dataset.py --shards-dir ./data/shards_512
 
 # Validate both images and shards
-python validate_dataset.py --input-dir ./data/input --output-dir ./data/output --shards-dir ./data/shards_1024
+python validate_dataset.py --input-dir ./data/input --output-dir ./data/output --shards-dir ./data/shards_512
 ```
 
 ### Checkpoint Health Check
@@ -503,15 +504,15 @@ For mobile deployment (Core ML), we train a lightweight "Student" model (MobileN
 
 | Config | Input Size | Output Size | Use Case |
 |--------|-----------|-------------|----------|
-| `mobilenetv3_512.py` | 512×512 | 1024×1024 (SR 2×) | **Recommended for iPhone** (ViT bottleneck) |
-| `convattn_student.py` | 1024×1024 | 1024×1024 (No SR) | **Alternative for iPhone** (PLK bottleneck, higher resolution potential) |
+| `mobilenetv3_512.py` | 512×512 | 512×512 (stride 2, SR 2×) | **Default student config**, recommended for iPhone (ViT bottleneck) |
+| `convattn_student.py` | 1024×1024 | 1024×1024 (stride 2, SR 2×) | **Alternative for iPhone** (PLK bottleneck, higher resolution potential) |
 | `mobilenetv3_2048.py` | 2048×2048 | 2048×2048 | Desktop/high-memory devices |
 
 #### Architecture Comparison
 
 | Architecture | Bottleneck | Memory Scaling | Max ANE Resolution | Notes |
 |--------------|------------|----------------|-------------------|-------|
-| MobileNetV3 + ViT | Vision Transformer | O(N²) | ~512→1024 | Proven quality, attention-based |
+| MobileNetV3 + ViT | Vision Transformer | O(N²) | ~512→512 | Proven quality, attention-based |
 | MobileNetV3 + ConvAttn | PLK (Pre-computed Large Kernel) | O(N) | ~1024→1024 (estimated) | Based on ESC paper, linear memory |
 
 The **ConvAttn** architecture uses Pre-computed Large Kernels (PLK) instead of Vision Transformer attention. This trades some representational power for O(N) memory scaling, enabling higher resolutions on Apple Neural Engine.
@@ -521,28 +522,28 @@ Instead of running the heavy teacher model during training (which is slow and VR
 
 **Note:** Shards now only store the teacher's predictions (in float16) to save disk space. The original inputs and targets are loaded from the PNG dataset on-the-fly during student training.
 
-**For 512×512 student training, generate shards at 1024×1024** (matching the student's SR output):
+**For 512×512 student training, generate shards at the teacher's native 512×512:**
 
 ```bash
-# Generate 1024×1024 shards from a trained teacher (recommended)
 python teacher_infer.py \
   --checkpoint checkpoints/best_model.pth \
-  --data-root ./data \
-  --shards-dir ./data/shards_1024 \
-  --shard-output-size 1024
+  --input-dir ./data/input \
+  --output-dir ./data/output \
+  --metadata-path ./data/input/render_metadata.json \
+  --shards-dir ./data/shards_512
 ```
 
-**For 2048×2048 student training:**
+**For 2048×2048 student training** (requires a 2048-output teacher):
 
 ```bash
-# Generate 2048×2048 shards (full resolution)
+# Generate 2048×2048 shards
 python teacher_infer.py \
   --checkpoint checkpoints/best_model.pth \
   --data-root ./data \
   --shards-dir ./data/shards_2048
 ```
 
-*   `--shard-output-size 1024`: Downsamples teacher outputs to 1024×1024 before saving (75% smaller files).
+*   `--shard-output-size N`: Resamples teacher outputs to N×N before saving.
 *   `--shard-size 8`: Keeps shard files manageable.
 
 ### 2. Train Student Model
@@ -550,12 +551,12 @@ Train the student model using the pre-computed shards. This is much faster and u
 
 #### Option A: ViT Student (Recommended)
 
-**For iPhone deployment (512 input → 1024 output):**
+**For iPhone deployment (512 input → 512 output):**
 
 ```bash
 python student/train.py \
   --config configs/mobilenetv3_512.py \
-  --shards-dir ./data/shards_1024 \
+  --shards-dir ./data/shards_512 \
   --input-dir ./data/input \
   --output-dir ./data/output \
   --checkpoint-dir ./checkpoints_student
@@ -565,7 +566,7 @@ python student/train.py \
 
 Uses PLK (Pre-computed Large Kernel) bottleneck instead of ViT attention. May enable higher resolutions on ANE due to O(N) memory scaling.
 
-**For iPhone deployment (512 input → 1024 output via 4× SR):**
+**1024 input → 1024 output (SR 2×):**
 
 ```bash
 python student/train.py \
@@ -578,7 +579,7 @@ python student/train.py \
 
 **Training Notes:**
 - ConvAttn typically converges in **50-70 epochs** (config default: 60)
-- Uses the same distillation shards as ViT student
+- Needs 1024 shards (the ViT student uses 512 shards)
 - The PLK kernel size is 17×17 with 3 blocks
 
 #### Option C: High-Resolution (Desktop)
@@ -602,8 +603,7 @@ The `configs/mobilenetv3_512.py` configuration is specifically tuned for Apple N
 *   **Encoder**: MobileNetV3-Large with lightweight transformer fusion.
 *   **Transformer**: Reduced dimension (256) and depth (2) to fit memory bandwidth constraints.
 *   **Input Resolution**: 512×512 model inputs for memory efficiency.
-*   **Output Resolution**: 1024×1024 via trained SR head (2× upscale).
-*   **SR Head**: Trained neural upscaler from 512 to 1024 (preserved, not stripped).
+*   **Output Resolution**: 512×512 via the SR head (2× upscale). `coreml/converter.py` exports with a stride-1 first conv for 1024×1024 output, which differs from training.
 *   **Final Output**: 2048×2048 via Lanczos upscaling on-device.
 *   **Output Format**: Lossless PNG files (preferred for artist/texture workflows).
 

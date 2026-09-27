@@ -19,6 +19,8 @@ Training strategy:
 - Mixed-precision training (AMP)
 - Cosine LR schedule with warmup
 
+Note: the default teacher outputs 512×512, so 1024 shards are upsampled.
+
 Usage:
     python student/train.py --config configs/convattn_student.py \\
         --shards-dir teacher_shards_1024 \\
@@ -62,13 +64,13 @@ CONVATTN_CONFIG = {
 
 
 def get_config() -> TrainConfig:
-    """Configuration for ConvAttn student training at 1024×1024 (no SR)."""
+    """Configuration for ConvAttn student training at 1024×1024 (SR 2×)."""
     config = TrainConfig()
 
     # ========== Data Configuration ==========
-    # 1024×1024 input and output (no SR head)
+    # 1024×1024 input and output
     # MobileNetV3 with stride=2 produces 32×32 latent from 1024 input
-    # 5 decoder upsamples (32→1024), no SR needed
+    # 4 decoder blocks (32→512), SR 2× head → 1024
     config.data.image_size = (1024, 1024)
     config.data.output_size = (1024, 1024)
     config.data.batch_size = 4  # Lower batch size for higher resolution
@@ -84,9 +86,8 @@ def get_config() -> TrainConfig:
     # Encoder stride=2: 1024 → 512 → 256 → 128 → 64 → 32 latent
     config.model.encoder_stride = 2
     
-    # No SR head: Decoder upsamples directly to 1024×1024
-    # (32→64→128→256→512→1024 via decoder, no SR)
-    config.model.decoder_sr_scale = 0  # 0 = no SR, Literal[0, 2, 4]
+    # SR 2×: decoder upsamples 32→512, SR head → 1024
+    config.model.decoder_sr_scale = 2
     
     # Don't freeze backbone - allow fine-tuning
     config.model.freeze_backbone = False
@@ -233,7 +234,7 @@ if __name__ == "__main__":
     print()
     print("Data:")
     print(f"  Input size: {config.data.image_size}")
-    print(f"  Output size: {config.data.output_size} (no SR, decoder upsamples directly)")
+    print(f"  Output size: {config.data.output_size} (decoder 512 + SR 2×)")
     print(f"  Batch size: {config.data.batch_size}")
     print()
     print("Model:")
@@ -259,5 +260,5 @@ if __name__ == "__main__":
     print(f"  Scheduler: {config.optimizer.scheduler}")
     print(f"  Mixed precision: {config.training.use_amp}")
     print()
-    print("Inference pipeline:")
-    print("  512×512 input → PLK ConvAttn Student → 1024×1024 → Lanczos → 2048×2048")
+    print("Training pipeline:")
+    print("  1024×1024 input → 32×32 latent → PLK ConvAttn → decoder 512×512 → SR 2× → 1024×1024")

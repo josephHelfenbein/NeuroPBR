@@ -46,7 +46,7 @@ import inspect
 import pickle
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from tqdm import tqdm
 
 import torch
@@ -72,11 +72,11 @@ autocast = _autocast
 GradScaler = _GradScaler
 
 # Local imports
-from train_config import TrainConfig, get_default_config, get_quick_test_config, get_lightweight_config
+from train_config import TrainConfig, get_default_config, load_config_file, validate_output_size
 from models.encoders.unet import UNetEncoder, UNetStrideEncoder, UNetResNetEncoder
 from models.decoders.unet import UNetDecoderHeads
 from models.transformers.vision_transformer import ViTCrossViewFusion
-from losses.losses import HybridLoss, discriminator_loss
+from losses.losses import HybridLoss, discriminator_loss, loss_info_to_floats
 from losses.losses import PatchGANDiscriminator as SimplePatchGANDiscriminator
 from models.gan.discriminator import PatchGANDiscriminator as ConfigurablePatchGANDiscriminator
 from utils.dataset import get_dataloader
@@ -184,6 +184,19 @@ def _unwrap_model(model: nn.Module) -> nn.Module:
     return model
 
 
+@contextmanager
+def _frozen_params(module: Optional[nn.Module]):
+    """Temporarily set requires_grad=False on all of module's parameters."""
+    params = [p for p in module.parameters() if p.requires_grad] if module is not None else []
+    for p in params:
+        p.requires_grad_(False)
+    try:
+        yield
+    finally:
+        for p in params:
+            p.requires_grad_(True)
+
+
 class MultiViewPBRGenerator(nn.Module):
     """
     Multi-view fusion generator for PBR map prediction.
@@ -225,7 +238,8 @@ class MultiViewPBRGenerator(nn.Module):
                 mlp_ratio=config.model.transformer_mlp_ratio,
                 proj_drop=config.model.transformer_proj_drop,
                 attn_drop=config.model.transformer_attn_drop,
-                drop_path_rate=config.model.transformer_drop_path_rate
+                drop_path_rate=config.model.transformer_drop_path_rate,
+                grad_checkpoint=config.model.checkpoint_transformer
             )
         else:
             # Simple concatenation fusion
@@ -241,7 +255,8 @@ class MultiViewPBRGenerator(nn.Module):
             in_channel=config.model.transformer_dim,
             skip_channels=skip_channels,
             out_channels=config.model.output_channels,
-            sr_scale=config.model.decoder_sr_scale
+            sr_scale=config.model.decoder_sr_scale,
+            grad_checkpoint=config.model.checkpoint_decoder
         )
     
     def _inspect_encoder(self) -> Tuple[int, List[int]]:
@@ -272,6 +287,11 @@ class MultiViewPBRGenerator(nn.Module):
                 freeze_bn=model_config.freeze_bn,
                 stride=model_config.encoder_stride,
                 skip=True
+            )
+        elif model_config.encoder_type == "mobilenetv3":
+            raise ValueError(
+                "encoder_type='mobilenetv3' is a student encoder; train it with "
+                "student/train.py (StudentGenerator / ConvAttnStudentGenerator)."
             )
         elif model_config.encoder_type == "unet_stride":
             return UNetStrideEncoder(
@@ -557,7 +577,7 @@ class Trainer:
             "w_normal_xy": getattr(self.config.loss, 'w_normal_xy', 0.0),
             "w_color_mean": getattr(self.config.loss, 'w_color_mean', 0.0),
         }
-        return HybridLoss(loss_config).to(self.device)
+        return HybridLoss(loss_config, sync_info=False).to(self.device)
     
     def _build_optimizers(self):
         """Build optimizers for generator and discriminator."""
@@ -688,8 +708,8 @@ class Trainer:
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}", disable=not self.is_main_process)
         
-        epoch_g_loss = 0.0
-        epoch_d_loss = 0.0
+        epoch_g_loss = torch.zeros((), device=self.device, dtype=torch.float32)
+        epoch_d_loss = torch.zeros((), device=self.device, dtype=torch.float32)
         
         use_gan = self.config.model.use_gan and epoch >= self.config.training.gan_start_epoch
 
@@ -723,32 +743,33 @@ class Trainer:
                 self.config.transform.std
             )
             
+            # Generate PBR maps (also used, detached, as the discriminator's fakes)
+            with self._autocast():
+                pred_pbr = self.generator(input_renders)
+            
             # ==================== Train Discriminator ====================
             d_loss_val = 0.0
             if use_gan and self.discriminator:
+                with self._autocast():
+                    # Concatenate PBR maps for discriminator
+                    real_concat = torch.cat([
+                        target["albedo"],
+                        target["roughness"],
+                        target["metallic"],
+                        target["normal"]
+                    ], dim=1)  # (B, 8, H, W)
+                    
+                    fake_concat = torch.cat([
+                        pred_pbr["albedo"].detach(),
+                        pred_pbr["roughness"].detach(),
+                        pred_pbr["metallic"].detach(),
+                        pred_pbr["normal"].detach()
+                    ], dim=1)
+                
                 for _ in range(self.config.training.d_steps_per_g_step):
                     self.d_optimizer.zero_grad()
                     
                     with self._autocast():
-                        # Generate fake PBR
-                        with torch.no_grad():
-                            fake_pbr = self.generator(input_renders)
-                        
-                        # Concatenate PBR maps for discriminator
-                        real_concat = torch.cat([
-                            target["albedo"],
-                            target["roughness"],
-                            target["metallic"],
-                            target["normal"]
-                        ], dim=1)  # (B, 8, H, W)
-                        
-                        fake_concat = torch.cat([
-                            fake_pbr["albedo"].detach(),
-                            fake_pbr["roughness"].detach(),
-                            fake_pbr["metallic"].detach(),
-                            fake_pbr["normal"].detach()
-                        ], dim=1)
-                        
                         # Discriminator predictions
                         real_logits = self.discriminator(real_concat)
                         fake_logits = self.discriminator(fake_concat)
@@ -774,17 +795,21 @@ class Trainer:
                         d_loss.backward()
                         self.d_optimizer.step()
                     
-                    d_loss_val = d_loss.item()
+                    d_loss_val = d_loss.detach()
             
             # ==================== Train Generator ====================
             self.g_optimizer.zero_grad()
             
-            with self._autocast():
-                # Generate PBR maps
-                pred_pbr = self.generator(input_renders)
-                
+            # D's weights are frozen here, so under DDP call the unwrapped module
+            # to keep this forward out of D's gradient reducer.
+            discriminator_for_loss = None
+            if use_gan and self.discriminator:
+                discriminator_for_loss = (
+                    _unwrap_model(self.discriminator) if self.is_distributed else self.discriminator
+                )
+            
+            with _frozen_params(discriminator_for_loss), self._autocast():
                 # Compute loss
-                discriminator_for_loss = self.discriminator if use_gan else None
                 g_loss, loss_info = self.criterion(
                     pred_pbr,
                     target,
@@ -818,38 +843,43 @@ class Trainer:
                 self.g_optimizer.step()
             
             # Update metrics
-            epoch_g_loss += loss_info["loss_total"]
+            epoch_g_loss += g_loss.detach()
             epoch_d_loss += d_loss_val
             
             # Logging
             if self.is_main_process and batch_idx % self.config.training.log_every_n_steps == 0:
+                step_info = loss_info_to_floats({**loss_info, "_d_loss": d_loss_val})
+                d_loss_log = step_info.pop("_d_loss")
+                g_loss_log = step_info["loss_total"]
+                
                 pbar.set_postfix({
-                    "G_loss": f"{loss_info['loss_total']:.4f}",
-                    "D_loss": f"{d_loss_val:.4f}" if use_gan else "N/A"
+                    "G_loss": f"{g_loss_log:.4f}",
+                    "D_loss": f"{d_loss_log:.4f}" if use_gan else "N/A"
                 })
                 
                 if self.writer:
-                    self.writer.add_scalar("train/g_loss", loss_info["loss_total"], self.global_step)
-                    self.writer.add_scalar("train/d_loss", d_loss_val, self.global_step)
+                    self.writer.add_scalar("train/g_loss", g_loss_log, self.global_step)
+                    self.writer.add_scalar("train/d_loss", d_loss_log, self.global_step)
                     self.writer.add_scalar("train/g_lr", self.g_optimizer.param_groups[0]['lr'], self.global_step)
-                    for key, val in loss_info.items():
+                    for key, val in step_info.items():
                         self.writer.add_scalar(f"train/{key}", val, self.global_step)
                 
                 if self.use_wandb:
                     import wandb  # type: ignore
                     log_dict = {
-                        "train/g_loss": loss_info["loss_total"],
-                        "train/d_loss": d_loss_val,
+                        "train/g_loss": g_loss_log,
+                        "train/d_loss": d_loss_log,
                         "train/g_lr": self.g_optimizer.param_groups[0]['lr'],
                         "epoch": epoch,
                         "step": self.global_step
                     }
-                    for key, val in loss_info.items():
+                    for key, val in step_info.items():
                         log_dict[f"train/{key}"] = val
                     wandb.log(log_dict, step=self.global_step)
             
             self.global_step += 1
         
+        epoch_g_loss, epoch_d_loss = torch.stack([epoch_g_loss, epoch_d_loss]).tolist()
         avg_g_loss = epoch_g_loss / len(train_loader)
         avg_d_loss = epoch_d_loss / len(train_loader) if use_gan else 0.0
         
@@ -865,7 +895,7 @@ class Trainer:
         if self.discriminator:
             self.discriminator.eval()
         
-        total_loss = 0.0
+        total_loss = torch.zeros((), device=self.device, dtype=torch.float32)
         num_batches = 0
         all_metrics = {}
         
@@ -901,8 +931,10 @@ class Trainer:
                 self.config.transform.std
             )
             
-            # Forward
-            pred_pbr = self.generator(input_renders)
+            # Forward under autocast; metrics and image logging run in fp32
+            with self._autocast():
+                pred_pbr = self.generator(input_renders)
+            pred_pbr = {k: v.float() for k, v in pred_pbr.items()}
             
             # Loss (without GAN) - now both pred and target are in [0,1]
             _, loss_info = self.criterion(pred_pbr, target, discriminator=None)
@@ -939,7 +971,7 @@ class Trainer:
                 print("\n[Validation] No batches were processed; returning inf loss.")
             return float("inf")
         
-        avg_loss = total_loss / num_batches
+        avg_loss = total_loss.item() / num_batches
 
         # Average metrics
         avg_metrics = {key: sum(vals) / len(vals) for key, vals in all_metrics.items()}
@@ -1189,17 +1221,8 @@ def main(args):
     # Load config
     if args.config == "default":
         config = get_default_config()
-    elif args.config == "quick_test":
-        config = get_quick_test_config()
-    elif args.config == "lightweight":
-        config = get_lightweight_config()
     else:
-        # Load custom config file
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("custom_config", args.config)
-        custom_config = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(custom_config)
-        config = custom_config.get_config()
+        config = load_config_file(args.config)
     
     prev_input_dir = config.data.input_dir
     prev_metadata_path = config.data.metadata_path
@@ -1254,6 +1277,8 @@ def main(args):
     if config.training.auto_resize_on_low_vram:
         config = gpu_optimization.optimize_resolution_for_vram(config)
 
+    validate_output_size(config)
+
     if is_main:
         gpu_optimization.print_verification_commands()
 
@@ -1262,7 +1287,7 @@ def main(args):
     # over-subscribe the box, so skip it. The user controls per-GPU batch via
     # --batch-size; effective batch = batch_size * world_size.
     if not is_distributed:
-        if args.batch_size is None:
+        if args.batch_size is None and config.data.auto_batch_size:
             optimal_bs = gpu_optimization.calculate_optimal_batch_size(
                 config.model,
                 input_shape=(3, config.data.image_size[0], config.data.image_size[1])
@@ -1414,7 +1439,7 @@ if __name__ == "__main__":
     
     # Config
     parser.add_argument("--config", type=str, default="default",
-                      help="Config to use: 'default', 'quick_test', 'lightweight', or path to custom config")
+                      help="Config to use: 'default' (= configs/ultra_stable.py) or path to a config file")
     
     # Data
     parser.add_argument("--batch-size", type=int, default=None,

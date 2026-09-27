@@ -19,6 +19,16 @@ import numpy as np
 from typing import Dict, Optional, Tuple
 
 
+def loss_info_to_floats(info: Dict) -> Dict:
+    """Convert tensor entries of a loss-info dict to floats in a single device->host transfer."""
+    keys = [k for k, v in info.items() if isinstance(v, torch.Tensor)]
+    out = dict(info)
+    if keys:
+        values = torch.stack([info[k].detach().float().reshape(()) for k in keys]).tolist()
+        out.update(zip(keys, values))
+    return out
+
+
 class WeightedL1Loss(nn.Module):
     """Weighted L1 loss across multiple prediction targets.
     
@@ -31,7 +41,7 @@ class WeightedL1Loss(nn.Module):
         self.weights = weights
         self.metallic_boost = metallic_boost  # Boost for samples that ARE metallic
 
-    def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, float]]:
+    def forward(self, pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         # Defensive init: ensure total_loss is always a 0-d tensor even if no weighted
         # term contributes (otherwise downstream .item()/.backward() would crash on a float).
         ref = None
@@ -40,7 +50,7 @@ class WeightedL1Loss(nn.Module):
         elif target:
             ref = next(iter(target.values()))
         if ref is not None:
-            total_loss = torch.zeros((), device=ref.device, dtype=ref.dtype)
+            total_loss = torch.zeros((), device=ref.device, dtype=torch.promote_types(ref.dtype, torch.float32))
         else:
             total_loss = torch.zeros(())
         loss_dict = {}
@@ -54,31 +64,23 @@ class WeightedL1Loss(nn.Module):
                     
                     # Compute per-pixel L1
                     pixel_l1 = torch.abs(pred_m - target_m)
+                    per_sample = pixel_l1.flatten(1).mean(1)  # (B,)
                     
-                    # Check if target has metallic content (max > 0.1 means it's metallic)
-                    batch_size = target_m.shape[0]
-                    sample_losses = []
-                    has_any_metallic = False
+                    # Boost the loss of samples with metallic content (max > 0.1)
+                    has_metallic = target_m.flatten(1).amax(1) > 0.1  # (B,)
+                    scale = torch.where(
+                        has_metallic,
+                        torch.full_like(per_sample, self.metallic_boost),
+                        torch.ones_like(per_sample)
+                    )
                     
-                    for b in range(batch_size):
-                        sample_target = target_m[b]
-                        sample_l1 = pixel_l1[b].mean()
-                        
-                        # If this sample has metallic regions, boost its loss
-                        has_metallic = sample_target.max() > 0.1
-                        if has_metallic:
-                            sample_l1 = sample_l1 * self.metallic_boost
-                            has_any_metallic = True
-                            
-                        sample_losses.append(sample_l1)
-                    
-                    l1 = torch.stack(sample_losses).mean()
-                    loss_dict["metallic_boosted"] = has_any_metallic
+                    l1 = (per_sample * scale).mean()
+                    loss_dict["metallic_boosted"] = has_metallic.any().float()
                 else:
                     l1 = F.l1_loss(pred[name], target[name])
                 
                 total_loss += weight * l1
-                loss_dict[f"l1_{name}"] = l1.item()
+                loss_dict[f"l1_{name}"] = l1.detach()
         
         return total_loss, loss_dict
 
@@ -103,10 +105,6 @@ class SSIMLoss(nn.Module):
         return window.to(dtype=dtype)
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-        # Check for NaN inputs
-        if torch.isnan(pred).any() or torch.isnan(target).any():
-            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
-        
         _, channel, _, _ = pred.shape
         dtype = pred.dtype
         
@@ -140,9 +138,8 @@ class SSIMLoss(nn.Module):
         
         loss = 1.0 - ssim_map.mean()
         
-        # Final NaN check
-        if torch.isnan(loss):
-            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype)
+        # Zero out NaN losses without a GPU->CPU sync
+        loss = torch.where(torch.isnan(loss), torch.zeros_like(loss), loss)
         
         return loss
 
@@ -153,11 +150,7 @@ class NormalConsistencyLoss(nn.Module):
         super().__init__()
         self.normalize_pred = normalize_pred
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> Tuple[torch.Tensor, float]:
-        # Check for NaN inputs
-        if torch.isnan(pred).any() or torch.isnan(target).any():
-            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype), 0.0
-        
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.normalize_pred:
             pred = F.normalize(pred, p=2, dim=1, eps=eps)
         
@@ -166,14 +159,15 @@ class NormalConsistencyLoss(nn.Module):
         cos_sim = (pred * target).sum(dim=1, keepdim=True)
         cos_sim = torch.clamp(cos_sim, -1.0 + eps, 1.0 - eps)
         
-        angle_rad = torch.acos(cos_sim)
-        angle_deg = (angle_rad * 180.0 / np.pi).mean().item()
+        with torch.no_grad():
+            angle_deg = (torch.acos(cos_sim) * 180.0 / np.pi).mean()
         
         loss = (1.0 - cos_sim).mean()
         
-        # Final NaN check
-        if torch.isnan(loss):
-            return torch.tensor(0.0, device=pred.device, dtype=pred.dtype), 0.0
+        # Zero out NaN losses without a GPU->CPU sync
+        is_nan = torch.isnan(loss)
+        loss = torch.where(is_nan, torch.zeros_like(loss), loss)
+        angle_deg = torch.where(is_nan, torch.zeros_like(angle_deg), angle_deg)
         
         return loss, angle_deg
 
@@ -229,9 +223,11 @@ class PatchGANDiscriminator(nn.Module):
 
 class HybridLoss(nn.Module):
     """Unified loss function for PBR reconstruction combining L1, SSIM, normal consistency, and GAN losses."""
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, sync_info: bool = True):
         super().__init__()
         self.config = config
+        # If False, info values stay as detached tensors so callers can sync them in batches
+        self.sync_info = sync_info
         
         l1_weights = {
             "albedo": config.get("w_albedo", 1.0),
@@ -321,7 +317,7 @@ class HybridLoss(nn.Module):
         elif target:
             ref = next(iter(target.values()))
         if ref is not None:
-            total_loss = torch.zeros((), device=ref.device, dtype=ref.dtype)
+            total_loss = torch.zeros((), device=ref.device, dtype=torch.promote_types(ref.dtype, torch.float32))
         else:
             total_loss = torch.zeros(())
 
@@ -330,36 +326,37 @@ class HybridLoss(nn.Module):
             l1_loss, l1_dict = self.l1_loss(pred, target)
             total_loss += w_l1 * l1_loss
             info.update(l1_dict)
-            info["loss_l1_total"] = l1_loss.item()
+            info["loss_l1_total"] = l1_loss.detach()
         
         w_ssim = self.config.get("w_ssim", 0.3)
         if w_ssim > 0 and "albedo" in pred and "albedo" in target:
             ssim_loss = self.ssim_loss(pred["albedo"], target["albedo"])
             total_loss += w_ssim * ssim_loss
-            info["loss_ssim"] = ssim_loss.item()
+            info["loss_ssim"] = ssim_loss.detach()
 
         # Color mean matching - direct global color correction for albedo
         if self.w_color_mean > 0 and "albedo" in pred and "albedo" in target:
             color_mean_loss = self._color_mean_loss(pred["albedo"], target["albedo"])
             total_loss += self.w_color_mean * color_mean_loss
-            info["loss_color_mean"] = color_mean_loss.item()
+            info["loss_color_mean"] = color_mean_loss.detach()
 
         w_normal = self.config.get("w_normal", 0.5)
         if w_normal > 0 and "normal" in pred and "normal" in target:
             normal_loss, angle_deg = self.normal_loss(pred["normal"], target["normal"])
             total_loss += w_normal * normal_loss
-            info["loss_normal"] = normal_loss.item()
+            info["loss_normal"] = normal_loss.detach()
             info["normal_angle_deg"] = angle_deg
         
         # Normal XY magnitude loss - specifically fights [0,0,1] collapse
         if self.w_normal_xy > 0 and "normal" in pred and "normal" in target:
             xy_loss = self._normal_xy_loss(pred["normal"], target["normal"])
             total_loss += self.w_normal_xy * xy_loss
-            info["loss_normal_xy"] = xy_loss.item()
+            info["loss_normal_xy"] = xy_loss.detach()
             # Log the actual XY magnitudes for debugging (with eps for safety)
             eps = 1e-6
-            pred_xy_mag = (pred["normal"][:, 0:2, :, :] ** 2).sum(dim=1).add(eps).sqrt().mean().item()
-            target_xy_mag = (target["normal"][:, 0:2, :, :] ** 2).sum(dim=1).add(eps).sqrt().mean().item()
+            with torch.no_grad():
+                pred_xy_mag = (pred["normal"][:, 0:2, :, :] ** 2).sum(dim=1).add(eps).sqrt().mean()
+                target_xy_mag = (target["normal"][:, 0:2, :, :] ** 2).sum(dim=1).add(eps).sqrt().mean()
             info["pred_normal_xy_mag"] = pred_xy_mag
             info["target_normal_xy_mag"] = target_xy_mag
         
@@ -370,9 +367,9 @@ class HybridLoss(nn.Module):
                 if key in pred and key in target:
                     vl = self._variance_matching_loss(pred[key], target[key])
                     var_loss += vl
-                    info[f"loss_var_{key}"] = vl.item()
+                    info[f"loss_var_{key}"] = vl.detach()
             total_loss += self.w_variance_match * var_loss
-            info["loss_variance_total"] = var_loss.item() if isinstance(var_loss, torch.Tensor) else var_loss
+            info["loss_variance_total"] = var_loss.detach() if isinstance(var_loss, torch.Tensor) else var_loss
         
         w_gan = self.config.get("w_gan", 0.0)
         if w_gan > 0 and discriminator is not None:
@@ -386,16 +383,20 @@ class HybridLoss(nn.Module):
             fake_logits = discriminator(pred_concat)
             gan_loss = generator_gan_loss(fake_logits, self.gan_loss_type)
             total_loss += w_gan * gan_weight_scale * gan_loss
-            info["loss_gan_g"] = gan_loss.item()
+            info["loss_gan_g"] = gan_loss.detach()
             info["gan_weight_scale"] = gan_weight_scale
         
         if "albedo" in pred and "albedo" in target:
-            mae = F.l1_loss(pred["albedo"], target["albedo"]).item()
-            rmse = torch.sqrt(F.mse_loss(pred["albedo"], target["albedo"])).item()
+            with torch.no_grad():
+                mae = F.l1_loss(pred["albedo"], target["albedo"])
+                rmse = torch.sqrt(F.mse_loss(pred["albedo"], target["albedo"]))
             info["mae_albedo"] = mae
             info["rmse_albedo"] = rmse
         
-        info["loss_total"] = total_loss.item()
+        info["loss_total"] = total_loss.detach()
+        
+        if self.sync_info:
+            info = loss_info_to_floats(info)
         
         return total_loss, info
 

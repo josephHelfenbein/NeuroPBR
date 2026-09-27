@@ -30,10 +30,12 @@ class ViTCrossViewFusion(nn.Module):
             proj_drop: float = 0.2,
             attn_drop: float = 0.2,
             drop_path_rate: float = 0.1,
+            grad_checkpoint: bool = True,
     ):
         super().__init__()
         self.dim = dim
         self.num_views = num_views
+        self.grad_checkpoint = grad_checkpoint
 
         drop_path_rates = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
 
@@ -68,11 +70,6 @@ class ViTCrossViewFusion(nn.Module):
 
         assert C == self.dim, f"Input channels {C} doesn't match expected {self.dim}"
 
-        # Check for NaN in inputs
-        for i, l in enumerate(latents):
-            if torch.isnan(l).any():
-                print(f"[ViT Warning] NaN in input latent {i}")
-
         # Spatial positional embedding interpolated to runtime (H, W).
         pos = _interpolate_pos_embed(self.pos_embed, H, W)  # [1, HW, C]
 
@@ -85,20 +82,15 @@ class ViTCrossViewFusion(nn.Module):
         x = torch.cat(tokens, dim=1)  # [B, N*HW, C]
 
         for block in self.blocks:
-            if self.training and x.requires_grad:
+            if self.grad_checkpoint and self.training and x.requires_grad:
                 x = checkpoint.checkpoint(block, x, use_reentrant=False)
             else:
                 x = block(x)
 
         x = rearrange(x, 'b (v hw) c -> b hw (v c)', v=self.num_views)
         x = self.norm(self.fusion(x))
-        
-        # Check for NaN in output
-        output = rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
-        if torch.isnan(output).any():
-            print(f"[ViT Warning] NaN in output! Input had NaN: {any(torch.isnan(l).any() for l in latents)}")
 
-        return output
+        return rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
 
 class ViT(nn.Module):
     def __init__(

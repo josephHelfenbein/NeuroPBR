@@ -18,6 +18,7 @@ class DataConfig:
     # Output size from decoder (achieved via SR scale in decoder)
     output_size: tuple = (2048, 2048)
     batch_size: int = 1  # Per GPU (reduced for 2048x2048)
+    auto_batch_size: bool = False
     num_workers: int = 8
     pin_memory: bool = True
     persistent_workers: bool = True
@@ -72,6 +73,11 @@ class ModelConfig:
     decoder_skip_channels: List[int] = field(
         default_factory=lambda: [1024, 512, 256, 64])  # ResNet skips
     decoder_sr_scale: Literal[0, 2, 4] = 0  # No SR needed for 1024×1024 outputs
+
+    # Gradient checkpointing for the ViT and decoder blocks (the encoder is always
+    # checkpointed). Only worth it at high resolution.
+    checkpoint_transformer: bool = True
+    checkpoint_decoder: bool = True
 
     # Output channels for each PBR map
     # albedo, roughness, metallic, normal
@@ -266,7 +272,9 @@ class TrainConfig:
         if self.data.output_size is None:
             self.data.output_size = self.data.image_size
 
-        # Adjust decoder SR scale so default configs stay at 2048x2048
+        # Adjust decoder SR scale so output_size == image_size. This runs before
+        # config files override fields, so configs that change encoder_stride
+        # must set decoder_sr_scale themselves.
         if self.model.encoder_stride == 1:
             self.model.decoder_sr_scale = 0  # Keep 2048 resolution
         elif self.model.encoder_stride == 2:
@@ -299,54 +307,80 @@ class TrainConfig:
         }
 
 
+CONFIGS_DIR = Path(__file__).resolve().parent / "configs"
+DEFAULT_CONFIG_PATH = CONFIGS_DIR / "ultra_stable.py"
+DEFAULT_STUDENT_CONFIG_PATH = CONFIGS_DIR / "mobilenetv3_512.py"
+
+
+def load_config_file(path) -> TrainConfig:
+    """Load a config file and return its get_config()."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("custom_config", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.get_config()
+
+
 def get_default_config() -> TrainConfig:
-    """Get default configuration for multi-view fusion GAN training."""
-    return TrainConfig()
+    """Default teacher config (configs/ultra_stable.py)."""
+    return load_config_file(DEFAULT_CONFIG_PATH)
 
 
-def get_quick_test_config() -> TrainConfig:
-    """Get configuration for quick testing (small model, few epochs)."""
-    config = TrainConfig()
-
-    # Smaller model
-    config.model.encoder_backbone = "resnet18"
-    # Correct skip channels for ResNet18 [layer3, layer2, layer1, initial]
-    # ResNet18 layers: init=64, l1=64, l2=128, l3=256, l4=512
-    # Encoder returns: [init, l1, l2, l3] -> [64, 64, 128, 256]
-    # Decoder expects reversed: [256, 128, 64, 64]
-    config.model.decoder_skip_channels = [256, 128, 64, 64]
-    
-    config.model.transformer_depth = 2
-    config.model.transformer_num_heads = 16
-
-    # Fewer epochs
-    config.training.epochs = 20
-    config.training.val_every_n_epochs = 1
-    config.training.save_every_n_epochs = 1
-
-    # Smaller batch
-    config.data.batch_size = 1 # Force 1 for safety
-    config.data.num_workers = 4
-
-    config.optimizer.scheduler_warmup_epochs = 2
-
-    return config
+def get_default_student_config() -> TrainConfig:
+    """Default student config (configs/mobilenetv3_512.py)."""
+    return load_config_file(DEFAULT_STUDENT_CONFIG_PATH)
 
 
-def get_lightweight_config() -> TrainConfig:
-    """Get configuration for training without GAN (faster, simpler)."""
-    config = TrainConfig()
+def teacher_input_stats(config: TrainConfig) -> tuple:
+    """(mean, std) of the input normalization a teacher was trained with.
 
-    # Disable GAN
-    config.model.use_gan = False
-    config.loss.w_gan = 0.0
+    Configs pickled before input_mean/input_std existed fall back to the old behavior.
+    """
+    transform = config.transform
+    stored = vars(transform)
+    if "input_mean" in stored and "input_std" in stored:
+        return list(transform.input_mean), list(transform.input_std)
+    if getattr(transform, "use_imagenet_stats", False):
+        return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    return list(transform.mean), list(transform.std)
 
-    # Focus on reconstruction losses
-    config.loss.w_l1 = 1.0
-    config.loss.w_ssim = 0.5
-    config.loss.w_normal = 0.7
 
-    return config
+def _as_hw(size) -> tuple:
+    if isinstance(size, (list, tuple)):
+        return int(size[0]), int(size[1])
+    return int(size), int(size)
+
+
+def validate_output_size(config: TrainConfig) -> None:
+    """Raise if the generator can't produce config.data.output_size.
+
+    The decoder upsamples back to the encoder's first skip (image_size / encoder_stride
+    for resnet/mobilenetv3, image_size for unet), then the SR head scales it.
+    """
+    model = config.model
+    image_hw = _as_hw(config.data.image_size)
+    output_hw = _as_hw(config.data.output_size)
+
+    if model.encoder_type in ("resnet", "mobilenetv3"):
+        skip_div = model.encoder_stride
+        total_div = 16 * model.encoder_stride
+    elif model.encoder_type in ("unet", "unet_stride"):
+        skip_div = 1
+        total_div = 2 ** (len(model.encoder_channels) - 1)
+    else:
+        return
+
+    if any(d % total_div for d in image_hw):
+        raise ValueError(f"image_size {image_hw} must be divisible by {total_div} for this encoder")
+
+    model_hw = tuple(d // skip_div * (model.decoder_sr_scale or 1) for d in image_hw)
+    if model_hw != output_hw:
+        raise ValueError(
+            f"Generator output {model_hw} != output_size {output_hw} (image_size={image_hw}, "
+            f"encoder_stride={model.encoder_stride}, decoder_sr_scale={model.decoder_sr_scale}). "
+            f"Configs that change encoder_stride must also set decoder_sr_scale."
+        )
 
 
 if __name__ == "__main__":

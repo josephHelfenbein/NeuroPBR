@@ -6,7 +6,7 @@ outputs (PBR maps) into compact `.pt` shards for student distillation.
 
 Example usage from the `training` directory:
 
-    # Using default config, clean renders, 2048x2048 (from config)
+    # Using default config (configs/ultra_stable.py), clean renders, 512x512 (from config)
     python teacher_infer.py \
         --data-root /path/to/data \
         --checkpoint checkpoints/best_model.pth
@@ -33,8 +33,9 @@ from train import MultiViewPBRGenerator
 from train_config import (
     TrainConfig,
     get_default_config,
-    get_quick_test_config,
-    get_lightweight_config,
+    load_config_file,
+    teacher_input_stats,
+    validate_output_size,
 )
 from utils.dataset import PBRDataset
 
@@ -42,22 +43,8 @@ from utils.dataset import PBRDataset
 def _load_config(config_arg: str) -> TrainConfig:
     """Mirror train.py's config loading logic."""
     if config_arg == "default":
-        config = get_default_config()
-    elif config_arg == "quick_test":
-        config = get_quick_test_config()
-    elif config_arg == "lightweight":
-        config = get_lightweight_config()
-    else:
-        # Custom config file path
-        import importlib.util
-
-        spec = importlib.util.spec_from_file_location(
-            "custom_config", config_arg)
-        custom_config = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        spec.loader.exec_module(custom_config)
-        config = custom_config.get_config()
-    return config
+        return get_default_config()
+    return load_config_file(config_arg)
 
 
 def _apply_data_overrides(config: TrainConfig, args: argparse.Namespace) -> None:
@@ -173,12 +160,8 @@ def run_inference(
                 print(f"Warning: torch.compile failed ({e}), proceeding without compilation.")
 
     # 2) Build dataset (no train/val split, use all samples once)
-    if config.transform.use_imagenet_stats:
-        mean = [0.485, 0.456, 0.406]
-        std = [0.229, 0.224, 0.225]
-    else:
-        mean = config.transform.mean
-        std = config.transform.std
+    # Normalize inputs with the teacher's training input stats
+    mean, std = teacher_input_stats(config)
 
     ds = PBRDataset(
         input_dir=config.data.input_dir,
@@ -294,7 +277,7 @@ def parse_args():
         "--config",
         type=str,
         default="default",
-        help="Config to use: 'default', 'quick_test', 'lightweight', or path to custom config",
+        help="Config to use: 'default' (= configs/ultra_stable.py) or path to a config file",
     )
 
     # Data (same flags as train.py for familiarity)
@@ -370,7 +353,7 @@ def parse_args():
         "--shard-output-size",
         type=int,
         default=None,
-        help="Downsample teacher outputs to this size before saving (e.g., 1024 for 512 student with SR 2x).",
+        help="Resample teacher outputs to this size before saving (default: keep the teacher's resolution).",
     )
 
     return parser.parse_args()
@@ -407,6 +390,12 @@ if __name__ == "__main__":
 
     # 3. Apply CLI overrides (input/output dirs, curriculum)
     _apply_data_overrides(cfg, args)
+
+    # Only warn: the checkpoint's config fixes the architecture
+    try:
+        validate_output_size(cfg)
+    except ValueError as e:
+        print(f"  Warning: {e}")
     
     # Handle alias
     out_dir = args.shards_dir if args.shards_dir else args.out_dir

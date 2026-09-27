@@ -1,25 +1,26 @@
 """
 Configuration for MobileNetV3-Large backbone at 512×512 resolution.
 
-Optimized for iPhone deployment with ANE constraints.
-Train/inference resolution match eliminates domain gap.
+Default student config. Optimized for iPhone deployment with ANE constraints.
 
 Pipeline:
-    Training:  512×512 input → Model → 1024×1024 output (SR 2×)
-    Inference: 512×512 input → Model → 1024×1024 → Lanczos → 2048×2048
+    Training:  512×512 input → Model → 512×512 output (SR 2×)
+    Inference: coreml/converter.py exports with a stride-1 first conv
+               (512 input → 1024 output), which differs from training.
 
 Shard Generation:
-    Generate shards at 1024×1024 to match student output resolution:
-    
+    Generate shards at the teacher's native 512×512:
+
     python teacher_infer.py \\
         --checkpoint /path/to/teacher.pth \\
-        --data-root /path/to/data \\
-        --out-dir teacher_shards_1024 \\
-        --shard-output-size 1024
+        --input-dir /path/to/data/input \\
+        --output-dir /path/to/data/output \\
+        --metadata-path /path/to/data/input/render_metadata.json \\
+        --out-dir teacher_shards_512
 
 Usage:
     python student/train.py --config configs/mobilenetv3_512.py \\
-        --shards-dir teacher_shards_1024 \\
+        --shards-dir teacher_shards_512 \\
         --input-dir /path/to/data/input \\
         --output-dir /path/to/data/output
 """
@@ -31,12 +32,12 @@ def get_config() -> TrainConfig:
     """Configuration for MobileNetV3-Large training at 512×512."""
     config = TrainConfig()
 
-    # Data: 512×512 input, 1024×1024 output (after SR)
+    # Data: 512×512 input and output
     # Dataset will load 2048 images and resize:
     #   - Inputs: 2048 → 512 (4× downsample)
-    #   - Targets: 2048 → 1024 (2× downsample, matches SR output)
+    #   - Targets: 2048 → 512 (4× downsample)
     config.data.image_size = (512, 512)
-    config.data.output_size = (1024, 1024)  # SR head doubles resolution
+    config.data.output_size = (512, 512)
     config.data.batch_size = 8  # Can use larger batch at lower resolution
     config.data.num_workers = 8
 
@@ -48,8 +49,7 @@ def get_config() -> TrainConfig:
     # This keeps latent small for transformer efficiency
     config.model.encoder_stride = 2
     
-    # SR 2×: Decoder outputs 512, SR head upscales to 1024
-    # This gives us better quality than raw 512 output
+    # SR 2×: Decoder outputs 256, SR head upscales to 512
     config.model.decoder_sr_scale = 2
 
     config.model.freeze_backbone = False
@@ -63,7 +63,7 @@ def get_config() -> TrainConfig:
     config.model.transformer_depth = 2
     config.model.transformer_mlp_ratio = 2
 
-    # Discriminator: 4 layers sufficient for 1024 output
+    # Discriminator: 4 layers sufficient for 512 output
     # (fewer than 2048 version since output is smaller)
     config.model.discriminator_type = "configurable"
     config.model.discriminator_n_layers = 4
@@ -112,5 +112,5 @@ if __name__ == "__main__":
     print(f"  Discriminator layers: {config.model.discriminator_n_layers}")
     print(f"  Epochs: {config.training.epochs}")
     print()
-    print("Inference pipeline:")
-    print("  512×512 input → Model → 1024×1024 → Lanczos → 2048×2048")
+    print("Training pipeline:")
+    print("  512×512 input → 16×16 latent → decoder 256×256 → SR 2× → 512×512")

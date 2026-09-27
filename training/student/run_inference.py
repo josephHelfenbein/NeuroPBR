@@ -31,8 +31,8 @@ import argparse
 import pickle
 from pathlib import Path
 
-# Add parent directory to path for imports
-sys.path.append(str(Path(__file__).parent.parent))
+# Add parent directory to the front of the path so "train" resolves to training/train.py
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import torch
 from PIL import Image
@@ -40,7 +40,9 @@ from torchvision import transforms
 from torchvision.utils import save_image
 
 from train import MultiViewPBRGenerator
-from train_config import get_default_config, TrainConfig
+from student.train import StudentGenerator
+from student.convattn_student import ConvAttnStudentGenerator
+from train_config import get_default_student_config, TrainConfig
 from utils.dataset import PBRDataset
 
 
@@ -143,11 +145,20 @@ def main():
         ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
 
     # Get config (try student-specific key first, fallback to generator)
-    cfg = ckpt.get("config", get_default_config())
+    cfg = ckpt["config"] if "config" in ckpt else get_default_student_config()
 
     # Build student model
     print("Building student model...")
-    model = MultiViewPBRGenerator(cfg).to(device)
+    if cfg.model.encoder_type != "mobilenetv3":
+        model = MultiViewPBRGenerator(cfg).to(device)
+    elif cfg.model.use_transformer:
+        model = StudentGenerator(cfg).to(device)
+    else:
+        model = ConvAttnStudentGenerator(
+            cfg,
+            bottleneck_channels=cfg.model.transformer_dim,
+            num_convattn_blocks=cfg.model.transformer_depth
+        ).to(device)
 
     # Load student weights (try student_state_dict first, fallback to generator_state_dict)
     if "student_state_dict" in ckpt:
