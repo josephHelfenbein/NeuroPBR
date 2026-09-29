@@ -2,6 +2,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -25,6 +26,8 @@ struct EnvironmentCubemap {
     unsigned faceSize = 0;
     unsigned irradianceSize = 0;
     unsigned mipLevels = 0;
+    int sourceWidth = 0;
+    int sourceHeight = 0;
 
     cudaArray_t envArray = nullptr;
     cudaMipmappedArray_t specularArray = nullptr;
@@ -79,6 +82,8 @@ private:
         faceSize = other.faceSize;
         irradianceSize = other.irradianceSize;
         mipLevels = other.mipLevels;
+        sourceWidth = other.sourceWidth;
+        sourceHeight = other.sourceHeight;
 
         envArray = other.envArray;
         specularArray = other.specularArray;
@@ -104,6 +109,8 @@ private:
         other.faceSize = 0;
         other.irradianceSize = 0;
         other.mipLevels = 0;
+        other.sourceWidth = 0;
+        other.sourceHeight = 0;
     }
 };
 
@@ -157,23 +164,29 @@ private:
 
 std::vector<std::filesystem::path> collectHDRIFiles(const std::filesystem::path& root);
 
+// An empty cacheDir disables the environment cache.
 std::vector<EnvironmentCubemap> loadEnvironmentCubemaps(const std::filesystem::path& directory,
                                                         unsigned faceSize, unsigned irradianceSize,
-                                                        unsigned specularSamples, unsigned diffuseSamples);
+                                                        unsigned specularSamples, unsigned diffuseSamples,
+                                                        unsigned hdrMaxWidth,
+                                                        const std::filesystem::path& cacheDir);
 
 BRDFLookupTable createBRDFLUT(unsigned size);
 
 void loadBRDFLUT(BRDFLookupTable& lut);
 
+// Blocks until the frame is in hostFrameRGB (which should be pinned)
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float4* dAlbedo, const float4* dNormal,
                  const float* dRoughness, const float* dMetallic,
-                 float4* dFrame,
-                 int width, int height, std::vector<float4>& frameRGBA,
+                 uint8_t* dFrame,
+                 int width, int height, uint8_t* hostFrameRGB,
+                 cudaStream_t stream,
                  bool enableShadows = false,
                  bool enableCameraArtifacts = false,
                  unsigned long long artifactSeed = 0);
 
 EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& filePath, 
                                                  unsigned faceSize, unsigned irradianceSize,
-                                                 unsigned specularSamples, unsigned diffuseSamples);
+                                                 unsigned specularSamples, unsigned diffuseSamples,
+                                                 unsigned hdrMaxWidth);

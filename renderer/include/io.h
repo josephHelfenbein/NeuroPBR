@@ -4,25 +4,24 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <cstdint>
 #include <cuda_runtime.h>
 
-struct FloatImage {
+struct ByteImage {
 	int width = 0;
 	int height = 0;
 	int channels = 0;
-	std::vector<float> data;
+	std::vector<uint8_t> data;
 };
 
-FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChannels = 3, bool flipY = true);
+ByteImage loadPNGImage8(const std::filesystem::path& filePath, int desiredChannels = 3, bool flipY = true);
 
 // Lightweight readability/size check for PNG files used during continue-mode scans
 bool isPNGReadable(const std::filesystem::path& filePath);
 
-void writePNGImage(const std::filesystem::path& filePath, const float4* frameData, int width, int height, bool flipY = true);
+bool readPNGSize(const std::filesystem::path& filePath, int& width, int& height);
 
-void appendRenderMetadata(const std::filesystem::path& metadataPath,
-                          const std::string& renderFilename,
-                          const std::string& materialName);
+void writePNGImage(const std::filesystem::path& filePath, const uint8_t* rgb, int width, int height);
 
 void loadMetadata(const std::filesystem::path& metadataPath, std::map<std::string, std::string>& entries);
 void saveMetadata(const std::filesystem::path& metadataPath, const std::map<std::string, std::string>& entries);

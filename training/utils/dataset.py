@@ -87,11 +87,7 @@ class PBRDataset(Dataset):
         self.output_size = output_size if output_size is not None else image_size
         
         # Transform for input renders
-        transform_list = []
-        # Add resize if requested size differs from native 2048x2048
-        if self.image_size != (2048, 2048):
-             transform_list.append(transforms.Resize(self.image_size))
-             
+        transform_list = [transforms.Resize(self.image_size)]
         transform_list.extend([
             transforms.ToTensor(),
             transforms.Normalize(
@@ -103,9 +99,7 @@ class PBRDataset(Dataset):
         self.transform = transforms.Compose(transform_list)
         
         # Transform for target PBR maps (may be different size)
-        target_transform_list = []
-        if self.output_size != (2048, 2048):
-            target_transform_list.append(transforms.Resize(self.output_size))
+        target_transform_list = [transforms.Resize(self.output_size)]
         target_transform_list.extend([
             transforms.ToTensor(),
             transforms.Normalize(
@@ -211,13 +205,6 @@ class PBRDataset(Dataset):
                 img = Image.open(path)
                 img.load()  # Force load to detect truncated files
                 img = img.convert('RGB')
-                
-                # Verify native resolution
-                if img.size != (2048, 2048):
-                    # Only warn if not 2048, or assert if strict. 
-                    # User requested: "Verify image dimensions are correct (assert shape)"
-                    # But let's check if image_size is passed.
-                    pass
 
                 if transform:
                     img = transform(img)

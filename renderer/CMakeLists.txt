@@ -18,13 +18,6 @@ message(STATUS "CUDA version: ${CUDAToolkit_VERSION}")
 message(STATUS "CUDA include dirs: ${CUDAToolkit_INCLUDE_DIRS}")
 message(STATUS "CUDA library dirs: ${CUDAToolkit_LIBRARY_DIR}")
 
-find_package(OpenMP)
-if (OpenMP_CXX_FOUND)
-    message(STATUS "OpenMP support found: ${OpenMP_CXX_FLAGS}")
-else()
-    message(WARNING "OpenMP_CXX not found. Building without OpenMP.")
-endif()
-
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -44,6 +37,27 @@ file(GLOB_RECURSE CPP_SOURCES "src/*.cpp")
 list(REMOVE_ITEM CPP_SOURCES ${CMAKE_SOURCE_DIR}/src/main.cpp)
 list(APPEND SOURCES ${CPP_SOURCES})
 
+# fpng/src ships its own copy of stb, so keep it off the include path
+set(FPNG_SOURCE ${CMAKE_SOURCE_DIR}/include/fpng/src/fpng.cpp)
+list(APPEND SOURCES ${FPNG_SOURCE})
+if (MSVC)
+  # No flags needed; fpng checks for SSE4.1/PCLMUL at runtime
+else()
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-msse4.1" FPNG_HAS_MSSE41)
+  check_cxx_compiler_flag("-mpclmul" FPNG_HAS_MPCLMUL)
+  if (FPNG_HAS_MSSE41 AND FPNG_HAS_MPCLMUL)
+    set_source_files_properties(${FPNG_SOURCE} PROPERTIES
+      COMPILE_OPTIONS "-msse4.1;-mpclmul;-fno-strict-aliasing"
+    )
+  else()
+    set_source_files_properties(${FPNG_SOURCE} PROPERTIES
+      COMPILE_DEFINITIONS FPNG_NO_SSE=1
+      COMPILE_OPTIONS "-fno-strict-aliasing"
+    )
+  endif()
+endif()
+
 add_executable(${PROJECT_NAME}
   ${SOURCES}
   ${CUDA_SOURCES}
@@ -54,9 +68,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE
   ${CUDAToolkit_INCLUDE_DIRS}
 )
 
-if (OpenMP_CXX_FOUND)
-  target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OPENMP=1)
-endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   RUNTIME_OUTPUT_DIRECTORY      ${CMAKE_SOURCE_DIR}/bin
@@ -96,4 +107,8 @@ if(UNIX)
   )
 endif()
 
-execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive)
+find_package(Git QUIET)
+if (GIT_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} submodule update --init --recursive
+                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+endif()

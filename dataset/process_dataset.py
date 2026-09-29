@@ -327,7 +327,7 @@ def stream_and_clean(
     dst_dir=None, # Path object or None
     bucket_name=None, # str or None
     prefix="clean",
-    resize=2048,
+    resize=512,
     flatten=False,
     manifest_path=None # Path object
 ):
@@ -464,7 +464,7 @@ def main():
     parser.add_argument("--skip-export", action="store_true", help="Skip export step (use existing raw-dir for cleaning)")
     
     # Clean options
-    parser.add_argument("--resize", type=int, default=2048, help="Resize cleaned images")
+    parser.add_argument("--resize", type=int, default=512, help="Resize cleaned images")
     parser.add_argument("--flatten", action="store_true", help="Flatten cleaned output")
     parser.add_argument("--manifest", type=str, default="manifest.json", help="Manifest file name in clean dir")
     

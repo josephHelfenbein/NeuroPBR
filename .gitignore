@@ -32,3 +32,4 @@ dataset/matsynth_clean
 checkpoints
 inference_outputs
 inference_inputs
+renderer/cache/

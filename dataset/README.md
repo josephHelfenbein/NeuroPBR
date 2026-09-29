@@ -74,7 +74,7 @@ python dataset/process_dataset.py \
 - `--start`: Start index.
 - `--split`: Dataset split (default: `train`).
 - `--skip-export`: Skip the export step (use existing data in `--raw-dir`).
-- `--resize`: Resize cleaned images (default: 2048).
+- `--resize`: Resize cleaned images (default: 512).
 - `--flatten`: Flatten cleaned output.
 - `--manifest`: Manifest file name.
 
@@ -108,6 +108,7 @@ Use `--keep-ext` if you prefer to preserve original file extensions and skip PNG
 - `--verbose`: Extra logging
 - `--ext`: Whitelist of file extensions to consider (default supports common image formats)
 - `--keep-ext`: Keep original file extensions; otherwise the cleaner converts outputs to PNG and fixes names
+- `--resize`: Resize images to this size (square) if they don't match (default: 512)
 - `--manifest`: Optional path to write a JSON manifest of included materials and map paths
 
 ### Detection heuristics (clean_dataset.py)

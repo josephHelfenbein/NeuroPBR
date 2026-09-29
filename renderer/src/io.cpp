@@ -20,17 +20,7 @@
 #define STB_IMAGE_STATIC
 #include "stb_image.h"
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#define STB_IMAGE_WRITE_STATIC
-#include "stb_image_write.h"
-
-constexpr float kByteToFloat = 1.0f / 255.0f;
-constexpr float kFloatToByte = 255.0f;
-
-inline uint8_t toByte(float value) {
-    float clamped = std::clamp(value, 0.0f, 1.0f);
-    return static_cast<uint8_t>(std::lround(clamped * kFloatToByte));
-}
+#include <fpng/src/fpng.h>
 
 inline std::string escapeJsonString(const std::string& input) {
     std::string escaped;
@@ -160,22 +150,20 @@ void parseExistingMetadata(const std::string& content, std::map<std::string, std
     }
 }
 
-FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChannels, bool flipY) {
+ByteImage loadPNGImage8(const std::filesystem::path& filePath, int desiredChannels, bool flipY) {
     if (desiredChannels != 1 && desiredChannels != 3 && desiredChannels != 4) {
         throw std::invalid_argument("desiredChannels must be 1, 3, or 4");
     }
-
-    stbi_set_flip_vertically_on_load(flipY ? 1 : 0);
 
     int width = 0;
     int height = 0;
     int actualChannels = 0;
     std::string utf8Path = filePath.string();
 
+    // Flip here rather than through stb's global flip flag
     unsigned char* rawData = stbi_load(utf8Path.c_str(), &width, &height, &actualChannels, 0);
     if (!rawData) {
         const char* reason = stbi_failure_reason();
-        stbi_set_flip_vertically_on_load(0);
         std::string msg = "Failed to load PNG image: " + utf8Path;
         if (reason) {
             msg += " (Reason: ";
@@ -187,45 +175,45 @@ FloatImage loadPNGImage(const std::filesystem::path& filePath, int desiredChanne
 
     if (actualChannels <= 0) {
         stbi_image_free(rawData);
-        stbi_set_flip_vertically_on_load(0);
         throw std::runtime_error("PNG returned zero channels");
     }
 
-    FloatImage image;
+    ByteImage image;
     image.width = width;
     image.height = height;
     image.channels = desiredChannels;
     image.data.resize(static_cast<size_t>(width) * static_cast<size_t>(height) * desiredChannels);
 
-    const size_t texelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t rowTexels = static_cast<size_t>(width);
     const size_t srcStride = static_cast<size_t>(actualChannels);
-    const std::int64_t texelCount64 = static_cast<std::int64_t>(texelCount);
+    const size_t dstStride = static_cast<size_t>(desiredChannels);
 
-#ifdef USE_OPENMP
-    #pragma omp parallel for schedule(static)
-#endif
-    for (std::int64_t i = 0; i < texelCount64; ++i) {
-        size_t idx = static_cast<size_t>(i);
-        const unsigned char* src = rawData + idx * srcStride;
-        float* dst = image.data.data() + idx * desiredChannels;
+    for (int y = 0; y < height; ++y) {
+        const int srcY = flipY ? (height - 1 - y) : y;
+        const unsigned char* srcRow = rawData + static_cast<size_t>(srcY) * rowTexels * srcStride;
+        std::uint8_t* dstRow = image.data.data() + static_cast<size_t>(y) * rowTexels * dstStride;
 
-        if (desiredChannels == 1) {
-            // Roughness/metallic read the red channel from RGB(A) textures
-            dst[0] = src[0] * kByteToFloat;
-            continue;
-        }
+        for (size_t x = 0; x < rowTexels; ++x) {
+            const unsigned char* src = srcRow + x * srcStride;
+            std::uint8_t* dst = dstRow + x * dstStride;
 
-        dst[0] = src[0] * kByteToFloat;
-        dst[1] = (actualChannels > 1 ? src[1] : src[0]) * kByteToFloat;
-        dst[2] = (actualChannels > 2 ? src[2] : src[0]) * kByteToFloat;
+            if (desiredChannels == 1) {
+                // Roughness/metallic read the red channel from RGB(A) textures
+                dst[0] = src[0];
+                continue;
+            }
 
-        if (desiredChannels == 4) {
-            dst[3] = (actualChannels > 3 ? src[3] * kByteToFloat : 1.0f);
+            dst[0] = src[0];
+            dst[1] = actualChannels > 1 ? src[1] : src[0];
+            dst[2] = actualChannels > 2 ? src[2] : src[0];
+
+            if (desiredChannels == 4) {
+                dst[3] = actualChannels > 3 ? src[3] : 255;
+            }
         }
     }
 
     stbi_image_free(rawData);
-    stbi_set_flip_vertically_on_load(0);
     return image;
 }
 
@@ -243,32 +231,23 @@ bool isPNGReadable(const std::filesystem::path& filePath) {
     return (w > 0 && h > 0);
 }
 
-void writePNGImage(const std::filesystem::path& filePath, const float4* frameData, 
-                    int width, int height, bool flipY) {
-    if (frameData == nullptr) {
-        throw std::invalid_argument("frameData cannot be null");
+bool readPNGSize(const std::filesystem::path& filePath, int& width, int& height) {
+    int w = 0, h = 0, c = 0;
+    if (stbi_info(filePath.string().c_str(), &w, &h, &c) == 0 || w <= 0 || h <= 0) {
+        return false;
+    }
+    width = w;
+    height = h;
+    return true;
+}
+
+void writePNGImage(const std::filesystem::path& filePath, const uint8_t* rgb,
+                   int width, int height) {
+    if (rgb == nullptr) {
+        throw std::invalid_argument("rgb cannot be null");
     }
     if (width <= 0 || height <= 0) {
         throw std::invalid_argument("Invalid image dimensions");
-    }
-
-    stbi_flip_vertically_on_write(flipY ? 1 : 0);
-
-    const size_t texelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-    std::vector<uint8_t> rawPixels(texelCount * 4u);
-    const std::int64_t texelCount64 = static_cast<std::int64_t>(texelCount);
-
-#ifdef USE_OPENMP
-    #pragma omp parallel for schedule(static)
-#endif
-    for (std::int64_t i = 0; i < texelCount64; ++i) {
-        size_t idx = static_cast<size_t>(i);
-        const float4& pixel = frameData[idx];
-        size_t dstIndex = idx * 4u;
-        rawPixels[dstIndex + 0] = toByte(pixel.x);
-        rawPixels[dstIndex + 1] = toByte(pixel.y);
-        rawPixels[dstIndex + 2] = toByte(pixel.z);
-        rawPixels[dstIndex + 3] = toByte(pixel.w);
     }
 
     // Write atomically
@@ -278,20 +257,20 @@ void writePNGImage(const std::filesystem::path& filePath, const float4* frameDat
     std::string utf8Tmp = tmpPath.string();
     int attempts = 3;
     for (int attempt = 1; attempt <= attempts; ++attempt) {
-        if (stbi_write_png(utf8Tmp.c_str(), width, height, 4, rawPixels.data(), width * 4) != 0) {
+        if (fpng::fpng_encode_image_to_file(utf8Tmp.c_str(), rgb,
+                                            static_cast<uint32_t>(width),
+                                            static_cast<uint32_t>(height), 3)) {
             std::error_code ec;
             std::filesystem::rename(tmpPath, filePath, ec);
             if (ec) {
                 std::filesystem::remove(tmpPath);
                 throw std::runtime_error("Failed to rename temp PNG: " + ec.message());
             }
-            stbi_flip_vertically_on_write(0);
             return;
         }
 
         if (attempt == attempts) {
             std::filesystem::remove(tmpPath);
-            stbi_flip_vertically_on_write(0);
             throw std::runtime_error("Failed to write PNG image after retries");
         }
 
@@ -331,16 +310,4 @@ void saveMetadata(const std::filesystem::path& metadataPath, const std::map<std:
         ++idx;
     }
     out << "}\n";
-}
-
-void appendRenderMetadata(const std::filesystem::path& metadataPath,
-                          const std::string& renderFilename,
-                          const std::string& materialName) {
-    std::map<std::string, std::string> entries;
-    loadMetadata(metadataPath, entries);
-
-    std::string sampleKey = std::filesystem::path(renderFilename).filename().string();
-    entries[sampleKey] = materialName;
-
-    saveMetadata(metadataPath, entries);
 }

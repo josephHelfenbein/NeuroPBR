@@ -1,12 +1,15 @@
 #include <renderer.h>
+#include <hdr_image.h>
+#include <env_cache.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <random>
 #include <string>
 #include <utility>
@@ -23,12 +26,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-struct HDRImage {
-    int width = 0;
-    int height = 0;
-    std::vector<float4> pixels;
-};
-
 struct ScopedArray {
     cudaArray_t value = nullptr;
     ~ScopedArray() { reset(); }
@@ -40,22 +37,6 @@ struct ScopedArray {
     }
     cudaArray_t release() {
         cudaArray_t tmp = value;
-        value = nullptr;
-        return tmp;
-    }
-};
-
-struct ScopedMipmappedArray {
-    cudaMipmappedArray_t value = nullptr;
-    ~ScopedMipmappedArray() { reset(); }
-    void reset(cudaMipmappedArray_t newValue = nullptr) {
-        if (value) {
-            cudaFreeMipmappedArray(value);
-        }
-        value = newValue;
-    }
-    cudaMipmappedArray_t release() {
-        cudaMipmappedArray_t tmp = value;
         value = nullptr;
         return tmp;
     }
@@ -101,46 +82,54 @@ void cudaCheck(cudaError_t err, const char* expr, const char* file, int line) {
     }
 }
 
+namespace {
+
+dim3 choose2DBlock(int totalThreads) {
+    if (totalThreads <= 0) {
+        return dim3(16, 16, 1);
+    }
+    const int warp = 32;
+    int blockX = warp;
+    while (blockX > 1 && totalThreads % blockX != 0) {
+        blockX >>= 1;
+    }
+    if (totalThreads % blockX != 0) {
+        blockX = totalThreads;
+    }
+    int blockY = std::max(totalThreads / blockX, 1);
+
+    while (blockY > warp && blockX < 64 && blockX * 2 <= 1024) {
+        blockX *= 2;
+        blockY = std::max(totalThreads / blockX, 1);
+    }
+
+    return dim3(static_cast<unsigned>(blockX),
+                static_cast<unsigned>(blockY),
+                1u);
+}
+
+dim3 chooseShadeBlock() {
+    int minShadeGrid = 0;
+    int optimalShadeBlockSize = 0;
+    CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(&minShadeGrid, &optimalShadeBlockSize, (void*)shadeKernel, 0, 0));
+    return choose2DBlock(optimalShadeBlockSize);
+}
+
+} // namespace
+
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float4* dAlbedo, const float4* dNormal,
                  const float* dRoughness, const float* dMetallic,
-                 float4* dFrame,
-                 int width, int height, std::vector<float4>& frameRGBA,
+                 uint8_t* dFrame,
+                 int width, int height, uint8_t* hostFrameRGB,
+                 cudaStream_t stream,
                  bool enableShadows,
                  bool enableCameraArtifacts,
                  unsigned long long artifactSeed) {
     size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
-    size_t frameBytes = pixelCount * sizeof(float4);
+    size_t frameBytes = pixelCount * 3u;
 
-    int minShadeGrid = 0;
-    int optimalShadeBlockSize = 0;
-    CUDA_CHECK(cudaOccupancyMaxPotentialBlockSize(&minShadeGrid, &optimalShadeBlockSize, (void*)shadeKernel, 0, 0));
-
-    auto choose2DBlock = [](int totalThreads) {
-        if (totalThreads <= 0) {
-            return dim3(16, 16, 1);
-        }
-        const int warp = 32;
-        int blockX = warp;
-        while (blockX > 1 && totalThreads % blockX != 0) {
-            blockX >>= 1;
-        }
-        if (totalThreads % blockX != 0) {
-            blockX = totalThreads;
-        }
-        int blockY = std::max(totalThreads / blockX, 1);
-
-        while (blockY > warp && blockX < 64 && blockX * 2 <= 1024) {
-            blockX *= 2;
-            blockY = std::max(totalThreads / blockX, 1);
-        }
-
-        return dim3(static_cast<unsigned>(blockX),
-                    static_cast<unsigned>(blockY),
-                    1u);
-    };
-
-    dim3 block = choose2DBlock(optimalShadeBlockSize);
+    static const dim3 block = chooseShadeBlock();
     dim3 grid((width + block.x - 1) / block.x,
               (height + block.y - 1) / block.y);
 
@@ -194,6 +183,10 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
     }
     float3 up = normalizeVec(crossVec(forward, right));
 
+    constexpr float kExposureJitterEV = 1.0f;
+    std::uniform_real_distribution<float> exposureJitterDist(-kExposureJitterEV, kExposureJitterEV);
+    const float exposureJitterEV = exposureJitterDist(rng);
+
     constexpr float verticalFovDeg = 55.0f;
     float tanHalfFovY = static_cast<float>(std::tan(verticalFovDeg * 0.5f * degToRad));
     float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
@@ -204,161 +197,16 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                       env.irradianceTexture, brdf.texture,
                       dAlbedo, dNormal,
                       dRoughness, dMetallic,
-                      reinterpret_cast<float*>(dFrame),
+                      dFrame,
                       width, height, cameraPos, forward,
                       right, up, tanHalfFovY, aspectRatio,
                       enableShadows, enableCameraArtifacts, artifactSeed,
                       env.horizonBrightness,
-                      env.zenithBrightness, env.hardness);
+                      env.zenithBrightness, env.hardness,
+                      exposureJitterEV, stream);
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
-
-    frameRGBA.resize(pixelCount);
-    CUDA_CHECK(cudaMemcpy(frameRGBA.data(), dFrame, frameBytes, cudaMemcpyDeviceToHost));
-}
-HDRImage loadHDRImage(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        throw std::runtime_error("Failed to open HDRI file: " + path.string());
-    }
-
-    auto readLine = [&file]() {
-        std::string line;
-        std::getline(file, line);
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        return line;
-    };
-
-    std::string header = readLine();
-    if (header.rfind("#?", 0) != 0) {
-        throw std::runtime_error("Invalid HDRI header (missing #?): " + header);
-    }
-
-    for (;;) {
-        if (!file) {
-            throw std::runtime_error("Unexpected EOF while reading HDRI header");
-        }
-        std::streampos pos = file.tellg();
-        std::string line = readLine();
-        if (line.empty()) {
-            break;
-        }
-    }
-
-    std::string resolution = readLine();
-    if (resolution.empty()) {
-        throw std::runtime_error("Missing resolution line in HDRI");
-    }
-
-    int width = 0;
-    int height = 0;
-    char axis1 = 0, axis2 = 0;
-    char sign1 = 0, sign2 = 0;
-    if (sscanf(resolution.c_str(), "%c%c %d %c%c %d", &sign1, &axis1, &height, &sign2, &axis2, &width) != 6) {
-        throw std::runtime_error("Failed to parse HDRI resolution string: " + resolution);
-    }
-    if ((axis1 != 'Y' && axis1 != 'y') || (axis2 != 'X' && axis2 != 'x')) {
-        throw std::runtime_error("Only -Y +X orientation is supported, got: " + resolution);
-    }
-    if (sign1 != '-' || sign2 != '+') {
-        throw std::runtime_error("Unsupported HDRI orientation: " + resolution);
-    }
-    if (width <= 0 || height <= 0) {
-        throw std::runtime_error("HDRI has invalid dimensions: " + resolution);
-    }
-
-    HDRImage image;
-    image.width = width;
-    image.height = height;
-    image.pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
-
-    std::vector<unsigned char> scanline(static_cast<size_t>(width) * 4u);
-
-    for (int y = 0; y < height; ++y) {
-        unsigned char scanlineHeader[4];
-        if (!file.read(reinterpret_cast<char*>(scanlineHeader), 4)) {
-            throw std::runtime_error("Unexpected EOF reading HDRI scanline header");
-        }
-
-        bool rle = false;
-        if (scanlineHeader[0] == 2 && scanlineHeader[1] == 2) {
-            int scanlineWidth = (int(scanlineHeader[2]) << 8) | int(scanlineHeader[3]);
-            if (scanlineWidth == width) {
-                rle = true;
-            }
-        }
-
-        if (!rle) {
-            scanline[0] = scanlineHeader[0];
-            scanline[width] = scanlineHeader[1];
-            scanline[2 * width] = scanlineHeader[2];
-            scanline[3 * width] = scanlineHeader[3];
-            size_t remaining = static_cast<size_t>(width - 1) * 4u;
-            if (!file.read(reinterpret_cast<char*>(scanline.data() + 4), static_cast<std::streamsize>(remaining))) {
-                throw std::runtime_error("Unexpected EOF reading legacy HDRI scanline");
-            }
-            for (size_t i = 0; i < remaining / 4u; ++i) {
-                scanline[(i + 1) + 0 * width] = scanline[4 + i * 4 + 0];
-                scanline[(i + 1) + 1 * width] = scanline[4 + i * 4 + 1];
-                scanline[(i + 1) + 2 * width] = scanline[4 + i * 4 + 2];
-                scanline[(i + 1) + 3 * width] = scanline[4 + i * 4 + 3];
-            }
-        } else {
-            for (int channel = 0; channel < 4; ++channel) {
-                int index = 0;
-                while (index < width) {
-                    unsigned char code;
-                    file.read(reinterpret_cast<char*>(&code), 1);
-                    if (!file) {
-                        throw std::runtime_error("Unexpected EOF while decoding HDRI RLE");
-                    }
-                    if (code > 128) {
-                        int count = code - 128;
-                        unsigned char value;
-                        file.read(reinterpret_cast<char*>(&value), 1);
-                        if (!file) {
-                            throw std::runtime_error("Unexpected EOF in HDRI RLE run");
-                        }
-                        for (int i = 0; i < count; ++i) {
-                            scanline[channel * width + index++] = value;
-                        }
-                    } else {
-                        int count = code;
-                        if (!file.read(reinterpret_cast<char*>(scanline.data() + channel * width + index), count)) {
-                            throw std::runtime_error("Unexpected EOF in HDRI RLE literal");
-                        }
-                        index += count;
-                    }
-                }
-            }
-        }
-
-#ifdef USE_OPENMP
-        #pragma omp parallel for schedule(static)
-#endif
-        for (int x = 0; x < width; ++x) {
-            unsigned char r = scanline[x + 0 * width];
-            unsigned char g = scanline[x + 1 * width];
-            unsigned char b = scanline[x + 2 * width];
-            unsigned char e = scanline[x + 3 * width];
-
-            float4& dst = image.pixels[static_cast<size_t>(y) * width + x];
-            if (e) {
-                float f = std::ldexp(1.0f, int(e) - (128 + 8));
-                dst.x = r * f;
-                dst.y = g * f;
-                dst.z = b * f;
-                dst.w = 1.0f;
-            } else {
-                dst.x = dst.y = dst.z = 0.0f;
-                dst.w = 1.0f;
-            }
-        }
-    }
-
-    return image;
+    CUDA_CHECK(cudaMemcpyAsync(hostFrameRGB, dFrame, frameBytes, cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 }
 
 cudaTextureObject_t createCubemapTexture(cudaArray_t array) {
@@ -407,10 +255,123 @@ void copyHDRToCudaArray(const HDRImage& image, cudaArray_t array) {
     CUDA_CHECK(cudaMemcpy2DToArray(array, 0, 0, image.pixels.data(), rowBytes, rowBytes, image.height, cudaMemcpyHostToDevice));
 }
 
+namespace {
+
+static_assert(sizeof(float4) == 4 * sizeof(float), "cache buffers hold float4 texels as 4 floats");
+
+constexpr unsigned kEnvArrayFlags = cudaArrayCubemap | cudaArraySurfaceLoadStore;
+
+void allocateEnvironmentArrays(EnvironmentCubemap& env) {
+    cudaChannelFormatDesc float4Desc = cudaCreateChannelDesc<float4>();
+    const cudaExtent cubeExtent = make_cudaExtent(env.faceSize, env.faceSize, 6);
+    CUDA_CHECK(cudaMalloc3DArray(&env.envArray, &float4Desc, cubeExtent, kEnvArrayFlags));
+    CUDA_CHECK(cudaMallocMipmappedArray(&env.specularArray, &float4Desc, cubeExtent, env.mipLevels, kEnvArrayFlags));
+    const cudaExtent irradianceExtent = make_cudaExtent(env.irradianceSize, env.irradianceSize, 6);
+    CUDA_CHECK(cudaMalloc3DArray(&env.irradianceArray, &float4Desc, irradianceExtent, kEnvArrayFlags));
+}
+
+void createEnvironmentTextures(EnvironmentCubemap& env) {
+    env.envTexture = createCubemapTexture(env.envArray);
+    env.specularTexture = createCubemapMipTexture(env.specularArray, env.mipLevels);
+    env.irradianceTexture = createCubemapTexture(env.irradianceArray);
+}
+
+cudaArray_t specularLevel(const EnvironmentCubemap& env, unsigned level) {
+    cudaArray_t levelArray = nullptr;
+    CUDA_CHECK(cudaGetMipmappedArrayLevel(&levelArray, env.specularArray, level));
+    return levelArray;
+}
+
+// Roughness 0 prefilters to the env map itself, so just copy it
+void copyEnvToSpecularLevel0(const EnvironmentCubemap& env) {
+    cudaMemcpy3DParms copyParams{};
+    copyParams.srcArray = env.envArray;
+    copyParams.dstArray = specularLevel(env, 0);
+    copyParams.extent = make_cudaExtent(env.faceSize, env.faceSize, 6);
+    copyParams.kind = cudaMemcpyDeviceToDevice;
+    CUDA_CHECK(cudaMemcpy3D(&copyParams));
+}
+
+void copyCubemapArrayToHost(cudaArray_t array, unsigned faceDim, std::vector<float>& host) {
+    host.resize(envCubemapFloatCount(faceDim));
+    cudaMemcpy3DParms params{};
+    params.srcArray = array;
+    params.dstPtr = make_cudaPitchedPtr(host.data(), faceDim * sizeof(float4), faceDim, faceDim);
+    params.extent = make_cudaExtent(faceDim, faceDim, 6); // in elements, since one side is an array
+    params.kind = cudaMemcpyDeviceToHost;
+    CUDA_CHECK(cudaMemcpy3D(&params));
+}
+
+void copyHostToCubemapArray(const std::vector<float>& host, unsigned faceDim, cudaArray_t array) {
+    if (host.size() != envCubemapFloatCount(faceDim)) {
+        throw std::runtime_error("Cubemap host buffer has " + std::to_string(host.size()) +
+                                 " floats, expected " + std::to_string(envCubemapFloatCount(faceDim)));
+    }
+    cudaMemcpy3DParms params{};
+    params.srcPtr = make_cudaPitchedPtr(const_cast<float*>(host.data()), faceDim * sizeof(float4), faceDim, faceDim);
+    params.dstArray = array;
+    params.extent = make_cudaExtent(faceDim, faceDim, 6);
+    params.kind = cudaMemcpyHostToDevice;
+    CUDA_CHECK(cudaMemcpy3D(&params));
+}
+
+EnvCacheData downloadEnvironment(const EnvironmentCubemap& env) {
+    EnvCacheData data;
+    data.meta.mipLevels = env.mipLevels;
+    data.meta.sourceWidth = env.sourceWidth;
+    data.meta.sourceHeight = env.sourceHeight;
+    data.meta.horizonBrightness = env.horizonBrightness;
+    data.meta.zenithBrightness = env.zenithBrightness;
+    data.meta.hardness = env.hardness;
+
+    copyCubemapArrayToHost(env.envArray, env.faceSize, data.env);
+    data.specular.resize(env.mipLevels > 0 ? env.mipLevels - 1 : 0);
+    for (unsigned level = 1; level < env.mipLevels; ++level) {
+        copyCubemapArrayToHost(specularLevel(env, level), envMipFaceSize(env.faceSize, level), data.specular[level - 1]);
+    }
+    copyCubemapArrayToHost(env.irradianceArray, env.irradianceSize, data.irradiance);
+    return data;
+}
+
+EnvironmentCubemap uploadEnvironment(const std::filesystem::path& filePath, const EnvCacheKey& key,
+                                     const EnvCacheData& data) {
+    EnvironmentCubemap result;
+    result.name = filePath.filename().string();
+    result.faceSize = key.faceSize;
+    result.irradianceSize = key.irradianceSize;
+    result.mipLevels = data.meta.mipLevels;
+    result.sourceWidth = data.meta.sourceWidth;
+    result.sourceHeight = data.meta.sourceHeight;
+    if (result.mipLevels != envMipLevelCount(result.faceSize) || data.specular.size() + 1 != result.mipLevels) {
+        throw std::runtime_error("Environment cache data for " + result.name + " has an unexpected mip count");
+    }
+
+    allocateEnvironmentArrays(result);
+    copyHostToCubemapArray(data.env, result.faceSize, result.envArray);
+    copyEnvToSpecularLevel0(result);
+    for (unsigned level = 1; level < result.mipLevels; ++level) {
+        copyHostToCubemapArray(data.specular[level - 1], envMipFaceSize(result.faceSize, level), specularLevel(result, level));
+    }
+    copyHostToCubemapArray(data.irradiance, result.irradianceSize, result.irradianceArray);
+    createEnvironmentTextures(result);
+
+    result.horizonBrightness = data.meta.horizonBrightness;
+    result.zenithBrightness = data.meta.zenithBrightness;
+    result.hardness = data.meta.hardness;
+    return result;
+}
+
+} // namespace
+
 EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& filePath,
                                                  unsigned faceSize, unsigned irradianceSize,
-                                                 unsigned specularSamples, unsigned diffuseSamples) {
-    HDRImage hdr = loadHDRImage(filePath);
+                                                 unsigned specularSamples, unsigned diffuseSamples,
+                                                 unsigned hdrMaxWidth) {
+    auto loadStart = std::chrono::steady_clock::now();
+    HDRImage hdr = loadHDRImage(filePath, static_cast<int>(hdrMaxWidth));
+    auto loadMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - loadStart).count();
+    std::cout << "  HDRI " << hdr.sourceWidth << "x" << hdr.sourceHeight << " -> "
+              << hdr.width << "x" << hdr.height << " (loaded in " << loadMs << " ms)" << std::endl;
 
     cudaChannelFormatDesc float4Desc = cudaCreateChannelDesc<float4>();
 
@@ -436,16 +397,16 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
     result.name = filePath.filename().string();
     result.faceSize = faceSize;
     result.irradianceSize = irradianceSize;
-    result.mipLevels = static_cast<unsigned>(std::floor(std::log2(faceSize))) + 1u;
+    result.mipLevels = envMipLevelCount(faceSize);
+    result.sourceWidth = hdr.sourceWidth;
+    result.sourceHeight = hdr.sourceHeight;
 
-    cudaExtent cubeExtent = make_cudaExtent(faceSize, faceSize, 6);
-
-    ScopedArray envArray;
-    CUDA_CHECK(cudaMalloc3DArray(&envArray.value, &float4Desc, cubeExtent, cudaArrayCubemap | cudaArraySurfaceLoadStore));
+    allocateEnvironmentArrays(result);
+    createEnvironmentTextures(result);
 
     cudaResourceDesc envSurfRes{};
     envSurfRes.resType = cudaResourceTypeArray;
-    envSurfRes.res.array.array = envArray.value;
+    envSurfRes.res.array.array = result.envArray;
 
     ScopedSurface envSurface;
     CUDA_CHECK(cudaCreateSurfaceObject(&envSurface.value, &envSurfRes));
@@ -474,9 +435,6 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
     envSurface.reset();
     hdrTexture.reset();
     hdrArray.reset();
-
-    result.envArray = envArray.release();
-    result.envTexture = createCubemapTexture(result.envArray);
 
     const float horizonMinY = 0.0f;
     const float horizonMaxY = 0.35f;
@@ -522,26 +480,23 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
     float blurRange = maxBlur - minBlur;
     result.hardness = minBlur + (1.0f - normalizedHardness) * blurRange;
 
-    ScopedMipmappedArray specularArray;
-    CUDA_CHECK(cudaMallocMipmappedArray(&specularArray.value, &float4Desc,
-                                        cubeExtent, result.mipLevels,
-                                        cudaArrayCubemap | cudaArraySurfaceLoadStore));
-
     ScopedTexture envTextureForSampling;
     envTextureForSampling.reset(createCubemapTexture(result.envArray));
 
     for (unsigned level = 0; level < result.mipLevels; ++level) {
-        cudaArray_t levelArray = nullptr;
-        CUDA_CHECK(cudaGetMipmappedArrayLevel(&levelArray, specularArray.value, level));
+        if (level == 0) {
+            copyEnvToSpecularLevel0(result);
+            continue;
+        }
 
         cudaResourceDesc levelRes{};
         levelRes.resType = cudaResourceTypeArray;
-        levelRes.res.array.array = levelArray;
+        levelRes.res.array.array = specularLevel(result, level);
 
         ScopedSurface levelSurface;
         CUDA_CHECK(cudaCreateSurfaceObject(&levelSurface.value, &levelRes));
 
-        unsigned mipFaceSize = std::max(1u, faceSize >> level);
+        unsigned mipFaceSize = envMipFaceSize(faceSize, level);
         dim3 mipBlock = block;
         dim3 mipGrid = makePrefilterGrid(mipFaceSize, mipBlock);
         unsigned int totalBlocks = mipGrid.x * mipGrid.y * mipGrid.z;
@@ -574,19 +529,9 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
 
     envTextureForSampling.reset();
 
-    result.specularArray = specularArray.release();
-    result.specularTexture = createCubemapMipTexture(result.specularArray, result.mipLevels);
-
-    cudaExtent irradianceExtent = make_cudaExtent(irradianceSize, irradianceSize, 6);
-    ScopedArray irradianceArray;
-    CUDA_CHECK(cudaMalloc3DArray(&irradianceArray.value,
-                                 &float4Desc,
-                                 irradianceExtent,
-                                 cudaArrayCubemap | cudaArraySurfaceLoadStore));
-
     cudaResourceDesc irradianceRes{};
     irradianceRes.resType = cudaResourceTypeArray;
-    irradianceRes.res.array.array = irradianceArray.value;
+    irradianceRes.res.array.array = result.irradianceArray;
 
     ScopedSurface irradianceSurface;
     CUDA_CHECK(cudaCreateSurfaceObject(&irradianceSurface.value, &irradianceRes));
@@ -604,9 +549,6 @@ EnvironmentCubemap precomputeEnvironmentCubemap(const std::filesystem::path& fil
     CUDA_CHECK(cudaDeviceSynchronize());
 
     irradianceSurface.reset();
-
-    result.irradianceArray = irradianceArray.release();
-    result.irradianceTexture = createCubemapTexture(result.irradianceArray);
 
     return result;
 }
@@ -633,17 +575,148 @@ std::vector<std::filesystem::path> collectHDRIFiles(const std::filesystem::path&
     return files;
 }
 
+namespace {
+
+std::string describeBrightness(float horizon, float zenith, float hardness) {
+    std::ostringstream out;
+    out.precision(9);
+    out << "horizon " << horizon << ", zenith " << zenith << ", hardness " << hardness;
+    return out.str();
+}
+
+// NEUROPBR_ENV_CACHE_VERIFY=1 recomputes each cache hit and checks it matches
+void verifyCachedEnvironment(const EnvironmentCubemap& cached, const std::filesystem::path& filePath,
+                             unsigned specularSamples, unsigned diffuseSamples, unsigned hdrMaxWidth) {
+    EnvironmentCubemap fresh = precomputeEnvironmentCubemap(filePath, cached.faceSize, cached.irradianceSize,
+                                                            specularSamples, diffuseSamples, hdrMaxWidth);
+    const EnvCacheData a = downloadEnvironment(cached);
+    const EnvCacheData b = downloadEnvironment(fresh);
+    std::vector<float> a0;
+    std::vector<float> b0;
+    copyCubemapArrayToHost(specularLevel(cached, 0), cached.faceSize, a0);
+    copyCubemapArrayToHost(specularLevel(fresh, 0), fresh.faceSize, b0);
+
+    size_t mismatchedBlocks = 0;
+    auto compare = [&](const std::string& what, const std::vector<float>& x, const std::vector<float>& y) {
+        size_t differing = 0;
+        float maxAbsDiff = 0.0f;
+        for (size_t i = 0; i < x.size() && i < y.size(); ++i) {
+            if (std::memcmp(&x[i], &y[i], sizeof(float)) != 0) {
+                ++differing;
+                maxAbsDiff = std::max(maxAbsDiff, std::fabs(x[i] - y[i]));
+            }
+        }
+        if (differing > 0 || x.size() != y.size()) {
+            ++mismatchedBlocks;
+            std::cout << "  VERIFY MISMATCH in " << what << ": " << differing << " of " << y.size()
+                      << " floats differ (max abs diff " << maxAbsDiff << ")" << std::endl;
+        }
+    };
+    compare("env cubemap", a.env, b.env);
+    compare("specular mip 0", a0, b0);
+    for (size_t i = 0; i < a.specular.size() && i < b.specular.size(); ++i) {
+        compare("specular mip " + std::to_string(i + 1), a.specular[i], b.specular[i]);
+    }
+    compare("irradiance", a.irradiance, b.irradiance);
+    compare("brightness", {a.meta.horizonBrightness, a.meta.zenithBrightness, a.meta.hardness},
+            {b.meta.horizonBrightness, b.meta.zenithBrightness, b.meta.hardness});
+    if (mismatchedBlocks == 0) {
+        std::cout << "  verify: cached data is bit-identical to a fresh precompute ("
+                  << describeBrightness(b.meta.horizonBrightness, b.meta.zenithBrightness, b.meta.hardness)
+                  << ")" << std::endl;
+    }
+}
+
+} // namespace
+
 std::vector<EnvironmentCubemap> loadEnvironmentCubemaps(const std::filesystem::path& directory,
                                                          unsigned faceSize, unsigned irradianceSize,
-                                                         unsigned specularSamples, unsigned diffuseSamples) {
+                                                         unsigned specularSamples, unsigned diffuseSamples,
+                                                         unsigned hdrMaxWidth,
+                                                         const std::filesystem::path& cacheDir) {
+    using Clock = std::chrono::steady_clock;
+    auto msSince = [](Clock::time_point start) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start).count();
+    };
+    const auto totalStart = Clock::now();
+
     std::vector<std::filesystem::path> paths = collectHDRIFiles(directory);
     std::vector<EnvironmentCubemap> environments;
     environments.reserve(paths.size());
 
-    for (const auto& path : paths) {
-        std::cout << "Precomputing cubemap for " << path << "..." << std::endl;
-        environments.push_back(precomputeEnvironmentCubemap(path, faceSize, irradianceSize, specularSamples, diffuseSamples));
+    const bool cacheEnabled = !cacheDir.empty();
+    bool cacheWritable = cacheEnabled;
+    const char* verifyEnv = std::getenv("NEUROPBR_ENV_CACHE_VERIFY");
+    const bool verifyHits = verifyEnv != nullptr && std::string(verifyEnv) == "1";
+    size_t cacheHits = 0;
+
+    for (size_t i = 0; i < paths.size(); ++i) {
+        const auto& path = paths[i];
+        std::cout << "Environment " << (i + 1) << "/" << paths.size() << ": " << path << std::endl;
+        const auto start = Clock::now();
+
+        EnvCacheKey key;
+        std::filesystem::path cacheFile;
+        bool useCache = false;
+        if (cacheEnabled) {
+            std::string error;
+            useCache = makeEnvCacheKey(path, faceSize, irradianceSize, specularSamples, diffuseSamples, hdrMaxWidth, key, error);
+            if (useCache) {
+                cacheFile = envCacheFilePath(cacheDir, key);
+            } else {
+                std::cerr << "  Warning: not caching this HDRI (" << error << ")" << std::endl;
+            }
+        }
+
+        if (useCache) {
+            EnvCacheData data;
+            std::string reason;
+            const EnvCacheReadStatus status = readEnvCache(cacheFile, key, data, reason);
+            if (status == EnvCacheReadStatus::Hit) {
+                environments.push_back(uploadEnvironment(path, key, data));
+                ++cacheHits;
+                const EnvironmentCubemap& env = environments.back();
+                std::cout << "  HDRI " << env.sourceWidth << "x" << env.sourceHeight << ": cache hit ("
+                          << msSince(start) << " ms; "
+                          << describeBrightness(env.horizonBrightness, env.zenithBrightness, env.hardness) << ")"
+                          << std::endl;
+                if (verifyHits) {
+                    verifyCachedEnvironment(env, path, specularSamples, diffuseSamples, hdrMaxWidth);
+                }
+                continue;
+            }
+            if (status == EnvCacheReadStatus::Rejected) {
+                std::cout << "  Ignoring cache file " << cacheFile << ": " << reason << std::endl;
+            }
+        }
+
+        EnvironmentCubemap env = precomputeEnvironmentCubemap(path, faceSize, irradianceSize, specularSamples, diffuseSamples, hdrMaxWidth);
+        const auto computeMs = msSince(start);
+        const std::string brightness = describeBrightness(env.horizonBrightness, env.zenithBrightness, env.hardness);
+        if (useCache && cacheWritable) {
+            const auto writeStart = Clock::now();
+            std::string error;
+            if (writeEnvCache(cacheFile, key, downloadEnvironment(env), error)) {
+                std::cout << "  cache miss -> precomputed in " << computeMs << " ms (" << brightness
+                          << "), wrote " << cacheFile << " in " << msSince(writeStart) << " ms" << std::endl;
+            } else {
+                cacheWritable = false;
+                std::cerr << "  Warning: cannot write the environment cache (" << error
+                          << "); continuing without writing cache files." << std::endl;
+                std::cout << "  cache miss -> precomputed in " << computeMs << " ms (" << brightness
+                          << "), not cached" << std::endl;
+            }
+        } else {
+            std::cout << "  precomputed in " << computeMs << " ms (" << brightness << ")" << std::endl;
+        }
+        environments.push_back(std::move(env));
     }
+
+    std::cout << "Loaded " << environments.size() << " environments in " << msSince(totalStart) << " ms";
+    if (cacheEnabled) {
+        std::cout << " (" << cacheHits << " from cache, " << environments.size() - cacheHits << " precomputed)";
+    }
+    std::cout << std::endl;
     return environments;
 }
 

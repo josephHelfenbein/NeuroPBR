@@ -232,7 +232,7 @@ def build_cli() -> argparse.ArgumentParser:
     p.add_argument(
         "--resize",
         type=int,
-        default=2048,
+        default=512,
         help="Resize images to this dimension (square) if they don't match",
     )
     return p

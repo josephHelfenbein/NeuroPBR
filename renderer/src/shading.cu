@@ -4,6 +4,7 @@
 #include <math.h>
 
 #include <utils.cuh>
+#include <color.cuh>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -214,44 +215,6 @@ __device__ inline float4 lerpFloat4(const float4& a, const float4& b, float t) {
                        lerp(a.w, b.w, t));
 }
 
-__device__ inline float4 bilinearSampleFloat4(const float4* tile, int tileWidth, int tileHeight,
-                                              float localX, float localY) {
-    int x0 = clampi(static_cast<int>(floorf(localX)), 0, tileWidth - 1);
-    int y0 = clampi(static_cast<int>(floorf(localY)), 0, tileHeight - 1);
-    int x1 = clampi(x0 + 1, 0, tileWidth - 1);
-    int y1 = clampi(y0 + 1, 0, tileHeight - 1);
-    float tx = clampf(localX - static_cast<float>(x0), 0.0f, 1.0f);
-    float ty = clampf(localY - static_cast<float>(y0), 0.0f, 1.0f);
-
-    float4 c00 = tile[y0 * tileWidth + x0];
-    float4 c10 = tile[y0 * tileWidth + x1];
-    float4 c01 = tile[y1 * tileWidth + x0];
-    float4 c11 = tile[y1 * tileWidth + x1];
-
-    float4 c0 = lerpFloat4(c00, c10, tx);
-    float4 c1 = lerpFloat4(c01, c11, tx);
-    return lerpFloat4(c0, c1, ty);
-}
-
-__device__ inline float bilinearSampleFloat(const float* tile, int tileWidth, int tileHeight,
-                                            float localX, float localY) {
-    int x0 = clampi(static_cast<int>(floorf(localX)), 0, tileWidth - 1);
-    int y0 = clampi(static_cast<int>(floorf(localY)), 0, tileHeight - 1);
-    int x1 = clampi(x0 + 1, 0, tileWidth - 1);
-    int y1 = clampi(y0 + 1, 0, tileHeight - 1);
-    float tx = clampf(localX - static_cast<float>(x0), 0.0f, 1.0f);
-    float ty = clampf(localY - static_cast<float>(y0), 0.0f, 1.0f);
-
-    float c00 = tile[y0 * tileWidth + x0];
-    float c10 = tile[y0 * tileWidth + x1];
-    float c01 = tile[y1 * tileWidth + x0];
-    float c11 = tile[y1 * tileWidth + x1];
-
-    float c0 = lerp(c00, c10, tx);
-    float c1 = lerp(c01, c11, tx);
-    return lerp(c0, c1, ty);
-}
-
 __device__ inline float3 float4ToFloat3(const float4& value) {
     return make_float3(value.x, value.y, value.z);
 }
@@ -304,25 +267,33 @@ __device__ inline float bilinearSampleFloatGlobal(const float* data, int width, 
     return lerp(c0, c1, ty);
 }
 
+__device__ inline void storeRGB8(uint8_t* __restrict__ out, int base, float r, float g, float b) {
+    out[base + 0] = static_cast<uint8_t>(__float2uint_rn(clamp01(r) * 255.0f));
+    out[base + 1] = static_cast<uint8_t>(__float2uint_rn(clamp01(g) * 255.0f));
+    out[base + 2] = static_cast<uint8_t>(__float2uint_rn(clamp01(b) * 255.0f));
+}
+
 extern "C" __global__
 void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  int specularMipLevels, cudaTextureObject_t irradianceTex,
                  cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
                  const float4* __restrict__ normal, const float* __restrict__ roughness,
-                 const float* __restrict__ metallic, float* __restrict__ outRGBA,
+                 const float* __restrict__ metallic, uint8_t* __restrict__ outRGB,
                  int width, int height, float3 cameraPos,
                  float3 cameraForward, float3 cameraRight,
                  float3 cameraUp, float tanHalfFovY, float aspect,
                  bool enableShadows, bool enableCameraArtifacts,
                  unsigned long long artifactSeed,
                  float horizonBrightness,
-                 float zenithBrightness, float hardness) {
+                 float zenithBrightness, float hardness,
+                 float exposureJitterEV) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) {
         return;
     }
-    int idx = y * width + x;
+    // Rows are stored flipped so the PNG writer doesn't have to
+    const int outBase = 3 * ((height - 1 - y) * width + x);
 
     float ndcX = ((static_cast<float>(x) + 0.5f) / static_cast<float>(width)) * 2.0f - 1.0f;
     float ndcY = ((static_cast<float>(y) + 0.5f) / static_cast<float>(height)) * 2.0f - 1.0f;
@@ -338,19 +309,13 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
     const float3 planeNormal = make_float3(0.0f, 1.0f, 0.0f);
     float denom = dot3(planeNormal, rayDir);
     if (fabsf(denom) < 1e-6f) {
-        outRGBA[4 * idx + 0] = 0.0f;
-        outRGBA[4 * idx + 1] = 0.0f;
-        outRGBA[4 * idx + 2] = 0.0f;
-        outRGBA[4 * idx + 3] = 1.0f;
+        storeRGB8(outRGB, outBase, 0.0f, 0.0f, 0.0f);
         return;
     }
 
     float t = -dot3(planeNormal, cameraPos) / denom;
     if (t <= 0.0f) {
-        outRGBA[4 * idx + 0] = 0.0f;
-        outRGBA[4 * idx + 1] = 0.0f;
-        outRGBA[4 * idx + 2] = 0.0f;
-        outRGBA[4 * idx + 3] = 1.0f;
+        storeRGB8(outRGB, outBase, 0.0f, 0.0f, 0.0f);
         return;
     }
 
@@ -359,10 +324,7 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                              cameraPos.z + rayDir.z * t);
 
     if (fabsf(hit.x) > 1.5f || fabsf(hit.z) > 1.5f) {
-        outRGBA[4 * idx + 0] = 0.0f;
-        outRGBA[4 * idx + 1] = 0.0f;
-        outRGBA[4 * idx + 2] = 0.0f;
-        outRGBA[4 * idx + 3] = 1.0f;
+        storeRGB8(outRGB, outBase, 0.0f, 0.0f, 0.0f);
         return;
     }
 
@@ -380,129 +342,12 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
     float texelX = tiledU * static_cast<float>(widthMinusOne);
     float texelY = tiledV * static_cast<float>(heightMinusOne);
 
-    int texelX0 = clampi(static_cast<int>(floorf(texelX)), 0, widthMinusOne);
-    int texelY0 = clampi(static_cast<int>(floorf(texelY)), 0, heightMinusOne);
-    int texelX1 = clampi(texelX0 + 1, 0, widthMinusOne);
-    int texelY1 = clampi(texelY0 + 1, 0, heightMinusOne);
-
-    __shared__ int sharedMinX;
-    __shared__ int sharedMinY;
-    __shared__ int sharedMaxX;
-    __shared__ int sharedMaxY;
-    __shared__ int sharedTileWidth;
-    __shared__ int sharedTileHeight;
-    __shared__ int sharedHasTile;
-
-    const bool blockLeader = (threadIdx.x == 0 && threadIdx.y == 0 && threadIdx.z == 0);
-    if (blockLeader) {
-        sharedMinX = widthMinusOne;
-        sharedMinY = heightMinusOne;
-        sharedMaxX = 0;
-        sharedMaxY = 0;
-    }
-    __syncthreads();
-
-    atomicMin(&sharedMinX, texelX0);
-    atomicMin(&sharedMinX, texelX1);
-    atomicMin(&sharedMinY, texelY0);
-    atomicMin(&sharedMinY, texelY1);
-    atomicMax(&sharedMaxX, texelX1);
-    atomicMax(&sharedMaxY, texelY1);
-    __syncthreads();
-
-    if (blockLeader) {
-        sharedMinX = clampi(sharedMinX - 1, 0, widthMinusOne);
-        sharedMinY = clampi(sharedMinY - 1, 0, heightMinusOne);
-        sharedMaxX = clampi(sharedMaxX + 1, 0, widthMinusOne);
-        sharedMaxY = clampi(sharedMaxY + 1, 0, heightMinusOne);
-        sharedTileWidth = sharedMaxX - sharedMinX + 1;
-        sharedTileHeight = sharedMaxY - sharedMinY + 1;
-        sharedHasTile = (sharedTileWidth > 0 && sharedTileHeight > 0) ? 1 : 0;
-    }
-    __syncthreads();
-
-    extern __shared__ unsigned char shadeSharedMem[];
-    float4* sharedAlbedo = reinterpret_cast<float4*>(shadeSharedMem);
-    float4* sharedNormal = sharedAlbedo + SHADE_TILE_CAPACITY;
-    float* sharedRoughness = reinterpret_cast<float*>(sharedNormal + SHADE_TILE_CAPACITY);
-    float* sharedMetallic = sharedRoughness + SHADE_TILE_CAPACITY;
-
-    const int tileMinX = sharedMinX;
-    const int tileMinY = sharedMinY;
-    (void)sharedTileWidth;
-    (void)sharedTileHeight;
-    const int tileMaxX = sharedMaxX;
-    const int tileMaxY = sharedMaxY;
-    const bool hasTile = (sharedHasTile != 0);
-    const int linearThread = threadIdx.z * blockDim.y * blockDim.x +
-                             threadIdx.y * blockDim.x + threadIdx.x;
-    const int totalThreads = blockDim.x * blockDim.y * blockDim.z;
-    const int chunkOverlap = 2;
-    const int chunkStride = max(SHADE_TILE_MAX_DIM - chunkOverlap, 1);
-
-    float3 albedoColor;
-    float3 normalSample;
-    float rough;
-    float metal;
-
-    bool sampledFromTile = false;
-
-    if (hasTile) {
-        for (int chunkY = tileMinY; chunkY <= tileMaxY; chunkY += chunkStride) {
-            int chunkYEnd = min(chunkY + SHADE_TILE_MAX_DIM - 1, tileMaxY);
-            int chunkHeight = chunkYEnd - chunkY + 1;
-            for (int chunkX = tileMinX; chunkX <= tileMaxX; chunkX += chunkStride) {
-                int chunkXEnd = min(chunkX + SHADE_TILE_MAX_DIM - 1, tileMaxX);
-                int chunkWidth = chunkXEnd - chunkX + 1;
-                int chunkArea = chunkWidth * chunkHeight;
-
-                for (int tileIdx = linearThread; tileIdx < chunkArea; tileIdx += totalThreads) {
-                    int localY = tileIdx / chunkWidth;
-                    int localX = tileIdx % chunkWidth;
-                    int globalX = chunkX + localX;
-                    int globalY = chunkY + localY;
-                    int globalIdx = globalY * width + globalX;
-                    sharedAlbedo[tileIdx] = __ldg(&albedo[globalIdx]);
-                    sharedNormal[tileIdx] = __ldg(&normal[globalIdx]);
-                    sharedRoughness[tileIdx] = __ldg(&roughness[globalIdx]);
-                    sharedMetallic[tileIdx] = __ldg(&metallic[globalIdx]);
-                }
-                __syncthreads();
-
-                if (!sampledFromTile) {
-                    bool insideX = (texelX0 >= chunkX) && (texelX1 <= chunkXEnd);
-                    bool insideY = (texelY0 >= chunkY) && (texelY1 <= chunkYEnd);
-                    if (insideX && insideY) {
-                        float localSampleX = texelX - static_cast<float>(chunkX);
-                        float localSampleY = texelY - static_cast<float>(chunkY);
-                        float4 albedo4 = bilinearSampleFloat4(sharedAlbedo, chunkWidth, chunkHeight,
-                                                              localSampleX, localSampleY);
-                        float4 normal4 = bilinearSampleFloat4(sharedNormal, chunkWidth, chunkHeight,
-                                                              localSampleX, localSampleY);
-                        float roughValue = bilinearSampleFloat(sharedRoughness, chunkWidth, chunkHeight,
-                                                               localSampleX, localSampleY);
-                        float metalValue = bilinearSampleFloat(sharedMetallic, chunkWidth, chunkHeight,
-                                                               localSampleX, localSampleY);
-                        albedoColor = float4ToFloat3(albedo4);
-                        normalSample = float4ToFloat3(normal4);
-                        rough = roughValue;
-                        metal = metalValue;
-                        sampledFromTile = true;
-                    }
-                }
-                __syncthreads();
-            }
-        }
-    }
-
-    if (!sampledFromTile) {
-        float4 albedo4 = bilinearSampleFloat4Global(albedo, width, height, texelX, texelY);
-        float4 normal4 = bilinearSampleFloat4Global(normal, width, height, texelX, texelY);
-        albedoColor = float4ToFloat3(albedo4);
-        normalSample = float4ToFloat3(normal4);
-        rough = bilinearSampleFloatGlobal(roughness, width, height, texelX, texelY);
-        metal = bilinearSampleFloatGlobal(metallic, width, height, texelX, texelY);
-    }
+    float4 albedo4 = bilinearSampleFloat4Global(albedo, width, height, texelX, texelY);
+    float4 normal4 = bilinearSampleFloat4Global(normal, width, height, texelX, texelY);
+    float3 albedoColor = float4ToFloat3(albedo4);
+    float3 normalSample = float4ToFloat3(normal4);
+    float rough = bilinearSampleFloatGlobal(roughness, width, height, texelX, texelY);
+    float metal = bilinearSampleFloatGlobal(metallic, width, height, texelX, texelY);
 
     float3 normalTS = make_float3(normalSample.x * 2.0f - 1.0f,
                                   normalSample.y * 2.0f - 1.0f,
@@ -606,10 +451,17 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                                   prefilteredColor.y * (F.y * brdfSample.x + brdfSample.y),
                                   prefilteredColor.z * (F.z * brdfSample.x + brdfSample.y));
 
-    float3 color = make_float3(diffuse.x + specular.x,
-                               diffuse.y + specular.y,
-                               diffuse.z + specular.z);
+    float3 color = make_float3(fmaxf(diffuse.x + specular.x, 0.0f),
+                               fmaxf(diffuse.y + specular.y, 0.0f),
+                               fmaxf(diffuse.z + specular.z, 0.0f));
 
+    // Auto exposure from the irradiance on an upward-facing surface
+    float4 irradianceUp = texCubemap<float4>(irradianceTex, 0.0f, 1.0f, 0.0f);
+    float exposure = exposureScale(make_float3(irradianceUp.x, irradianceUp.y, irradianceUp.z),
+                                   exposureJitterEV);
+    color = tonemapPBRNeutral(make_float3(color.x * exposure, color.y * exposure, color.z * exposure));
+
+    // Blended after tonemapping so artifact colours stay in display space
     if (enableCameraArtifacts) {
         float uScreen = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
         float vScreen = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
@@ -620,14 +472,11 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
         color.y = color.y * (1.0f - alpha) + artifact.y * alpha;
         color.z = color.z * (1.0f - alpha) + artifact.z * alpha;
     }
-    color.x = fmaxf(color.x, 0.0f);
-    color.y = fmaxf(color.y, 0.0f);
-    color.z = fmaxf(color.z, 0.0f);
 
-    outRGBA[4 * idx + 0] = color.x;
-    outRGBA[4 * idx + 1] = color.y;
-    outRGBA[4 * idx + 2] = color.z;
-    outRGBA[4 * idx + 3] = 1.0f;
+    storeRGB8(outRGB, outBase,
+              srgbEncode(clamp01(color.x)),
+              srgbEncode(clamp01(color.y)),
+              srgbEncode(clamp01(color.z)));
 }
 
 void launchShadeKernel(dim3 gridDim, dim3 blockDim,
@@ -635,20 +484,22 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        int specularMipLevels, cudaTextureObject_t irradianceTex,
                        cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
                        const float4* __restrict__ normal, const float* __restrict__ roughness,
-                       const float* __restrict__ metallic, float* __restrict__ outRGBA,
+                       const float* __restrict__ metallic, uint8_t* __restrict__ outRGB,
                        int width, int height, float3 cameraPos,
                        float3 cameraForward, float3 cameraRight, 
                        float3 cameraUp, float tanHalfFovY, float aspect,
                        bool enableShadows, bool enableCameraArtifacts,
                        unsigned long long artifactSeed,
                        float horizonBrightness,
-                       float zenithBrightness, float hardness) {
-    shadeKernel<<<gridDim, blockDim, SHADE_KERNEL_SHARED_MEM_BYTES>>>(envTex, specularTex, specularMipLevels,
-                                       irradianceTex, brdfLutTex, albedo, normal,
-                                       roughness, metallic, outRGBA,
-                                       width, height, cameraPos,
-                                       cameraForward, cameraRight,
-                                       cameraUp, tanHalfFovY, aspect,
-                                       enableShadows, enableCameraArtifacts, artifactSeed,
-                                       horizonBrightness, zenithBrightness, hardness);
+                       float zenithBrightness, float hardness,
+                       float exposureJitterEV, cudaStream_t stream) {
+    shadeKernel<<<gridDim, blockDim, 0, stream>>>(envTex, specularTex, specularMipLevels,
+                                                  irradianceTex, brdfLutTex, albedo, normal,
+                                                  roughness, metallic, outRGB,
+                                                  width, height, cameraPos,
+                                                  cameraForward, cameraRight,
+                                                  cameraUp, tanHalfFovY, aspect,
+                                                  enableShadows, enableCameraArtifacts, artifactSeed,
+                                                  horizonBrightness, zenithBrightness, hardness,
+                                                  exposureJitterEV);
 }
