@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from concurrent.futures import ThreadPoolExecutor
+
+import pyarrow.parquet as pq
 from datasets import load_dataset
+from huggingface_hub import HfFileSystem
 from PIL import Image
 
 # Try to import google cloud storage, but don't fail if not present unless needed
@@ -204,6 +208,41 @@ def save_image(img, path):
     path.parent.mkdir(parents=True, exist_ok=True)
     (img if isinstance(img, Image.Image) else Image.fromarray(img)).save(path)
 
+MATSYNTH_REPO = "gvecchio/MatSynth"
+
+def stream_matsynth(split="train", start=0, columns=None):
+    """Streams MatSynth from material `start` without downloading the materials before it.
+
+    Skips whole parquet files using their row counts, then the few rows left in the first file.
+    Every MatSynth row has all four maps, so row index == material index.
+    """
+    if start <= 0:
+        return load_dataset(MATSYNTH_REPO, streaming=True, split=split, columns=columns)
+
+    fs = HfFileSystem()
+    files = sorted(fs.glob(f"datasets/{MATSYNTH_REPO}/data/{split}-*.parquet"))
+    num_rows = lambda f: pq.ParquetFile(fs.open(f, block_size=2**16)).metadata.num_rows
+
+    # Read footers in batches, stopping once we pass `start`
+    rows_before = 0
+    first = None
+    with ThreadPoolExecutor(16) as pool:
+        for batch_start in range(0, len(files), 32):
+            for offset, rows in enumerate(pool.map(num_rows, files[batch_start:batch_start + 32])):
+                if rows_before + rows > start:
+                    first = batch_start + offset
+                    break
+                rows_before += rows
+            if first is not None:
+                break
+    if first is None:
+        raise ValueError(f"start {start} is past the end of the {split} split ({rows_before} materials)")
+
+    repo_prefix = f"datasets/{MATSYNTH_REPO}/"
+    data_files = [f[len(repo_prefix):] for f in files[first:]]
+    ds = load_dataset(MATSYNTH_REPO, data_files={split: data_files}, streaming=True, split=split, columns=columns)
+    return ds.skip(start - rows_before)
+
 def export_local(dst="matsynth_raw", split="train", limit=100, save_metadata=True, start=0):
     out = Path(dst)
     out.mkdir(parents=True, exist_ok=True)
@@ -212,15 +251,12 @@ def export_local(dst="matsynth_raw", split="train", limit=100, save_metadata=Tru
     if start > 0:
         print(f"Starting export from index {start}")
 
-    ds = load_dataset("gvecchio/MatSynth", streaming=True, split=split)
-    i = 0
+    ds = stream_matsynth(split, start)
+    i = start
     image_keys = ["basecolor", "normal", "roughness", "metallic", "diffuse", "specular", "displacement", "opacity", "blend_mask"]
     
     for ex in ds:
         if not any(ex.get(k) is not None for k in ("basecolor", "normal", "roughness", "metallic")):
-            continue
-        if i < start:
-            i += 1
             continue
 
         mdir = out / f"mat_{i:05d}"
@@ -250,15 +286,12 @@ def export_gcs_direct(bucket_name, prefix="raw", limit=4000, start=0):
     if start > 0:
         print(f"Starting GCS export from index {start}")
     
-    ds = load_dataset("gvecchio/MatSynth", streaming=True, split="train")
-    i = 0
+    ds = stream_matsynth("train", start)
+    i = start
     image_keys = ["basecolor", "normal", "roughness", "metallic", "diffuse", "specular", "displacement", "opacity", "blend_mask"]
     
     for ex in ds:
         if not any(ex.get(k) for k in ("basecolor", "normal", "roughness", "metallic")):
-            continue
-        if i < start:
-            i += 1
             continue
         
         for key in image_keys:
@@ -352,14 +385,14 @@ def stream_and_clean(
     if start > 0:
         print(f"Starting stream from index {start}")
 
-    ds = load_dataset("gvecchio/MatSynth", streaming=True, split=split)
-    i = 0
+    # Only fetch the maps we keep; the other columns are about half of each record
+    ds = stream_matsynth(split, start, columns=["basecolor", "normal", "roughness", "metallic"])
+    i = start
     
     # Mapping from MatSynth keys to our target names
     # MatSynth keys: basecolor, normal, roughness, metallic, diffuse, specular, displacement, opacity, blend_mask
     key_map = {
         "basecolor": "albedo",
-        "diffuse": "albedo", # Fallback
         "normal": "normal",
         "roughness": "roughness",
         "metallic": "metallic"
@@ -370,7 +403,7 @@ def stream_and_clean(
     for ex in ds:
         # Check for required keys (we need at least one valid set of PBR maps)
         # MatSynth usually has basecolor, normal, roughness, metallic
-        has_base = ex.get("basecolor") is not None or ex.get("diffuse") is not None
+        has_base = ex.get("basecolor") is not None
         has_normal = ex.get("normal") is not None
         has_rough = ex.get("roughness") is not None
         has_metal = ex.get("metallic") is not None
@@ -378,19 +411,11 @@ def stream_and_clean(
         if not (has_base and has_normal and has_rough and has_metal):
             continue
             
-        if i < start:
-            i += 1
-            continue
-            
         slug = f"mat_{i:05d}"
         record = {"material": slug}
         
         # Process each map type
         for src_key, target_map in key_map.items():
-            # Skip diffuse if basecolor is present (prefer basecolor)
-            if src_key == "diffuse" and ex.get("basecolor") is not None:
-                continue
-            
             if ex.get(src_key) is None:
                 continue
                 
