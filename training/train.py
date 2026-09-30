@@ -1010,7 +1010,8 @@ class Trainer:
         
         return avg_loss
     
-    def save_checkpoint(self, epoch: int, val_loss: Optional[float] = None, is_best: bool = False):
+    def save_checkpoint(self, epoch: int, val_loss: Optional[float] = None, is_best: bool = False,
+                        force_snapshot: bool = False):
         """Save model checkpoint."""
         if not self.is_main_process:
             return
@@ -1044,7 +1045,7 @@ class Trainer:
         # Per-epoch snapshot: only on the configured cadence (and only if
         # save_best_only is False). Skipping this still leaves latest.pth and
         # best_model.pth fresh below.
-        snapshot_due = (epoch % self.config.training.save_every_n_epochs == 0)
+        snapshot_due = force_snapshot or (epoch % self.config.training.save_every_n_epochs == 0)
         if snapshot_due and not self.config.training.save_best_only:
             checkpoint_path = checkpoint_dir / f"checkpoint_epoch_{epoch:04d}.pth"
             torch.save(checkpoint, checkpoint_path)
@@ -1127,8 +1128,9 @@ class Trainer:
         if self.is_main_process:
             print(f"Resumed from epoch {self.current_epoch}")
     
-    def train(self, train_loader: DataLoader, val_loader: DataLoader):
-        """Main training loop."""
+    def train(self, train_loader: DataLoader, val_loader: DataLoader,
+              stop_after_epoch: Optional[int] = None):
+        """Main training loop. stop_after_epoch ends the run early without shortening the LR schedule."""
         print("\n" + "="*80)
         print("Starting Training")
         print("="*80)
@@ -1154,6 +1156,7 @@ class Trainer:
             
             # Validate
             val_loss = None
+            is_best = False
             if epoch % self.config.training.val_every_n_epochs == 0:
                 val_loss = self.validate(val_loader, epoch)
                 
@@ -1161,11 +1164,6 @@ class Trainer:
                 is_best = val_loss < self.best_val_loss
                 if is_best:
                     self.best_val_loss = val_loss
-                
-                # Save checkpoint every epoch — save_checkpoint itself gates
-                # the per-epoch snapshot file on save_every_n_epochs, but
-                # latest.pth and best_model.pth always update.
-                self.save_checkpoint(epoch, val_loss, is_best)
             
             # Step schedulers (skip during warmup)
             if epoch >= self.warmup_epochs:
@@ -1182,6 +1180,18 @@ class Trainer:
                             self.d_scheduler.step(val_loss)
                     elif epoch >= self.config.training.gan_start_epoch:
                         self.d_scheduler.step()
+
+            # Save checkpoint after stepping the schedulers, so a resume continues the LR
+            # schedule from the next epoch. save_checkpoint gates the per-epoch snapshot
+            # file on save_every_n_epochs, but latest.pth and best_model.pth always update.
+            stopping = stop_after_epoch is not None and epoch >= stop_after_epoch
+            if val_loss is not None or stopping:
+                self.save_checkpoint(epoch, val_loss, is_best, force_snapshot=stopping)
+            if stopping:
+                if self.is_main_process:
+                    print(f"\nStopped after epoch {epoch} (--stop-after-epoch); resume from "
+                          f"checkpoint_epoch_{epoch:04d}.pth")
+                return
         
         print("\n" + "="*80)
         print("Training Complete!")
@@ -1428,8 +1438,12 @@ def main(args):
         reset_opt = getattr(args, 'reset_optimizer', False)
         trainer.load_checkpoint(checkpoint_path, reset_optimizer=reset_opt)
 
+    if args.stop_after_epoch is not None and args.stop_after_epoch < trainer.current_epoch:
+        raise ValueError(f"--stop-after-epoch {args.stop_after_epoch} is before the resume epoch "
+                         f"{trainer.current_epoch}")
+
     try:
-        trainer.train(train_loader, val_loader)
+        trainer.train(train_loader, val_loader, stop_after_epoch=args.stop_after_epoch)
     finally:
         cleanup_distributed()
 
@@ -1462,6 +1476,8 @@ if __name__ == "__main__":
                       help="Number of epochs")
     parser.add_argument("--resume", type=str, default=None,
                       help="Path to checkpoint to resume from")
+    parser.add_argument("--stop-after-epoch", type=int, default=None,
+                      help="Stop after this epoch (0-based, like checkpoint_epoch_N) without changing the LR schedule")
     parser.add_argument("--reset-optimizer", action="store_true",
                       help="When resuming, only load model weights (reset optimizer). Useful for fine-tuning with new loss.")
     parser.add_argument("--checkpoint-dir", type=str, default=None,
