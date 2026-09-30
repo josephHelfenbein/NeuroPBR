@@ -88,6 +88,7 @@ python train.py --config configs/my_config.py --input-dir ./data/input --output-
 ```bash
 python train.py --resume checkpoints/checkpoint_epoch_0050.pth
 ```
+`--stop-after-epoch N` ends a run after epoch N and saves `checkpoint_epoch_N.pth`, without shortening the LR schedule (e.g. to switch `--render-curriculum` partway through).
 
 ---
 
