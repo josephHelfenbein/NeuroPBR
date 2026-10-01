@@ -363,7 +363,7 @@ class HybridLoss(nn.Module):
         # Variance matching loss to prevent mode collapse
         if self.w_variance_match > 0:
             var_loss = 0.0
-            for key in ["roughness", "albedo"]:  # Albedo variance prevents color collapse
+            for key in ["roughness", "albedo", "normal"]:  # Prevents collapse to a flat/constant map
                 if key in pred and key in target:
                     vl = self._variance_matching_loss(pred[key], target[key])
                     var_loss += vl

@@ -67,7 +67,7 @@ def get_config():
     
     config.loss.metallic_boost = 5.0
     config.loss.w_variance_match = 5.0
-    config.loss.w_normal_xy = 10.0
+    config.loss.w_normal_xy = 0.0  # Matches XY length but not direction, so it rewarded a constant tilt
     config.loss.w_color_mean = 5.0
 
     # Data
