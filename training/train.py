@@ -483,10 +483,9 @@ class Trainer:
             model_name="generator"
         )
         if self.discriminator is not None:
-            self.discriminator, disc_compile_info = gpu_optimization.apply_torch_compile(
-                self.discriminator,
-                model_name="discriminator"
-            )
+            # Not compiled: spectral_norm updates its power-iteration buffers in place on every
+            # forward, and D runs twice (real, fake) before backward, which breaks under compile
+            disc_compile_info = {"status": "uncompiled", "reason": "spectral_norm is incompatible with torch.compile"}
         else:
             disc_compile_info = {"status": "disabled", "reason": "GAN disabled"}
         
