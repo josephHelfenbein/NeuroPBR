@@ -5,6 +5,7 @@
 
 #include <utils.cuh>
 #include <color.cuh>
+#include <camera.cuh>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -279,7 +280,7 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                  cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
                  const float4* __restrict__ normal, const float* __restrict__ roughness,
                  const float* __restrict__ metallic, uint8_t* __restrict__ outRGB,
-                 int width, int height, float3 cameraPos,
+                 int width, int height, int texWidth, int texHeight, float3 cameraPos,
                  float3 cameraForward, float3 cameraRight,
                  float3 cameraUp, float tanHalfFovY, float aspect,
                  bool enableShadows, bool enableCameraArtifacts,
@@ -330,24 +331,24 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
 
     float u = hit.x;
     float v = -hit.z;
-    float tiledU = u * 2.0f + 0.5f;
-    float tiledV = v * 2.0f + 0.5f;
+    float tiledU = u / kTileWorldSize + 0.5f;
+    float tiledV = v / kTileWorldSize + 0.5f;
     tiledU = tiledU - floorf(tiledU);
     tiledV = tiledV - floorf(tiledV);
     tiledU = clamp01(tiledU);
     tiledV = clamp01(tiledV);
 
-    const int widthMinusOne = max(width - 1, 0);
-    const int heightMinusOne = max(height - 1, 0);
+    const int widthMinusOne = max(texWidth - 1, 0);
+    const int heightMinusOne = max(texHeight - 1, 0);
     float texelX = tiledU * static_cast<float>(widthMinusOne);
     float texelY = tiledV * static_cast<float>(heightMinusOne);
 
-    float4 albedo4 = bilinearSampleFloat4Global(albedo, width, height, texelX, texelY);
-    float4 normal4 = bilinearSampleFloat4Global(normal, width, height, texelX, texelY);
+    float4 albedo4 = bilinearSampleFloat4Global(albedo, texWidth, texHeight, texelX, texelY);
+    float4 normal4 = bilinearSampleFloat4Global(normal, texWidth, texHeight, texelX, texelY);
     float3 albedoColor = float4ToFloat3(albedo4);
     float3 normalSample = float4ToFloat3(normal4);
-    float rough = bilinearSampleFloatGlobal(roughness, width, height, texelX, texelY);
-    float metal = bilinearSampleFloatGlobal(metallic, width, height, texelX, texelY);
+    float rough = bilinearSampleFloatGlobal(roughness, texWidth, texHeight, texelX, texelY);
+    float metal = bilinearSampleFloatGlobal(metallic, texWidth, texHeight, texelX, texelY);
 
     float3 normalTS = make_float3(normalSample.x * 2.0f - 1.0f,
                                   normalSample.y * 2.0f - 1.0f,
@@ -461,7 +462,7 @@ void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
                                    exposureJitterEV);
     color = tonemapPBRNeutral(make_float3(color.x * exposure, color.y * exposure, color.z * exposure));
 
-    // Blended after tonemapping so artifact colours stay in display space
+    // Blended after tonemapping so artifact colors stay in display space
     if (enableCameraArtifacts) {
         float uScreen = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
         float vScreen = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
@@ -485,7 +486,7 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
                        const float4* __restrict__ normal, const float* __restrict__ roughness,
                        const float* __restrict__ metallic, uint8_t* __restrict__ outRGB,
-                       int width, int height, float3 cameraPos,
+                       int width, int height, int texWidth, int texHeight, float3 cameraPos,
                        float3 cameraForward, float3 cameraRight, 
                        float3 cameraUp, float tanHalfFovY, float aspect,
                        bool enableShadows, bool enableCameraArtifacts,
@@ -496,10 +497,58 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
     shadeKernel<<<gridDim, blockDim, 0, stream>>>(envTex, specularTex, specularMipLevels,
                                                   irradianceTex, brdfLutTex, albedo, normal,
                                                   roughness, metallic, outRGB,
-                                                  width, height, cameraPos,
+                                                  width, height, texWidth, texHeight, cameraPos,
                                                   cameraForward, cameraRight,
                                                   cameraUp, tanHalfFovY, aspect,
                                                   enableShadows, enableCameraArtifacts, artifactSeed,
                                                   horizonBrightness, zenithBrightness, hardness,
                                                   exposureJitterEV);
+}
+
+// Warps the photo onto the texture tile like an app rectifying a real photo: each texel's plane
+// point is projected into the photo and bilinearly sampled
+extern "C" __global__
+void rectifyKernel(const uint8_t* __restrict__ photoRGB, PinholeCamera camera,
+                   uint8_t* __restrict__ outRGB, int texWidth, int texHeight) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (x >= texWidth || row >= texHeight) {
+        return;
+    }
+    // Rows are stored flipped, like shadeKernel, so the PNG lines up with the material maps
+    const int outBase = 3 * ((texHeight - 1 - row) * texWidth + x);
+
+    float px = 0.0f;
+    float py = 0.0f;
+    if (!projectToPixel(camera, texelToPlane(x, row, texWidth, texHeight), px, py)) {
+        storeRGB8(outRGB, outBase, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    px = fminf(fmaxf(px, 0.0f), static_cast<float>(camera.width - 1));
+    py = fminf(fmaxf(py, 0.0f), static_cast<float>(camera.height - 1));
+    const int x0 = static_cast<int>(floorf(px));
+    const int y0 = static_cast<int>(floorf(py));
+    const int x1 = min(x0 + 1, camera.width - 1);
+    const int y1 = min(y0 + 1, camera.height - 1);
+    const float tx = px - static_cast<float>(x0);
+    const float ty = py - static_cast<float>(y0);
+
+    // The photo's rows are stored flipped as well
+    const uint8_t* rowTop = photoRGB + 3 * (camera.height - 1 - y0) * camera.width;
+    const uint8_t* rowBottom = photoRGB + 3 * (camera.height - 1 - y1) * camera.width;
+    float rgb[3];
+    for (int c = 0; c < 3; ++c) {
+        const float top = lerp(static_cast<float>(rowTop[3 * x0 + c]), static_cast<float>(rowTop[3 * x1 + c]), tx);
+        const float bottom = lerp(static_cast<float>(rowBottom[3 * x0 + c]), static_cast<float>(rowBottom[3 * x1 + c]), tx);
+        rgb[c] = lerp(top, bottom, ty) / 255.0f;
+    }
+    storeRGB8(outRGB, outBase, rgb[0], rgb[1], rgb[2]);
+}
+
+void launchRectifyKernel(const uint8_t* photoRGB, const PinholeCamera& camera,
+                         uint8_t* outRGB, int texWidth, int texHeight, cudaStream_t stream) {
+    const dim3 block(16, 16, 1);
+    const dim3 grid((texWidth + block.x - 1) / block.x, (texHeight + block.y - 1) / block.y);
+    rectifyKernel<<<grid, block, 0, stream>>>(photoRGB, camera, outRGB, texWidth, texHeight);
 }

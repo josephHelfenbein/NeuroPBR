@@ -21,7 +21,7 @@ To maximize GPU utilization and minimize I/O bottlenecks, the renderer uses a 3-
 
 ### Dynamic Resource Management
 The renderer automatically detects available **System RAM** and **GPU VRAM** to determine the optimal batch size:
--   **Slot Size:** Each slot is sized for the largest material in the dataset, up to 2048×2048 unless `--max-res` is set: about 13 MB at 512×512 and 212 MB at 2048×2048.
+-   **Slot Size:** Each slot is sized for the largest material in the dataset, up to 2048×2048 unless `--max-res` is set: about 16 MB at 512×512 and 260 MB at 2048×2048.
 -   **CPU Batch Limit:** Calculated to ensure enough RAM for each slot's pinned upload and output buffers, after reserving the material cache.
 -   **GPU Batch Limit:** Calculated to ensure all in-flight materials fit within VRAM.
 -   **Depth Cap:** At most `--pipeline-depth` slots (default 8), since more doesn't help once all three threads are busy.
@@ -41,9 +41,12 @@ Lighting is purely image-based, using the **Split-Sum Approximation** to efficie
 2.  **Prefiltered Environment Map:** Specular reflection pre-calculated at different roughness levels (stored in mipmaps).
 3.  **BRDF Integration LUT:** A precomputed 2D texture storing the scale and bias for the Fresnel term.
 
+### Rectified Views
+Each view is a photo from a random camera (tilted up to 40°, any azimuth and roll), rendered at 2× the map resolution and then rectified onto the material plane the way an app would warp a real photo. Every view lines up pixel-for-pixel with the PBR maps, and grazing angles come out blurrier, as they would from a real camera.
+
 ### Output Color
 Renders are 8-bit sRGB, like a camera photo:
-1.  **Exposure:** Normalized per HDRI so an 18% grey surface renders at 0.18, with a random ±1 EV offset per view.
+1.  **Exposure:** Normalized per HDRI so an 18% gray surface renders at 0.18, with a random ±1 EV offset per view.
 2.  **Tonemapping:** [Khronos PBR Neutral](https://github.com/KhronosGroup/ToneMapping/tree/main/PBR_Neutral).
 3.  **Encoding:** sRGB, 8 bits per channel.
 

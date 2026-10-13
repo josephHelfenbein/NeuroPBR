@@ -1,5 +1,6 @@
 #include <renderer.h>
 #include <hdr_image.h>
+#include <pipeline_sizing.h>
 #include <env_cache.h>
 
 #include <algorithm>
@@ -115,12 +116,70 @@ dim3 chooseShadeBlock() {
     return choose2DBlock(optimalShadeBlockSize);
 }
 
+float3 normalizeVec(const float3& v) {
+    float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+    if (len < 1e-6f) {
+        return make_float3(0.0f, 0.0f, 0.0f);
+    }
+    float inv = 1.0f / len;
+    return make_float3(v.x * inv, v.y * inv, v.z * inv);
+}
+
+float3 crossVec(const float3& a, const float3& b) {
+    return make_float3(a.y * b.z - a.z * b.y,
+                       a.z * b.x - a.x * b.z,
+                       a.x * b.y - a.y * b.x);
+}
+
+// Camera looking at aim from distance away, tilted from straight down and rolled around its view axis
+PinholeCamera makeCamera(float3 aim, float azimuth, float tilt, float roll, float distance,
+                         float tanHalfFovY, int width, int height) {
+    PinholeCamera cam;
+    cam.position = make_float3(aim.x + distance * sinf(tilt) * cosf(azimuth),
+                               aim.y + distance * cosf(tilt),
+                               aim.z + distance * sinf(tilt) * sinf(azimuth));
+    cam.forward = normalizeVec(make_float3(aim.x - cam.position.x, aim.y - cam.position.y, aim.z - cam.position.z));
+
+    float3 worldUp = std::fabs(cam.forward.y) > 0.99f ? make_float3(0.0f, 0.0f, 1.0f) : make_float3(0.0f, 1.0f, 0.0f);
+    float3 right = normalizeVec(crossVec(worldUp, cam.forward));
+    float3 up = crossVec(cam.forward, right);
+    const float c = cosf(roll);
+    const float s = sinf(roll);
+    cam.right = make_float3(c * right.x + s * up.x, c * right.y + s * up.y, c * right.z + s * up.z);
+    cam.up = make_float3(c * up.x - s * right.x, c * up.y - s * right.y, c * up.z - s * right.z);
+
+    cam.tanHalfFovY = tanHalfFovY;
+    cam.width = width;
+    cam.height = height;
+    cam.aspect = static_cast<float>(width) / static_cast<float>(height);
+    return cam;
+}
+
+// How much of the frame the tile fills (largest NDC coordinate of its corners)
+float tileFrameFill(const PinholeCamera& cam) {
+    const float half = kTileWorldSize * 0.5f;
+    float fill = 0.0f;
+    for (float cx : {-half, half}) {
+        for (float cz : {-half, half}) {
+            float px = 0.0f;
+            float py = 0.0f;
+            if (!projectToPixel(cam, make_float3(cx, 0.0f, cz), px, py)) {
+                return 1e6f;
+            }
+            const float ndcX = (px + 0.5f) / cam.width * 2.0f - 1.0f;
+            const float ndcY = (py + 0.5f) / cam.height * 2.0f - 1.0f;
+            fill = std::max(fill, std::max(std::fabs(ndcX), std::fabs(ndcY)));
+        }
+    }
+    return fill;
+}
+
 } // namespace
 
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float4* dAlbedo, const float4* dNormal,
                  const float* dRoughness, const float* dMetallic,
-                 uint8_t* dFrame,
+                 uint8_t* dPhoto, uint8_t* dFrame,
                  int width, int height, uint8_t* hostFrameRGB,
                  cudaStream_t stream,
                  bool enableShadows,
@@ -129,67 +188,42 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
     size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
     size_t frameBytes = pixelCount * 3u;
 
+    // Photos are higher resolution than the map, like a phone photo that gets rectified down
+    const int photoWidth = width * kPhotoScale;
+    const int photoHeight = height * kPhotoScale;
+
     static const dim3 block = chooseShadeBlock();
-    dim3 grid((width + block.x - 1) / block.x,
-              (height + block.y - 1) / block.y);
+    dim3 grid((photoWidth + block.x - 1) / block.x,
+              (photoHeight + block.y - 1) / block.y);
 
     std::mt19937_64 rng(std::chrono::high_resolution_clock::now().time_since_epoch().count());
-    std::uniform_real_distribution<float> polarDist(0.0f, 360.0f);
-    std::uniform_real_distribution<float> azimuthDist(0.0f, 40.0f);
+    std::uniform_real_distribution<float> azimuthDist(0.0f, 360.0f);
+    std::uniform_real_distribution<float> tiltDist(0.0f, 40.0f);
+    std::uniform_real_distribution<float> rollDist(-180.0f, 180.0f);
+    std::uniform_real_distribution<float> fillDist(0.6f, 0.9f);
+    std::uniform_real_distribution<float> aimDist(-0.1f * kTileWorldSize, 0.1f * kTileWorldSize);
 
     const float degToRad = static_cast<float>(M_PI) / 180.0f;
-    float theta = polarDist(rng) * degToRad;
-    float phi = azimuthDist(rng) * degToRad;
-    constexpr float radius = 0.6f;
+    const float azimuth = azimuthDist(rng) * degToRad;
+    const float tilt = tiltDist(rng) * degToRad;
+    const float roll = rollDist(rng) * degToRad;
+    const float targetFill = fillDist(rng);
+    const float3 aim = make_float3(aimDist(rng), 0.0f, aimDist(rng));
 
-    float camX = radius * sinf(phi) * cosf(theta);
-    float camY = radius * cosf(phi);
-    float camZ = radius * sinf(phi) * sinf(theta);
+    constexpr float verticalFovDeg = 55.0f;
+    const float tanHalfFovY = static_cast<float>(std::tan(verticalFovDeg * 0.5f * degToRad));
 
-    auto normalizeVec = [](const float3& v) {
-        float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-        if (len < 1e-6f) {
-            return make_float3(0.0f, 0.0f, 0.0f);
-        }
-        float inv = 1.0f / len;
-        return make_float3(v.x * inv, v.y * inv, v.z * inv);
-    };
-
-    auto crossVec = [](const float3& a, const float3& b) {
-        return make_float3(a.y * b.z - a.z * b.y,
-                           a.z * b.x - a.x * b.z,
-                           a.x * b.y - a.y * b.x);
-    };
-
-    auto dotVec = [](const float3& a, const float3& b) {
-        return a.x * b.x + a.y * b.y + a.z * b.z;
-    };
-
-    float3 cameraPos = make_float3(camX, camY, camZ);
-    float3 forward = normalizeVec(make_float3(-camX, -camY, -camZ));
-    if (forward.x == 0.0f && forward.y == 0.0f && forward.z == 0.0f) {
-        forward = make_float3(0.0f, -1.0f, 0.0f);
+    // Fill scales roughly with 1/distance, so a few steps frame the whole tile at targetFill
+    float distance = 0.6f;
+    PinholeCamera camera = makeCamera(aim, azimuth, tilt, roll, distance, tanHalfFovY, photoWidth, photoHeight);
+    for (int i = 0; i < 8; ++i) {
+        distance *= tileFrameFill(camera) / targetFill;
+        camera = makeCamera(aim, azimuth, tilt, roll, distance, tanHalfFovY, photoWidth, photoHeight);
     }
-
-    float3 worldUp = make_float3(0.0f, 1.0f, 0.0f);
-    if (std::fabs(dotVec(forward, worldUp)) > 0.99f) {
-        worldUp = make_float3(0.0f, 0.0f, 1.0f);
-    }
-
-    float3 right = normalizeVec(crossVec(worldUp, forward));
-    if (right.x == 0.0f && right.y == 0.0f && right.z == 0.0f) {
-        worldUp = make_float3(0.0f, 0.0f, 1.0f);
-        right = normalizeVec(crossVec(worldUp, forward));
-    }
-    float3 up = normalizeVec(crossVec(forward, right));
 
     constexpr float kExposureJitterEV = 1.0f;
     std::uniform_real_distribution<float> exposureJitterDist(-kExposureJitterEV, kExposureJitterEV);
     const float exposureJitterEV = exposureJitterDist(rng);
-
-    constexpr float verticalFovDeg = 55.0f;
-    float tanHalfFovY = static_cast<float>(std::tan(verticalFovDeg * 0.5f * degToRad));
-    float aspectRatio = static_cast<float>(width) / static_cast<float>(height);
 
     launchShadeKernel(grid, block,
                       env.envTexture, env.specularTexture,
@@ -197,13 +231,16 @@ void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                       env.irradianceTexture, brdf.texture,
                       dAlbedo, dNormal,
                       dRoughness, dMetallic,
-                      dFrame,
-                      width, height, cameraPos, forward,
-                      right, up, tanHalfFovY, aspectRatio,
+                      dPhoto,
+                      photoWidth, photoHeight, width, height,
+                      camera.position, camera.forward,
+                      camera.right, camera.up, tanHalfFovY, camera.aspect,
                       enableShadows, enableCameraArtifacts, artifactSeed,
                       env.horizonBrightness,
                       env.zenithBrightness, env.hardness,
                       exposureJitterEV, stream);
+    CUDA_CHECK(cudaGetLastError());
+    launchRectifyKernel(dPhoto, camera, dFrame, width, height, stream);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaMemcpyAsync(hostFrameRGB, dFrame, frameBytes, cudaMemcpyDeviceToHost, stream));
     CUDA_CHECK(cudaStreamSynchronize(stream));

@@ -15,6 +15,10 @@ constexpr size_t kSlotMetallicBytesPerPixel = sizeof(float);
 constexpr size_t kSlotFrameBytesPerPixel = 3;
 constexpr size_t kSlotStagingBytesPerPixel = MaterialMaps::kBytesPerPixel;
 
+// Views are rendered as photos at kPhotoScale x the map size, then rectified down onto the map
+constexpr int kPhotoScale = 2;
+constexpr size_t kSlotPhotoBytesPerPixel = 3 * kPhotoScale * kPhotoScale;
+
 constexpr size_t kViewsPerSample = 3;
 constexpr size_t kOutputBytesPerPixel = 3;
 
@@ -29,7 +33,7 @@ constexpr int kMaxResLimit = 16384;
 constexpr size_t slotBytesPerPixel() {
     return kSlotAlbedoBytesPerPixel + kSlotNormalBytesPerPixel +
            kSlotRoughnessBytesPerPixel + kSlotMetallicBytesPerPixel +
-           kSlotFrameBytesPerPixel + kSlotStagingBytesPerPixel;
+           kSlotFrameBytesPerPixel + kSlotStagingBytesPerPixel + kSlotPhotoBytesPerPixel;
 }
 
 // Slot buffers are flat, so capacity is a pixel count rather than a width and height

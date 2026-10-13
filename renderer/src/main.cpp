@@ -82,6 +82,7 @@ struct GPUMemorySlot {
     float* dRoughness = nullptr;
     float* dMetallic = nullptr;
     uint8_t* dFrame = nullptr;
+    uint8_t* dPhoto = nullptr;
     uint8_t* dMaterialStaging = nullptr;
     uint8_t* hMaterialStaging = nullptr; // pinned
     uint8_t* hFrames = nullptr; // pinned
@@ -99,6 +100,7 @@ GPUMemorySlot allocateGPUSlot(size_t pixelCount) {
     CUDA_CHECK(cudaMalloc(&slot.dRoughness, pixelCount * kSlotRoughnessBytesPerPixel));
     CUDA_CHECK(cudaMalloc(&slot.dMetallic, pixelCount * kSlotMetallicBytesPerPixel));
     CUDA_CHECK(cudaMalloc(&slot.dFrame, pixelCount * kSlotFrameBytesPerPixel));
+    CUDA_CHECK(cudaMalloc(&slot.dPhoto, pixelCount * kSlotPhotoBytesPerPixel));
     CUDA_CHECK(cudaMalloc(&slot.dMaterialStaging, pixelCount * kSlotStagingBytesPerPixel));
     CUDA_CHECK(cudaHostAlloc(reinterpret_cast<void**>(&slot.hMaterialStaging),
                              pixelCount * kPinnedStagingBytesPerPixel, cudaHostAllocDefault));
@@ -113,6 +115,7 @@ void freeGPUSlot(const GPUMemorySlot& slot) {
     cudaFree(slot.dRoughness);
     cudaFree(slot.dMetallic);
     cudaFree(slot.dFrame);
+    cudaFree(slot.dPhoto);
     cudaFree(slot.dMaterialStaging);
     cudaFreeHost(slot.hMaterialStaging);
     cudaFreeHost(slot.hFrames);
@@ -521,7 +524,7 @@ void renderThread(PipelineQueues& queues,
             renderPlane(environments[req.environmentIndex], brdfLut,
                         req.gpuSlot.dAlbedo, req.gpuSlot.dNormal,
                         req.gpuSlot.dRoughness, req.gpuSlot.dMetallic,
-                        req.gpuSlot.dFrame,
+                        req.gpuSlot.dPhoto, req.gpuSlot.dFrame,
                         req.width, req.height, hostFrame, stream,
                         req.enableShadows, req.enableCameraArtifacts, req.artifactSeed);
             res.frames[j] = hostFrame;
@@ -876,8 +879,9 @@ int main(int argc, char** argv) {
 
         // GPU Memory per slot (512x512)
         // Albedo (float4) + Normal (float4) + Roughness (float) + Metallic (float) + Frame (RGB8) + Staging (10 x uint8)
-        // (4 + 4 + 1 + 1) * 4 + 3 + 10 = 53 bytes per pixel
-        // 53 * 262,144 = 13,893,632 bytes (~13.25 MB; ~212 MB at 2048x2048)
+        // + Photo (RGB8 at 2x the map size)
+        // (4 + 4 + 1 + 1) * 4 + 3 + 10 + 12 = 65 bytes per pixel
+        // 65 * 262,144 = 17,039,360 bytes (~16.25 MB; ~260 MB at 2048x2048)
         const size_t memoryPerBatchItemGPU = slotBytes(slotPixels);
 
         const PipelineDepthChoice pipeline = choosePipelineDepth(availableRam, memoryPerBatchItemCPU,

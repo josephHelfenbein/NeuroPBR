@@ -175,11 +175,11 @@ BRDFLookupTable createBRDFLUT(unsigned size);
 
 void loadBRDFLUT(BRDFLookupTable& lut);
 
-// Blocks until the frame is in hostFrameRGB (which should be pinned)
+// Renders a photo into dPhoto, rectifies it into dFrame and blocks until it's in hostFrameRGB (should be pinned)
 void renderPlane(const EnvironmentCubemap& env, const BRDFLookupTable& brdf,
                  const float4* dAlbedo, const float4* dNormal,
                  const float* dRoughness, const float* dMetallic,
-                 uint8_t* dFrame,
+                 uint8_t* dPhoto, uint8_t* dFrame,
                  int width, int height, uint8_t* hostFrameRGB,
                  cudaStream_t stream,
                  bool enableShadows = false,

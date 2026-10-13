@@ -1,7 +1,7 @@
 #pragma once
 
 // sRGB byte to linear. Table because powf is inexact under --use_fast_math.
-// Not __constant__ since neighbouring threads read different entries.
+// Not __constant__ since neighboring threads read different entries
 
 #include <cuda_runtime.h>
 #include <cstdint>

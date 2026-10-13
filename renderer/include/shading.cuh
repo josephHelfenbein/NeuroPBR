@@ -3,13 +3,15 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
+#include <camera.cuh>
+
 extern "C" __global__
 void shadeKernel(cudaTextureObject_t envTex, cudaTextureObject_t specularTex,
              int specularMipLevels, cudaTextureObject_t irradianceTex,
              cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
              const float4* __restrict__ normal, const float* __restrict__ roughness,
              const float* __restrict__ metallic, uint8_t* __restrict__ outRGB,
-                 int width, int height, float3 cameraPos,
+                 int width, int height, int texWidth, int texHeight, float3 cameraPos,
                  float3 cameraForward, float3 cameraRight,
                  float3 cameraUp, float tanHalfFovY, float aspect,
                  bool enableShadows, bool enableCameraArtifacts,
@@ -24,7 +26,7 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        cudaTextureObject_t brdfLutTex, const float4* __restrict__ albedo,
                        const float4* __restrict__ normal, const float* __restrict__ roughness,
                        const float* __restrict__ metallic, uint8_t* __restrict__ outRGB,
-                       int width, int height, float3 cameraPos,
+                       int width, int height, int texWidth, int texHeight, float3 cameraPos,
                        float3 cameraForward, float3 cameraRight,
                        float3 cameraUp, float tanHalfFovY, float aspect,
                        bool enableShadows, bool enableCameraArtifacts,
@@ -32,3 +34,10 @@ void launchShadeKernel(dim3 gridDim, dim3 blockDim,
                        float horizonBrightness,
                        float zenithBrightness, float hardness,
                        float exposureJitterEV, cudaStream_t stream);
+
+extern "C" __global__
+void rectifyKernel(const uint8_t* __restrict__ photoRGB, PinholeCamera camera,
+                   uint8_t* __restrict__ outRGB, int texWidth, int texHeight);
+
+void launchRectifyKernel(const uint8_t* photoRGB, const PinholeCamera& camera,
+                         uint8_t* outRGB, int texWidth, int texHeight, cudaStream_t stream);

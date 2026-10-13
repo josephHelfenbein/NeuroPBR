@@ -11,7 +11,7 @@ __host__ __device__ inline float luminanceRec709(float3 c) {
 
 constexpr float kExposureMinRadiance = 1e-4f;
 
-// Scales so an 18% grey surface facing up renders at 0.18
+// Scales so an 18% gray surface facing up renders at 0.18
 __host__ __device__ inline float exposureScale(float3 irradianceUp, float jitterEV) {
     const float whiteRadiance = luminanceRec709(irradianceUp) / kColorPi;
     return exp2f(jitterEV) / fmaxf(whiteRadiance, kExposureMinRadiance);
